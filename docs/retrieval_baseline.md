@@ -1163,3 +1163,58 @@ reports: `data/tuning_v6_before.md`, `data/tuning_v6_after.md`.
 
 `python -m pytest -m "not integration" -p no:warnings` is green (809+
 tests). `python -m ruff check .` is clean.
+
+## Baseline v7 -- worker batching (measured, no product code changed)
+
+Measured commit `ef4c332` (`multi` op + `research.py` batching) against
+Baseline v6 using the identical command: `python -m
+eval.run_retrieval_eval --registry config/archives.simplewiki_only.toml
+--questions eval/questions/simplewiki_questions.jsonl --split tuning`,
+real archive at `C:\kiwix\`, run twice (`data/tuning_v7_run1.md`,
+`data/tuning_v7_run2.md`; a concurrent unit-test suite may have added CPU
+noise -- both runs land within 0.01 s of each other, so noise looks
+negligible here).
+
+| metric | v6 (before) | v7 run1 | v7 run2 |
+|---|---|---|---|
+| recall@1 | 0.595 | 0.595 | 0.595 |
+| recall@3 | 0.690 | 0.690 | 0.690 |
+| recall@5 | 0.762 | 0.762 | 0.762 |
+| MRR | 0.645 | 0.645 | 0.645 |
+| mean latency (s) | 1.297 | 1.309 | 1.319 |
+| p95 latency (s) | 3.125 | 3.141 | 3.187 |
+
+Recall@k/MRR are **measured, byte-identical** to v6 overall and per
+category (all 8 categories match to 3 decimals) -- no changed questions.
+p50 is not a metric the harness exports (mean/p95 only, per
+`eval/run_retrieval_eval.py`); not reported rather than inferred.
+
+**Target NOT met**: mean latency 1.31 s vs the <=1.0 s acceptance bar,
+and slightly *higher* than v6's 1.297 s (within run-to-run noise, not an
+improvement). Status counts (`data/status_counts_v7.py`, spawn-safe, real
+archive, n=42): `{'ok': 39, 'empty': 3}` -- zero `partial`/deadline-hit
+responses, same shape as prior baselines (2 `absent` + 1 unanswerable
+`false_premise` item legitimately return no passages).
+
+Stage breakdown (`data/profile_one_query_v7.py`, cProfile, warm cache,
+real archive, same helium query as v5's profile, measured twice --
+1.953 s and 1.957 s elapsed, both times): **9 worker round-trips**, down
+from v5's 20, but `_winapi.WaitForMultipleObjects` (IPC wait) is still
+1.492-1.497 s of ~1.95 s elapsed, i.e. **~76%**, unchanged from the v5
+baseline share. Round-trip count dropped by >50% but wall time did not
+drop with it: batching removed per-op pipe/dispatch overhead, but most of
+the wait is the child actually executing libzim search work
+sequentially inside each batched call, not queue/dispatch overhead
+between calls -- so fewer, fatter round-trips still block on the same
+total amount of in-process libzim time. This is a real, honestly-reported
+miss, not a regression: recall is unchanged and no deadline/partial
+behavior appeared.
+
+### Acceptance criteria -- status
+
+- Tuning mean latency <=1.0 s warm: **NOT met** (1.31 s, both runs).
+- Recall@k/MRR identical to baseline per-question: **met** (byte-identical
+  aggregate and per-category; no changed questions).
+- Deadlines still enforced: **met** (0 partial/deadline statuses, both
+  before and after).
+- IPC-wait share vs 76% baseline: **unchanged**, ~76% (measured).
