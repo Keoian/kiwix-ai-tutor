@@ -1092,3 +1092,74 @@ run, no failures; the handful of `tests/test_prompt_builder.py` /
 concurrent `tutor/app/**` agent were not present in this run either).
 `python -m ruff check .` is clean for every file this task touched
 (`tutor/retrieval/research.py`, `tests/test_research.py`).
+
+## Baseline v6: infobox key facts (2026-09-20)
+
+Real-failure fix, orchestrator-verified against the live archive: for
+"Output the boiling point of helium in celsius and farenheit.",
+`research()` ranked the Helium article first and packed 6 passages, but
+NONE contained the boiling-point figure -- `build_bundle()` on Helium
+yields infobox pairs including `('Boiling point', '4.222 K (-268.928 °C,
+-452.070 °F)')` and that line IS in `bundle.text`'s synthetic "Infobox"
+section, but the ~400-char infobox chunk carrying it lost the packing
+competition (a 38-line infobox split into several prose-poor chunks,
+per-article diversity cap 2, BM25 favouring prose passages elsewhere).
+
+Fix: `tutor.retrieval.hybrid.passages.build_key_fact_passages` scans
+`bundle.infobox` directly (not the chunked passage pool) for rows whose
+label shares an own content term of the question, and emits one
+citation-safe passage per contiguous run of matching rows (still honouring
+`bundle.text[start:end] == text`). `ResearchEngine._process_archive` builds
+these only for the top-2 scored articles per archive; `research()` packs
+them FIRST (as S1, S2, ...), exempt from the per-article diversity cap and
+the relevance-fraction cutoff, but still inside the token budget and with
+the max-passages cap raised by at most 2 (the number of key-fact passages
+added). No infobox, or no matching row, is a no-op -- behavior is
+otherwise byte-identical to Baseline v5.
+
+### Real-archive check (`data/keyfacts_realcheck_v6.py`)
+
+All three helium phrasings now carry the figure as S1:
+
+```
+[PASS] contains 268.928 in S1/S2: 'Output the boiling point of helium in celsius and farenheit.'
+[PASS] contains 268.928 in S1/S2: 'What is the boiling point of helium in celsius and fahrenheit?'
+[PASS] contains 268.928 in S1/S2: 'boiling point of helium'
+S1 Helium :: Melting point: 0.95 K  (-272.20 °C,  -457.96 °F) (at 2.5 MPa)
+Boiling point: 4.222 K  (-268.928 °C,  -452.070 °F)
+```
+
+Two other tuning-set quantity spot-checks ("How many legs does a snake
+have?", "Please tell me about the speed of sound in air.") are unaffected
+-- neither article's infobox has a row matching the question's own terms,
+so no key-fact passage is added and the normal ranked passages are
+returned unchanged.
+
+### Tuning before/after (`eval/questions/simplewiki_questions.jsonl`, tuning split, n=42)
+
+Measured with `data/keyfacts_packet_stats_v6.py` (mean passages/tokens) and
+`eval.run_retrieval_eval` (recall/MRR/latency; "before" run made by
+temporarily monkeypatching `build_key_fact_passages` to `[]` for the
+measurement only -- no production code was reverted/changed for it):
+
+| metric | before | after |
+|---|---|---|
+| recall@1 | 0.571 | 0.595 |
+| recall@3 | 0.667 | 0.690 |
+| recall@5 | 0.762 | 0.762 |
+| MRR | 0.622 | 0.645 |
+| mean latency (s) | 1.307 | 1.297 |
+| p95 latency (s) | 3.219 | 3.125 |
+| mean passages/packet | 5.262 | 5.643 |
+| mean tokens/packet | 523.7 | 545.6 |
+
+recall@1/@5/MRR did not drop (recall@1 and MRR improved; recall@5
+unchanged); latency is flat. One category (`comparison`, n=5) shows
+recall@5 0.800 vs 1.000 before -- a single-question shift, not a
+regression in the overall metrics the acceptance criterion covers. Full
+reports: `data/tuning_v6_before.md`, `data/tuning_v6_after.md`.
+
+### Full suite / lint
+
+`python -m pytest -m "not integration" -p no:warnings` is green (809+
+tests). `python -m ruff check .` is clean.

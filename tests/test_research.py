@@ -669,7 +669,7 @@ def test_fallback_prefers_rare_term_article_over_common_term_articles(
     registry = load_registry(registry_toml)
     engine = _engine(registry_toml, snapshot_store, tmp_path)
     entry = registry.for_subject(None)[0]
-    candidates, _timed_out, _note = engine._process_archive(
+    candidates, _timed_out, _note, _key_facts = engine._process_archive(
         entry, "hypotenuse school", lambda: 5.0
     )
     assert candidates, "expected fallback candidates"
@@ -842,7 +842,7 @@ def test_helium_article_scoring_ranks_helium_first(
         worker_factory=lambda path: _EntityFakeWorker(path),
     )
     entry = registry.for_subject(None)[0]
-    candidates, _timed_out, _note = engine._process_archive(entry, query, lambda: 5.0)
+    candidates, _timed_out, _note, _key_facts = engine._process_archive(entry, query, lambda: 5.0)
     titles = _titles_by_rank(candidates)
     assert titles[0] == "Helium", titles
 

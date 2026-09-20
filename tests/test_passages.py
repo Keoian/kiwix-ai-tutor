@@ -9,7 +9,7 @@ offline_tutor_kiwix_reuse_plan.md line ~1293-1310.
 
 from __future__ import annotations
 
-from tutor.retrieval.hybrid.passages import split_passages
+from tutor.retrieval.hybrid.passages import build_key_fact_passages, split_passages
 from tutor.retrieval.zim.bundle import build_bundle
 
 FINGERPRINT = "deadbeef" * 8  # 64 hex chars, arbitrary stand-in digest
@@ -217,6 +217,112 @@ def test_passage_id_changes_with_text_hash():
     sec_a = next(p for p in pa if "Section One" in p.heading_path)
     sec_b = next(p for p in pb if "Section One" in p.heading_path)
     assert sec_a.passage_id != sec_b.passage_id
+
+
+HELIUM_HTML = """
+<html><head><title>Helium</title></head><body>
+<h1>Helium</h1>
+<table class="infobox">
+<tr><th>Symbol</th><td>He</td></tr>
+<tr><th>Melting point</th><td>0.95 K</td></tr>
+<tr><th>Boiling point</th><td>4.222 K (-268.928 C, -452.070 F)</td></tr>
+<tr><th>Density</th><td>0.1786 g/L</td></tr>
+<tr><th>Discovered by</th><td>Pierre Janssen</td></tr>
+</table>
+<h2>Overview</h2>
+<p>Helium is a chemical element that is a colourless, odourless gas.</p>
+</body></html>
+"""
+
+NO_INFOBOX_HTML = SIMPLE_HTML
+
+
+def test_key_fact_single_line_match():
+    b = _bundle(HELIUM_HTML, path="helium", title="Helium")
+    passages = build_key_fact_passages(
+        b, frozenset({"boiling"}), fingerprint_digest=FINGERPRINT, archive_id=ARCHIVE_ID
+    )
+    assert len(passages) == 1
+    p = passages[0]
+    assert p.text == "Boiling point: 4.222 K (-268.928 C, -452.070 F)"
+    assert p.heading_path == ("Infobox",)
+    assert b.text[p.start:p.end] == p.text
+
+
+def test_key_fact_no_match_returns_empty():
+    b = _bundle(HELIUM_HTML, path="helium", title="Helium")
+    passages = build_key_fact_passages(
+        b, frozenset({"xylophone"}), fingerprint_digest=FINGERPRINT, archive_id=ARCHIVE_ID
+    )
+    assert passages == []
+
+
+def test_key_fact_no_infobox_returns_empty():
+    b = _bundle(NO_INFOBOX_HTML)
+    passages = build_key_fact_passages(
+        b, frozenset({"section"}), fingerprint_digest=FINGERPRINT, archive_id=ARCHIVE_ID
+    )
+    assert passages == []
+
+
+def test_key_fact_multi_line_run_is_one_passage():
+    # "point" matches both "Melting point" and "Boiling point", which are
+    # adjacent infobox rows -- one contiguous passage, not two.
+    b = _bundle(HELIUM_HTML, path="helium", title="Helium")
+    passages = build_key_fact_passages(
+        b, frozenset({"point"}), fingerprint_digest=FINGERPRINT, archive_id=ARCHIVE_ID
+    )
+    assert len(passages) == 1
+    p = passages[0]
+    assert p.text == "Melting point: 0.95 K\nBoiling point: 4.222 K (-268.928 C, -452.070 F)"
+    assert b.text[p.start:p.end] == p.text
+
+
+def test_key_fact_non_contiguous_matches_yield_separate_passages():
+    # "Symbol" and "Discovered by" both match on "d"-free terms picked so
+    # they are non-adjacent rows -- two separate runs/passages.
+    b = _bundle(HELIUM_HTML, path="helium", title="Helium")
+    passages = build_key_fact_passages(
+        b,
+        frozenset({"symbol", "discovered"}),
+        fingerprint_digest=FINGERPRINT,
+        archive_id=ARCHIVE_ID,
+    )
+    assert len(passages) == 2
+    assert passages[0].text == "Symbol: He"
+    assert passages[1].text == "Discovered by: Pierre Janssen"
+    for p in passages:
+        assert b.text[p.start:p.end] == p.text
+
+
+def test_key_fact_offsets_round_trip_for_all_rows():
+    b = _bundle(HELIUM_HTML, path="helium", title="Helium")
+    all_terms = frozenset(
+        {"symbol", "melting", "boiling", "point", "density", "discovered"}
+    )
+    passages = build_key_fact_passages(
+        b, all_terms, fingerprint_digest=FINGERPRINT, archive_id=ARCHIVE_ID
+    )
+    assert passages
+    for p in passages:
+        assert b.text[p.start:p.end] == p.text
+        assert p.passage_id and len(p.passage_id) == 32
+
+
+def test_key_fact_max_lines_budget_respected():
+    b = _bundle(HELIUM_HTML, path="helium", title="Helium")
+    all_terms = frozenset(
+        {"symbol", "melting", "boiling", "point", "density", "discovered"}
+    )
+    passages = build_key_fact_passages(
+        b,
+        all_terms,
+        fingerprint_digest=FINGERPRINT,
+        archive_id=ARCHIVE_ID,
+        max_lines=2,
+    )
+    total_lines = sum(p.text.count("\n") + 1 for p in passages)
+    assert total_lines <= 2
 
 
 def test_passage_id_changes_with_span():

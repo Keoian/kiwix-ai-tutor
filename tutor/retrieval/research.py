@@ -40,7 +40,7 @@ from tutor.retrieval.hybrid.lexical import (
     tokenize,
 )
 from tutor.retrieval.hybrid.packer import estimate_tokens, pack
-from tutor.retrieval.hybrid.passages import split_passages
+from tutor.retrieval.hybrid.passages import build_key_fact_passages, split_passages
 from tutor.retrieval.hybrid.ranking import (
     RankingFlags,
     apply_heading_affinity,
@@ -767,7 +767,7 @@ class ResearchEngine:
         keywords: list[str] | None = None,
         topic_hint: str | None = None,
         query_vec: Sequence[float] | None = None,
-    ) -> tuple[list[dict[str, Any]], bool, str | None]:
+    ) -> tuple[list[dict[str, Any]], bool, str | None, list[dict[str, Any]]]:
         worker = self._get_worker(entry)
         timed_out = False
 
@@ -1030,7 +1030,7 @@ class ResearchEngine:
         dense_paths, dense_note = self._dense_hits_for(entry, query_vec)
 
         if not fulltext_hits and not title_hits and not dense_paths:
-            return [], timed_out, dense_note
+            return [], timed_out, dense_note, []
 
         # Baseline v5: a 4th ranking -- ARTICLE SCORING (``_score_articles``)
         # -- is fused alongside the reuse plan's three (dense semantic
@@ -1103,6 +1103,15 @@ class ResearchEngine:
 
         fingerprint_digest = self._fingerprint_digest(entry)
 
+        # Baseline v6 ("infobox key facts"): the top-2 SCORED articles for
+        # this archive (``top_paths``, already fused/scored above) get their
+        # bundle kept around so key-fact passages can be built from it below
+        # -- these bypass BM25/diversity/relevance-cutoff entirely (see
+        # ``research()``), so they must never be built for a low-ranked
+        # article that merely happened to be fetched.
+        key_fact_top_paths = top_paths[:2]
+        key_fact_bundles: dict[str, Any] = {}
+
         candidate_passages: list[Any] = []
         for path in top_paths:
             if remaining() <= 0:
@@ -1115,12 +1124,43 @@ class ResearchEngine:
                 continue
             fetched = fetch_res.value
             bundle = build_bundle(fetched.html, path=fetched.path, title=fetched.title)
+            if path in key_fact_top_paths:
+                key_fact_bundles[path] = bundle
             candidate_passages.extend(
                 split_passages(bundle, fingerprint_digest=fingerprint_digest, archive_id=entry.id)
             )
 
+        own_terms_for_key_facts = frozenset(tokenize(strip_instruction_words(query)))
+        key_fact_results: list[dict[str, Any]] = []
+        for path in key_fact_top_paths:
+            b = key_fact_bundles.get(path)
+            if b is None:
+                continue
+            for kf in build_key_fact_passages(
+                b,
+                own_terms_for_key_facts,
+                fingerprint_digest=fingerprint_digest,
+                archive_id=entry.id,
+            ):
+                key_fact_results.append(
+                    {
+                        "passage_id": kf.passage_id,
+                        "archive_id": kf.archive_id,
+                        "title": kf.title,
+                        "path": kf.path,
+                        "heading_path": kf.heading_path,
+                        "text": kf.text,
+                        "start": kf.start,
+                        "end": kf.end,
+                        "score": float("inf"),
+                        "kind": entry.kind,
+                        "used_fallback": used_fallback,
+                        "sources": ("lexical",),
+                    }
+                )
+
         if not candidate_passages:
-            return [], timed_out, dense_note
+            return [], timed_out, dense_note, key_fact_results
 
         tokenized_query = tokenize(query) + topic_hint_tokens
         bm25 = BM25([tokenize(p.text) for p in candidate_passages])
@@ -1165,7 +1205,7 @@ class ResearchEngine:
                     "sources": tuple(sorted(sources)),
                 }
             )
-        return results, timed_out, dense_note
+        return results, timed_out, dense_note, key_fact_results
 
     def research(
         self,
@@ -1205,6 +1245,7 @@ class ResearchEngine:
 
         consulted: list[dict[str, Any]] = []
         candidates: list[dict[str, Any]] = []
+        key_fact_candidates: list[dict[str, Any]] = []
         any_timeout = False
         query_terms = _query_terms(query, topic_hint)
         coverage_terms = _coverage_terms(query, topic_hint)
@@ -1248,7 +1289,7 @@ class ResearchEngine:
                     any_timeout = True
                     break
                 consulted.append({"id": entry.id, "storage": entry.storage, "tier": entry.tier})
-                cands, timed_out, dense_note = self._process_archive(
+                cands, timed_out, dense_note, key_facts = self._process_archive(
                     entry,
                     query,
                     remaining,
@@ -1262,6 +1303,7 @@ class ResearchEngine:
                 if any(c.get("sources") and "dense" in c["sources"] for c in cands):
                     dense_used = True
                 candidates.extend(cands)
+                key_fact_candidates.extend(key_facts)
 
         _consult(primary_archives)
 
@@ -1315,8 +1357,23 @@ class ResearchEngine:
             max_passages=self._packing_max_passages,
             quantity_query=_asks_for_quantity(query),
         )
+        # Baseline v6 ("infobox key facts"): key-fact passages (already
+        # restricted to the top-2 scored articles per archive when they
+        # were built -- see ``_process_archive``) are packed FIRST, ahead
+        # of the normally-ranked passages, and are exempt from the
+        # diversity cap and relevance-fraction cutoff above -- but they
+        # still count against the token budget, and the max-passages cap
+        # is only raised by however many of them there are (max +2).
+        seen_key_fact_ids: set[str] = set()
+        unique_key_facts: list[dict[str, Any]] = []
+        for kf in key_fact_candidates:
+            if kf["passage_id"] not in seen_key_fact_ids:
+                seen_key_fact_ids.add(kf["passage_id"])
+                unique_key_facts.append(kf)
+        unique_key_facts = unique_key_facts[:2]
+        combined_passages = [*unique_key_facts, *cutoff_passages]
         budget = budget_tokens if budget_tokens is not None else self._default_budget_tokens
-        packed = pack(cutoff_passages, budget_tokens=budget, count_tokens=estimate_tokens)
+        packed = pack(combined_passages, budget_tokens=budget, count_tokens=estimate_tokens)
 
         coverage = _best_coverage(packed, coverage_terms, topic_hint_terms, own_term_count)
 
