@@ -81,6 +81,12 @@ class AppConfig:
     port: int
     data_dir: Path
     registry_path: Path
+    prompt_variant: str = "current"
+    """Selects a prompt-assembly variant by name (default: ``"current"``,
+    today's shipped behaviour, byte-identical prompt). See
+    ``eval.system_prompt_variants.VARIANTS`` and
+    ``tutor.app.seed_exchange.SEED_EXCHANGE_VARIANT`` for the only other
+    registered value so far."""
 
 
 @dataclass(frozen=True)
@@ -271,6 +277,7 @@ def load_config(path: Path) -> Config:
         port=_app_int("port", 8420),
         data_dir=_app_path("data_dir", "data"),
         registry_path=_app_path("registry_path", "config/archives.dev.toml"),
+        prompt_variant=_app_str("prompt_variant", "current"),
     )
 
     # [embedding] is optional, like [app]; when present every key is

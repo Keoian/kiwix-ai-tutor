@@ -54,6 +54,16 @@ VARIANTS: dict[str, dict] = {
     "baseline": {
         "system_text": _BASELINE_SYSTEM_TEXT,
     },
+    # HANDOFF.md Task 3 / docs/citation_experiment.md: seeds a brand-new
+    # session with tutor.app.seed_exchange's fixed, one-off cited example
+    # (a two-sentence answer with [S0] attached to the sentence it
+    # supports, plus one calc unit-conversion use) before the real
+    # question is asked. Off by default everywhere else; only this named
+    # variant turns it on for `eval.run_turn_eval`.
+    "seed_exchange_s0": {
+        "system_text": _BASELINE_SYSTEM_TEXT,
+        "seed_exchange": True,
+    },
     "a_evidence_reminder": {
         "system_text": _BASELINE_SYSTEM_TEXT,
         "render_evidence_fn": _render_evidence_with_reminder,

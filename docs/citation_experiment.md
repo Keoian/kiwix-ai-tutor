@@ -341,3 +341,59 @@ behavior needs to be checked again there, but the working hypothesis is
 that this is a quantization/capability ceiling of the current 1-bit-8B
 model on citation-following, not a host-prompt-wording problem the
 current levers can still move.
+
+## 2026-09-20 Task 3: seed-exchange variant (built, not yet measured)
+
+Added an OFF-by-default prompt variant, `seed_exchange_s0`
+(`tutor.app.seed_exchange`), that seeds a brand-new lesson with one fixed
+synthetic exchange before the first real turn: a student question, an
+evidence passage labelled `[S0]`, a two-sentence answer with `[S0]`
+attached to the specific sentence it supports (not trailing the
+paragraph), and one `calc` tool use for a m/s -> km/h unit conversion
+whose result is used in the answer. Pitched at a 10-16 year-old
+(thunder/lightning + sound speed).
+
+Implementation, test-first (`tests/test_seed_exchange.py`):
+- `tutor.app.prompt.PromptLog` gained `append_seed`, a dedicated `_seed`
+  list distinct from `_turns`: set at most once, before any real turn,
+  rendered right after the system message, and never touched by
+  `evict()` -- so it is never evicted, never reordered, and trivially
+  byte-identical across every subsequent turn. Its tokens are still
+  counted by `tokens_used()` like any other message, so its cost is
+  accounted for in the same `budget.system + budget.history` ceiling
+  `evict()` already enforces.
+- `tutor.app.citations.RESERVED_SEED_LABEL` ("S0") is refused
+  unconditionally by `resolve_citations` (always `unresolved=True`, even
+  if a passage happens to be labelled "S0") and excluded from
+  `attribute_sentences`' `by_label` lookup, so it can never resolve to a
+  passage, open the source viewer, or receive a sentence attribution.
+  Real evidence numbering (`Session.allocate_label`) starts at S1 and
+  never collides with it.
+- The seed is off by default: `[app] prompt_variant` (new `AppConfig`
+  field, default `"current"`) must equal
+  `tutor.app.seed_exchange.SEED_EXCHANGE_VARIANT` for
+  `tutor.app.compose.build_deps`/`_SessionStore.create_for_lesson` to
+  call `seed_session` on a brand-new lesson; an unseeded log's `render()`
+  is unchanged (byte-identical to before this change). `seed_session`
+  never calls `session.retain_passages` for the S0 passage and never goes
+  through `LessonStore.append_turn`/`persist_turn`, so it is never a
+  citable passage for a real question and never shows up as a persisted
+  student turn or in the live SSE transcript (it is injected directly
+  into the log, not emitted).
+- Registered for `eval/run_turn_eval.py` as `seed_exchange_s0` in
+  `eval/system_prompt_variants.VARIANTS` (`"seed_exchange": True`,
+  threaded through `run_variant`'s `make_session()` step).
+
+**Not yet measured** (build-only task; live measurement is a follow-up).
+To measure against the same 18 tuning questions used for RUN A/RUN C
+above:
+
+```powershell
+python -m eval.run_turn_eval --registry config/archives.simplewiki_only.toml `
+  --questions eval/questions/simplewiki_questions.jsonl --split tuning `
+  --categories direct,why_how,student_phrasing --n 18 `
+  --variants current,seed_exchange_s0
+```
+
+Adopt only if `supported_citation_rate` improves by >= 0.15 over
+`current` without raising `evidence_dump_rate`, per the task brief's gate.

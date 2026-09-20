@@ -61,6 +61,14 @@ def _rebuild_prompt_log(count_tokens: Callable[[str], int], entries: list[dict])
         log._system = dict(entries[0])
         i = 1
 
+    # Seed exchange: a fixed run of entries marked "seed": True, appended
+    # once before any real turn (tutor.app.prompt.PromptLog.append_seed).
+    seed_entries: list[dict] = []
+    while i < len(entries) and entries[i].get("seed"):
+        seed_entries.append(dict(entries[i]))
+        i += 1
+    log._seed = seed_entries
+
     # Protected passages: tool messages (one passage each) that precede
     # the first user turn.
     while i < len(entries) and entries[i].get("role") == "tool" and "passages" in entries[i]:

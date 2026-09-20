@@ -192,12 +192,20 @@ class _SessionStore:
     ``create() -> str``, ``get(session_id) -> Session | None``, and
     ``set_subject(session_id, subject) -> bool``."""
 
-    def __init__(self, count_tokens) -> None:
+    def __init__(self, count_tokens, *, seed_exchange: bool = False) -> None:
         self._count_tokens = count_tokens
         self._sessions: dict[str, Session] = {}
         self._lesson_by_session: dict[str, str] = {}
         self._counter = 0
         self._lock = threading.Lock()
+        # Off by default (docs/citation_experiment.md Task 3): only true
+        # when ``[app] prompt_variant`` selects
+        # ``tutor.app.seed_exchange.SEED_EXCHANGE_VARIANT``. A brand-new
+        # lesson's session then gets the fixed synthetic seed exchange
+        # before any real turn; a resumed lesson's log already carries
+        # (or doesn't carry) whatever it was seeded with at creation, so
+        # this flag is never applied on resume.
+        self._seed_exchange = seed_exchange
 
     def create(self) -> str:
         with self._lock:
@@ -219,6 +227,10 @@ class _SessionStore:
         lesson, no prior turns): every completed turn on this session is
         then persisted into ``lessons`` by the turn runner."""
         session = lessons.new_session(lesson_id, count_tokens=self._count_tokens)
+        if self._seed_exchange:
+            from tutor.app.seed_exchange import seed_session
+
+            seed_session(session)
         return self._register(session, lesson_id)
 
     def resume_lesson(self, lessons: Any, lesson_id: str) -> str:
@@ -537,7 +549,10 @@ def build_deps(cfg: Any, *, llm: Any = None, research_engine: Any = None) -> App
         )
 
     count_tokens = _make_count_tokens(llm)
-    sessions = _SessionStore(count_tokens)
+    from tutor.app.seed_exchange import SEED_EXCHANGE_VARIANT
+
+    prompt_variant = getattr(cfg.app, "prompt_variant", "current")
+    sessions = _SessionStore(count_tokens, seed_exchange=prompt_variant == SEED_EXCHANGE_VARIANT)
     calc = _CalcTool()
     budget = Budget.for_ceiling(cfg.server.ctx_size)
 

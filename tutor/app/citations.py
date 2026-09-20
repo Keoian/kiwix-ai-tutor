@@ -58,6 +58,14 @@ _DUMP_CONTAINMENT_FRACTION = 0.80
 _MIN_DUMPED_BULLETS = 3
 _MIN_STACKED_LABELS = 4
 
+# Reserved label for the synthetic seed exchange (tutor.app.seed_exchange):
+# real evidence numbering always starts at S1 (Session.allocate_label), so
+# "S0" never names a real passage. The resolver refuses it unconditionally
+# (never resolves, never opens the source viewer) and attribute_sentences
+# never attributes a sentence to it, even if a caller's passage list
+# somehow contains an id labelled "S0".
+RESERVED_SEED_LABEL = "S0"
+
 
 @dataclass(frozen=True)
 class Citation:
@@ -179,11 +187,21 @@ def _dump_signal(text: str, packet_passages: list[dict]) -> tuple[bool, set[str]
 
 
 def resolve_citations(text: str, packet_passages: list[dict]) -> list[Citation]:
-    """Return one Citation per unique label referenced in ``text``."""
-    by_label = {p["label"]: p for p in packet_passages}
+    """Return one Citation per unique label referenced in ``text``.
+
+    ``RESERVED_SEED_LABEL`` ("S0") always resolves as unresolved, even if
+    ``packet_passages`` contains an entry labelled "S0" -- it is reserved
+    for the synthetic seed exchange and must never be citable for a real
+    question."""
+    by_label = {
+        p["label"]: p for p in packet_passages if p.get("label") != RESERVED_SEED_LABEL
+    }
     _, flagged_labels = _dump_signal(text, packet_passages)
     citations: list[Citation] = []
     for label in extract_labels(text):
+        if label == RESERVED_SEED_LABEL:
+            citations.append(Citation(label=label, unresolved=True, supported=False))
+            continue
         passage = by_label.get(label)
         if passage is None:
             citations.append(Citation(label=label, unresolved=True, supported=False))
@@ -349,7 +367,7 @@ def attribute_sentences(answer: str, passages: list[dict]) -> AttributionResult:
     in neither list. Pure function: ``answer`` is never modified and spans
     index the original string exactly.
     """
-    by_label = {p["label"]: p for p in passages}
+    by_label = {p["label"]: p for p in passages if p.get("label") != RESERVED_SEED_LABEL}
     attributions: list[Attribution] = []
     unbacked: list[UnbackedSpan] = []
 

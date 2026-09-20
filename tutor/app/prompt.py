@@ -118,6 +118,7 @@ class PromptLog:
     def __init__(self, count_tokens: Callable[[str], int]) -> None:
         self.count_tokens = count_tokens
         self._system: dict | None = None
+        self._seed: list[dict] = []
         self._turns: list[list[dict]] = []
         self._protected: list[dict] = []
         self._seen_ids: set[str] = set()
@@ -130,6 +131,22 @@ class PromptLog:
                 "system message must be the first entry and appended only once"
             )
         self._system = {"role": "system", "content": text}
+
+    def append_seed(self, entries: Iterable[dict]) -> None:
+        """Seed the lesson with a fixed synthetic exchange, appended once,
+        before any real turn. Distinct from ``_turns``: ``evict`` never
+        looks at ``self._seed``, so it is never evicted and never
+        reordered, and since it is set exactly once it is trivially
+        byte-identical across every subsequent turn of the lesson (part of
+        the append-only prefix, per the module docstring's byte-prefix
+        property). Each entry should carry ``"seed": True`` so callers
+        (the UI transcript builder, turn persistence) can recognize and
+        skip these messages -- they are never a real student turn."""
+        if self._turns:
+            raise ValueError("seed must be appended before any real turn")
+        if self._seed:
+            raise ValueError("seed already appended")
+        self._seed = [dict(e) for e in entries]
 
     def append_user(self, text: str) -> None:
         self._turns.append([{"role": "user", "content": text}])
@@ -216,6 +233,8 @@ class PromptLog:
         messages: list[dict] = []
         if self._system is not None:
             messages.append(dict(self._system))
+        for e in self._seed:
+            messages.append(dict(e))
         for p in self._protected:
             messages.append({"role": "tool", "passages": [dict(p)]})
         for turn in self._turns:

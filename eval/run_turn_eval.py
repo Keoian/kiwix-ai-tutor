@@ -239,6 +239,7 @@ def run_variant(
     system_text: str,
     render_evidence_fn: Callable[[dict], str] | None = None,
     temperature: float | None = None,
+    seed_exchange: bool = False,
 ) -> list[dict]:
     """Run every question through the real ``run_turn`` path for one
     variant, patching only the host-controlled knobs
@@ -256,6 +257,10 @@ def run_variant(
     try:
         for row in questions:
             session = make_session()
+            if seed_exchange:
+                from tutor.app.seed_exchange import seed_session
+
+                seed_session(session)
             user_input = _UserInputLike(kind="text", text=row["question"])
 
             first_token_ms: float | None = None
@@ -484,6 +489,7 @@ def main(argv: list[str] | None = None) -> int:
                 system_text=system_text,
                 render_evidence_fn=variant.get("render_evidence_fn"),
                 temperature=variant.get("temperature"),
+                seed_exchange=variant.get("seed_exchange", False),
             )
             summaries[name] = aggregate(scores)
             all_details[name] = getattr(run_variant, "last_details", [])
