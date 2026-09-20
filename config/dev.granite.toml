@@ -4,6 +4,9 @@
 # DLLs still come from the Bonsai checkout), model_path points at the
 # Granite GGUF fetched into this repo's own runtime/models/.
 # See docs/bakeoff_dev/granite_flags.md for the sweep and chosen flags.
+# NOTE: config/dev.toml is now this same Granite profile (Task 1, Granite
+# became the default dev config); this file is kept identical so existing
+# references to it keep working.
 
 [runtime]
 runtime_dir = 'C:\git\bonsai'

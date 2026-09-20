@@ -4,6 +4,12 @@ This file records how the dev llama-server is launched and what was observed
 when it was brought up for this work package, plus reference numbers
 gathered previously. Sections are labelled by provenance.
 
+**Current default**: `config/dev.toml` now runs IBM Granite 4.0 H-Tiny
+(bake-off winner), not the Bonsai-8B Q1_0 example below. The launch command
+and numbers below are historical, from when `dev.toml` was the Bonsai
+profile; that profile is preserved at `config/dev.bonsai-q1.toml`. See
+`docs/bakeoff_dev/granite_flags.md` for the Granite launch flags.
+
 ## Launch command (measured by this WP)
 
 Produced by `Config.server.to_argv()` from `config/dev.toml`, run via

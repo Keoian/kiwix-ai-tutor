@@ -1,11 +1,14 @@
-# Dev config for running llama-server against the local Bonsai runtime.
-# runtime_dir is a machine-local path to the (read-only, non-repo) model/binary
-# checkout; it is a literal TOML string so backslashes are not escape sequences.
-# Mirrors C:\git\bonsai\start-server-32k.ps1 -> start-server.ps1 (32k ctx, q8_0 KV cache).
+# Dev config (default): IBM Granite 4.0 H-Tiny (hybrid Mamba-2/attention MoE,
+# ~7B total / ~1B active) on the Radeon Pro 5500M 8GB (Vulkan). Won the
+# bake-off against Bonsai-8B Q1_0, which is kept as config/dev.bonsai-q1.toml.
+# runtime_dir points at the Bonsai checkout only for llama-server.exe and its
+# DLLs; model_path points at the Granite GGUF fetched into this repo's own
+# runtime/models/. See docs/bakeoff_dev/granite_flags.md for the sweep and
+# chosen flags.
 
 [runtime]
 runtime_dir = 'C:\git\bonsai'
-model_path = "models/Bonsai-8B-Q1_0.gguf"
+model_path = 'C:\git\kiwix-ai-tutor\runtime\models\granite-4.0-h-tiny\granite-4.0-h-tiny-Q4_K_M.gguf'
 server_binary = "bin/llama-server.exe"
 
 [server]
@@ -17,6 +20,16 @@ cache_type_v = "q8_0"
 n_gpu_layers = 99
 parallel = 1
 flash_attn = true
+# Chosen after the Vulkan flag sweep (docs/bakeoff_dev/granite_flags.md):
+# flash_attn=true + q8_0/q8_0 KV is REQUIRED to fit 32K ctx in <=5.6 GiB
+# (llama-bench: -ctk/-ctv q8_0 without -fa 1 refuses to create the context
+# on this build -- quantized KV needs flash attention). Measured: pp512
+# 683 t/s @ d0 / 387 t/s @ d4096, tg64 67.4 t/s @ d0 / 63.9 t/s @ d4096,
+# 5751201792 B (~5.36 GiB) total VRAM at 32K via GPU Adapter Memory
+# counter -- comfortably under the 6 GiB delivery-machine budget and far
+# above the ~15 t/s decode floor. Default ubatch (512, matches
+# llama-server's own default) beat 256 in the sweep and needed no extra
+# flag, so extra_args is unused here.
 jinja = true
 slots = true
 
@@ -31,34 +44,15 @@ port = 8420
 data_dir = "data"
 registry_path = "config/archives.dev.toml"
 
-# WP-B7: dense sidecar embedding server. Runs as a SECOND llama-server
-# (scripts/serve_embed.*) on its own port, alongside (not instead of) the
-# chat server above. model_path resolves against [runtime].runtime_dir the
-# same way [runtime].model_path does. dim must match the model's actual
-# output dimension (384 for the small embedding GGUFs this WP targets).
+# Dense sidecar left disabled for this bake-off: focus is the chat model.
 [embedding]
 host = "127.0.0.1"
 port = 8081
-# Absolute path: this model lives in the repo's own runtime/models/ (fetched
-# for the WP-B7 live sample), not under [runtime].runtime_dir (the Bonsai
-# chat-model checkout) -- a relative path here would resolve against the
-# wrong directory. bge-small-en-v1.5 Q8_0 GGUF, 384-dim, ~37 MB.
 model_path = 'C:\git\kiwix-ai-tutor\runtime\models\embedding.gguf'
 dim = 384
-# CPU by default: measured 2026-09-20 on this machine, bge-small-en-v1.5
-# Q8_0 (37 MB, 384-dim), CPU, 4 threads, while a GPU build ran concurrently
-# -- single query p50 6.2ms (max 17.2ms/10), bulk 31.7 lead passages/s, vs.
-# 31.4 articles/s measured on the Vulkan GPU over the 2,000-article sample.
-# CPU is as fast, frees all VRAM for the chat model (matters on the 6 GB
-# delivery machine), and avoids a second Vulkan context. See
-# docs/dense_sidecar.md, "Embedding server runs on the CPU".
 n_gpu_layers = 0
 threads = 4
 ctx_size = 512
 sidecar_dir = "runtime/simplewiki_dense"
 archive_id = "simplewiki"
-# M4 held-out gate FAILED (docs/M4_report.md): hybrid+lead_augmentation beat
-# lexical-v2 on tuning but recall@1 and MRR got WORSE on held-out, so dense
-# retrieval must not be a silent default. Leave this false until a fresh
-# held-out set clears the gate; set true only alongside that evidence.
 enabled = false

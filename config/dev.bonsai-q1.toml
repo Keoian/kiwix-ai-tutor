@@ -1,0 +1,66 @@
+# Dev config: Bonsai-8B Q1_0 (ternary bake-off entrant) against the local
+# Bonsai runtime. runtime_dir is a machine-local path to the (read-only,
+# non-repo) model/binary checkout; it is a literal TOML string so backslashes
+# are not escape sequences. Mirrors C:\git\bonsai\start-server-32k.ps1 ->
+# start-server.ps1 (32k ctx, q8_0 KV cache). config/dev.toml is now the
+# Granite profile; this file preserves the original Bonsai Q1_0 dev config.
+
+[runtime]
+runtime_dir = 'C:\git\bonsai'
+model_path = "models/Bonsai-8B-Q1_0.gguf"
+server_binary = "bin/llama-server.exe"
+
+[server]
+host = "127.0.0.1"
+port = 8080
+ctx_size = 32768
+cache_type_k = "q8_0"
+cache_type_v = "q8_0"
+n_gpu_layers = 99
+parallel = 1
+flash_attn = true
+jinja = true
+slots = true
+
+[sampling]
+temperature = 0.5
+top_p = 0.9
+top_k = 20
+
+[app]
+host = "127.0.0.1"
+port = 8420
+data_dir = "data"
+registry_path = "config/archives.dev.toml"
+
+# WP-B7: dense sidecar embedding server. Runs as a SECOND llama-server
+# (scripts/serve_embed.*) on its own port, alongside (not instead of) the
+# chat server above. model_path resolves against [runtime].runtime_dir the
+# same way [runtime].model_path does. dim must match the model's actual
+# output dimension (384 for the small embedding GGUFs this WP targets).
+[embedding]
+host = "127.0.0.1"
+port = 8081
+# Absolute path: this model lives in the repo's own runtime/models/ (fetched
+# for the WP-B7 live sample), not under [runtime].runtime_dir (the Bonsai
+# chat-model checkout) -- a relative path here would resolve against the
+# wrong directory. bge-small-en-v1.5 Q8_0 GGUF, 384-dim, ~37 MB.
+model_path = 'C:\git\kiwix-ai-tutor\runtime\models\embedding.gguf'
+dim = 384
+# CPU by default: measured 2026-09-20 on this machine, bge-small-en-v1.5
+# Q8_0 (37 MB, 384-dim), CPU, 4 threads, while a GPU build ran concurrently
+# -- single query p50 6.2ms (max 17.2ms/10), bulk 31.7 lead passages/s, vs.
+# 31.4 articles/s measured on the Vulkan GPU over the 2,000-article sample.
+# CPU is as fast, frees all VRAM for the chat model (matters on the 6 GB
+# delivery machine), and avoids a second Vulkan context. See
+# docs/dense_sidecar.md, "Embedding server runs on the CPU".
+n_gpu_layers = 0
+threads = 4
+ctx_size = 512
+sidecar_dir = "runtime/simplewiki_dense"
+archive_id = "simplewiki"
+# M4 held-out gate FAILED (docs/M4_report.md): hybrid+lead_augmentation beat
+# lexical-v2 on tuning but recall@1 and MRR got WORSE on held-out, so dense
+# retrieval must not be a silent default. Leave this false until a fresh
+# held-out set clears the gate; set true only alongside that evidence.
+enabled = false

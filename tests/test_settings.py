@@ -49,12 +49,30 @@ def test_real_dev_toml_loads_expected_values():
     assert cfg.sampling.temperature == 0.5
     assert cfg.sampling.top_p == 0.9
     assert cfg.sampling.top_k == 20
-    assert cfg.runtime.model_path.name == "Bonsai-8B-Q1_0.gguf"
+    assert cfg.runtime.model_path.name == "granite-4.0-h-tiny-Q4_K_M.gguf"
 
 
 def test_real_dev_toml_base_url():
     cfg = load_config(DEV_TOML)
     assert cfg.server.base_url == "http://127.0.0.1:8080"
+
+
+def test_real_dev_bonsai_q1_toml_loads_expected_values():
+    cfg = load_config(REPO_ROOT / "config" / "dev.bonsai-q1.toml")
+
+    assert isinstance(cfg, Config)
+    assert cfg.server.ctx_size == 32768
+    assert cfg.server.cache_type_k == "q8_0"
+    assert cfg.server.cache_type_v == "q8_0"
+    assert cfg.server.host == "127.0.0.1"
+    assert cfg.server.port == 8080
+    assert cfg.server.jinja is True
+    assert cfg.server.slots is True
+    assert cfg.server.parallel == 1
+    assert cfg.sampling.temperature == 0.5
+    assert cfg.sampling.top_p == 0.9
+    assert cfg.sampling.top_k == 20
+    assert cfg.runtime.model_path.name == "Bonsai-8B-Q1_0.gguf"
 
 
 # ---------------------------------------------------------------------------

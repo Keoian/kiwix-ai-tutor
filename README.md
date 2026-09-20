@@ -22,7 +22,8 @@ Windows; the delivery machine is a Dell with a GTX 1060 6 GB running Linux Mint.
 
 ```
 tutor/          the importable package: app, retrieval, tools, ui, dev, platform_
-config/         dev.toml (Windows dev machine), dell.toml (delivery machine)
+config/         dev.toml (Windows dev machine, Granite default; dev.bonsai-q1.toml
+                is the Bonsai Q1_0 alternative), dell.toml (delivery machine)
 scripts/        launch, build, install and benchmark scripts, .ps1/.sh in pairs
 eval/           question sets and the eval runners
 tests/          unit tests, plus integration tests marked `integration`
