@@ -315,58 +315,109 @@ def run_turn(
                     {"role": "tool", "tool_call_id": tool_call_id, "content": content}
                 )
 
-        for tc in tool_calls:
-            validation = validate_tool_call(tc.name, tc.arguments_json or "{}")
-            if not validation.ok:
-                _append_tool_message(tc.id, f"error: invalid tool call: {validation.error}")
-                emit({"kind": "tool_result", "name": tc.name, "ok": False})
-                continue
+        turn_cancelled = False
+        for index, tc in enumerate(tool_calls):
+            # Review pass 2, finding 1: once the assistant's tool_calls
+            # message has been appended (above), every id it names MUST get
+            # a matching tool-result entry -- on a raised exception, on a
+            # cancel mid-loop, or on normal dispatch -- or the log is left
+            # with a dangling tool_calls message that the next turn cannot
+            # replay (OpenAI-compatible endpoints reject it, wedging the
+            # session/lesson permanently). So this loop body never lets an
+            # exception propagate past a single tool call, and a cancel
+            # mid-loop fills in the remaining not-yet-dispatched ids with a
+            # synthetic "cancelled" result before returning, instead of
+            # leaving them unfilled.
+            if cancel is not None and cancel.is_set():
+                turn_cancelled = True
+                for remaining_tc in tool_calls[index:]:
+                    _append_tool_message(
+                        remaining_tc.id,
+                        json.dumps({"ok": False, "error": "turn cancelled"}),
+                    )
+                    emit({"kind": "tool_result", "name": remaining_tc.name, "ok": False})
+                break
 
-            if tc.name == "research":
-                if research_calls >= RESEARCH_CAP:
-                    _append_tool_message(
-                        tc.id,
-                        f"research cap of {RESEARCH_CAP} calls reached for this "
-                        "turn; answer with the supported portion or ask for "
-                        "clarification.",
-                    )
-                else:
-                    response = research_engine.research(
-                        validation.arguments["query"],
-                        topic_hint=getattr(session, "subject_hint", None),
-                        keywords=validation.arguments.get("keywords"),
-                    )
-                    research_calls += 1
-                    followup_research_used = True
-                    packet = _packet_from_response(response)
-                    _retain_passages(session, packet)
-                    if use_log:
-                        _trim_and_append_evidence(log, packet["passages"], budget)
-                    else:
-                        evidence_text = render_evidence(packet)
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tc.id,
-                                "content": f"[research results]\n{evidence_text}",
-                            }
+            try:
+                validation = validate_tool_call(tc.name, tc.arguments_json or "{}")
+                if not validation.ok:
+                    _append_tool_message(tc.id, f"error: invalid tool call: {validation.error}")
+                    emit({"kind": "tool_result", "name": tc.name, "ok": False})
+                    continue
+
+                if tc.name == "research":
+                    if research_calls >= RESEARCH_CAP:
+                        _append_tool_message(
+                            tc.id,
+                            f"research cap of {RESEARCH_CAP} calls reached for this "
+                            "turn; answer with the supported portion or ask for "
+                            "clarification.",
                         )
-                emit({"kind": "tool_result", "name": "research"})
-            elif tc.name == "calc":
-                if calc_calls >= CALC_CAP:
-                    _append_tool_message(
-                        tc.id, f"calc cap of {CALC_CAP} calls reached for this turn."
-                    )
+                    else:
+                        response = research_engine.research(
+                            validation.arguments["query"],
+                            topic_hint=getattr(session, "subject_hint", None),
+                            keywords=validation.arguments.get("keywords"),
+                        )
+                        research_calls += 1
+                        followup_research_used = True
+                        packet = _packet_from_response(response)
+                        _retain_passages(session, packet)
+                        if use_log:
+                            _trim_and_append_evidence(log, packet["passages"], budget)
+                        else:
+                            evidence_text = render_evidence(packet)
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tc.id,
+                                    "content": f"[research results]\n{evidence_text}",
+                                }
+                            )
+                    emit({"kind": "tool_result", "name": "research"})
+                elif tc.name == "calc":
+                    if calc_calls >= CALC_CAP:
+                        _append_tool_message(
+                            tc.id, f"calc cap of {CALC_CAP} calls reached for this turn."
+                        )
+                    else:
+                        calc_result = calc.evaluate(validation.arguments["expression"])
+                        calc_calls += 1
+                        _append_tool_message(tc.id, json.dumps(calc_result))
+                    emit({"kind": "tool_result", "name": "calc"})
                 else:
-                    calc_result = calc.evaluate(validation.arguments["expression"])
-                    calc_calls += 1
-                    _append_tool_message(tc.id, json.dumps(calc_result))
-                emit({"kind": "tool_result", "name": "calc"})
-            else:
-                # Unreachable: validate_tool_call already rejects unknown
-                # tool names, but keep the loop total in case of future
-                # tool additions with no dispatch branch yet.
-                _append_tool_message(tc.id, f"error: no dispatcher for tool {tc.name}")
+                    # Unreachable: validate_tool_call already rejects unknown
+                    # tool names, but keep the loop total in case of future
+                    # tool additions with no dispatch branch yet.
+                    _append_tool_message(tc.id, f"error: no dispatcher for tool {tc.name}")
+            except Exception as exc:  # noqa: BLE001 - never leave the log dangling
+                # research/calc (or evidence trimming) raised -- e.g. a
+                # ZimWorker timeout not swallowed at a lower layer. Give
+                # this call's id a student-safe, model-safe error result
+                # instead of letting the exception propagate: propagating
+                # here would leave `log` with an assistant tool_calls
+                # message and no result for this id, which is exactly the
+                # corruption this fix exists to prevent. Every dispatch
+                # branch above only appends its tool message *after*
+                # successfully computing a result, so reaching this except
+                # means no message for `tc.id` has been appended yet.
+                _append_tool_message(
+                    tc.id, json.dumps({"ok": False, "error": str(exc)})
+                )
+                emit({"kind": "tool_result", "name": tc.name, "ok": False})
+
+        if use_log:
+            log.validate()
+
+        if turn_cancelled:
+            return TurnResult(
+                status="cancelled",
+                answer_text="".join(answer_text_parts),
+                route=route,
+                research_calls=research_calls,
+                calc_calls=calc_calls,
+                events=events,
+            )
 
         if followup_research_used and route == "preretrieve":
             route = "preretrieve+followup"

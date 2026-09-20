@@ -125,6 +125,32 @@ kept, none weakened). Measured on this Windows dev machine with
   `eviction_reprefill` event on `TurnResult.events` (small 6000-token
   ceiling forces frequent head-trimming, as intended for a test budget).
 - **Max tokens_used**: 1318, comfortably under `ceiling - margin` = 5800.
+  **Correction (review pass 2, finding 3):** an earlier draft of this
+  note expected `history` to scale to "~4,000" tokens at this 6,000
+  ceiling and called 48/60 evictions with max `tokens_used` ~1,318
+  surprising. That expectation was simply wrong arithmetic.
+  `Budget.scaled()` (`tutor/app/prompt.py`) subtracts the *fixed*
+  per-request overhead -- `system(800) + newest(2500) + generation(2000)
+  = 5300` -- from the ceiling **first**, and only splits the *remainder*
+  80/20 between `history` and `margin`. At a 6,000-token ceiling the
+  remainder is only `6000 - 5300 = 700`, so `history` scales to `560`,
+  not ~4,000, and `evict()`'s real trigger
+  (`operating_ceiling = budget.system + budget.history`) is `800 + 560 =
+  1,360` tokens -- not ~4,000. 48/60 evictions with a max post-eviction
+  `tokens_used` of 1,318 (just under the real 1,360 threshold) is exactly
+  what the code does at this ceiling, not an artefact of a miscounted
+  token estimator or of eviction running independent of the numbers. At
+  the real production ceiling (`cfg.server.ctx_size = 32768`,
+  `config/dev.toml`), `Budget.scaled(32768)` reduces exactly to the
+  hand-tuned default (`history = 22000`, `operating_ceiling = 22800`) --
+  there is no starvation there; only the small 6K *test* ceiling is this
+  aggressive. This small-ceiling test therefore exercises eviction
+  *mechanics* (does the head-trim-and-reprefill machinery work at all
+  under pressure), not a realistic eviction *frequency* -- a real 32K-ceiling
+  lesson will evict far less often than 48/60 turns. See
+  `docs/review_2026-09-20_pass2.md` finding 3 for the full numbers at
+  every ceiling (6K/8K/16K/32K) and the non-linearity this fixed-overhead-
+  first design produces at small ceilings.
 - **RSS growth** (turn 10 -> turn 59): ~0.05 MB (effectively flat -- no
   leak pattern over the run).
 - **Child process count**: constant throughout (no worker processes

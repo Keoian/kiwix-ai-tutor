@@ -110,3 +110,46 @@ def test_bm25_unknown_query_term_yields_zero_contribution():
 def test_bm25_empty_corpus_returns_empty_scores():
     bm25 = BM25([])
     assert bm25.scores(["anything"]) == []
+
+
+# ---------------------------------------------------------------------------
+# singularize() -- minimal, deterministic plural-stripping helper used by
+# the retrieval coverage gate (research.py) to tolerate "moon"/"moons"
+# style mismatches between a question's own content terms and article
+# text, without pulling in a stemmer dependency (docs/retrieval_baseline.md
+# "Pass-2 fix").
+# ---------------------------------------------------------------------------
+
+
+def test_singularize_strips_simple_plural_s():
+    from tutor.retrieval.hybrid.lexical import singularize
+
+    assert singularize("moons") == "moon"
+    assert singularize("triangles") == "triangle"
+
+
+def test_singularize_handles_ies_plural():
+    from tutor.retrieval.hybrid.lexical import singularize
+
+    assert singularize("theories") == "theory"
+
+
+def test_singularize_handles_es_after_sibilant():
+    from tutor.retrieval.hybrid.lexical import singularize
+
+    assert singularize("boxes") == "box"
+    assert singularize("churches") == "church"
+
+
+def test_singularize_leaves_already_singular_words_alone():
+    from tutor.retrieval.hybrid.lexical import singularize
+
+    assert singularize("moon") == "moon"
+    assert singularize("class") == "class"  # double-s, not a plural
+    assert singularize("gas") == "gas"  # short word, left alone
+
+
+def test_singularize_is_deterministic_and_idempotent():
+    from tutor.retrieval.hybrid.lexical import singularize
+
+    assert singularize(singularize("moons")) == singularize("moons")

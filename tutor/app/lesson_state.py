@@ -276,7 +276,16 @@ class LessonStore:
         entries = json.loads(prompt_log_json) if prompt_log_json else []
 
         session = Session(count_tokens, subject_hint=subject)
-        session.log = _rebuild_prompt_log(count_tokens, entries)
+        log = _rebuild_prompt_log(count_tokens, entries)
+        # Repair-on-resume: a log persisted mid-turn-interruption (e.g. the
+        # process crashed after a tool-call exception, before pass-2 fix #1
+        # existed) can be stuck with a dangling assistant tool_calls entry
+        # and no matching tool result. Repair it here so an already-broken
+        # persisted lesson becomes usable again instead of staying wedged
+        # forever (review pass 2, finding 1).
+        session.log = log
+        if log.repair():
+            self.save_session(lesson_id, session)
         return session
 
     def close(self) -> None:

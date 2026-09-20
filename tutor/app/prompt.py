@@ -237,6 +237,117 @@ class PromptLog:
     def headroom(self, budget: Budget) -> int:
         return budget.ceiling - self.tokens_used()
 
+    # -- validation / repair ----------------------------------------------
+
+    def validate(self) -> None:
+        """Raise ``ValueError`` unless the rendered message list is a valid,
+        replayable OpenAI message list: a system message (if any) is first,
+        and every assistant ``tool_calls`` entry is immediately followed by
+        exactly its own tool-result entries (one per call id, no fewer, no
+        more, no interleaving). See review pass 2, finding 1: a tool-call
+        exception or a mid-turn failure that leaves a dangling assistant
+        ``tool_calls`` entry with no matching tool result produces a message
+        list that OpenAI-compatible ``/v1/chat/completions`` endpoints (like
+        llama-server) reject with a 400, permanently wedging the session."""
+        messages = self.render()
+        n = len(messages)
+        i = 0
+        if i < n and messages[i].get("role") == "system":
+            i += 1
+        for j in range(i, n):
+            if messages[j].get("role") == "system":
+                raise ValueError(
+                    f"system message must be first; found a second one at index {j}"
+                )
+        while i < n:
+            message = messages[i]
+            if message.get("role") == "assistant" and message.get("tool_calls"):
+                expected_ids = {tc["id"] for tc in message["tool_calls"]}
+                i += 1
+                seen_ids: set[str] = set()
+                unlabeled_count = 0
+                # A tool result normally carries the ``tool_call_id`` it
+                # answers (``append_tool_result``), but a research
+                # follow-up's evidence packet (``append_evidence``) is a
+                # plain ``{"role": "tool", "passages": [...]}`` message with
+                # no id of its own -- it still counts as satisfying one of
+                # this turn's call ids, just not a *named* one.
+                while i < n and messages[i].get("role") == "tool":
+                    call_id = messages[i].get("tool_call_id")
+                    if call_id is not None:
+                        seen_ids.add(call_id)
+                    else:
+                        unlabeled_count += 1
+                    i += 1
+                if not seen_ids.issubset(expected_ids):
+                    raise ValueError(
+                        "assistant tool_calls entry "
+                        f"{sorted(expected_ids)} matched by unexpected tool "
+                        f"result id(s) {sorted(seen_ids - expected_ids)}"
+                    )
+                if len(seen_ids) + unlabeled_count != len(expected_ids):
+                    raise ValueError(
+                        "assistant tool_calls entry "
+                        f"{sorted(expected_ids)} not matched exactly by its "
+                        f"tool results (found {len(seen_ids)} id-matched + "
+                        f"{unlabeled_count} unlabeled)"
+                    )
+                continue
+            i += 1
+
+    def is_valid(self) -> bool:
+        try:
+            self.validate()
+        except ValueError:
+            return False
+        return True
+
+    def repair(self) -> bool:
+        """If the log ends with a dangling assistant ``tool_calls`` entry
+        missing some of its tool results (e.g. a turn interrupted by a
+        crash before every dispatched call got a result, then persisted in
+        that broken shape -- see ``LessonStore.resume``), append a
+        synthetic error tool result for each missing call id so the log
+        renders a valid message list again. Returns True if a repair was
+        made, False if the log was already valid (or empty)."""
+        if self.is_valid():
+            return False
+        if not self._turns:
+            return False
+        last_turn = self._turns[-1]
+        for j in range(len(last_turn) - 1, -1, -1):
+            entry = last_turn[j]
+            if entry.get("role") == "assistant" and entry.get("tool_calls"):
+                expected_ids = {tc["id"] for tc in entry["tool_calls"]}
+                trailing = last_turn[j + 1 :]
+                seen_ids = {
+                    e["tool_call_id"]
+                    for e in trailing
+                    if e.get("role") == "tool" and e.get("tool_call_id") is not None
+                }
+                unlabeled_count = sum(
+                    1
+                    for e in trailing
+                    if e.get("role") == "tool" and e.get("tool_call_id") is None
+                )
+                unmatched = sorted(expected_ids - seen_ids)
+                # Unlabeled tool messages (evidence packets) already cover
+                # that many of the unmatched ids; only fill the rest.
+                still_missing = unmatched[unlabeled_count:]
+                for missing_id in still_missing:
+                    self.append_tool_result(
+                        tool_call_id=missing_id,
+                        content=json.dumps(
+                            {
+                                "ok": False,
+                                "error": "turn interrupted before this tool "
+                                "call completed",
+                            }
+                        ),
+                    )
+                return True
+        return False
+
     # -- eviction --------------------------------------------------------
 
     def evict(self, budget: Budget) -> EvictionEvent | None:

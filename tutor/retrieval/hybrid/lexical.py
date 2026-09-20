@@ -31,6 +31,32 @@ def tokenize(text: str) -> list[str]:
     return [t for t in (m.group(0).lower() for m in _TOKEN_RE.finditer(text)) if t not in stopwords]
 
 
+_SIBILANT_ES_SUFFIXES = ("ses", "xes", "zes", "ches", "shes")
+
+
+def singularize(token: str) -> str:
+    """Minimal, deterministic plural -> singular normalisation.
+
+    No stemmer dependency (donor-code constraint) -- just the handful of
+    simple English plural shapes retrieval coverage matching needs to
+    tolerate ("moon"/"moons"): trailing "-ies" -> "-y", trailing "-es"
+    after a sibilant ("boxes" -> "box", "churches" -> "church"), and a
+    bare trailing "-s" otherwise (but never for a double-"s" ending like
+    "class", nor for short tokens where stripping would be unsafe/noisy).
+    Already-singular input is returned unchanged; the function is
+    idempotent.
+    """
+    if len(token) <= 3:
+        return token
+    if token.endswith("ies"):
+        return token[:-3] + "y"
+    if token.endswith(_SIBILANT_ES_SUFFIXES):
+        return token[:-2]
+    if token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
+
+
 class BM25:
     """Hand-rolled BM25 over pre-tokenized documents (positive IDF)."""
 

@@ -24,6 +24,7 @@ import queue
 import re
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,7 +32,7 @@ from typing import Any
 
 from tutor.retrieval.hybrid.dense import DenseIndex
 from tutor.retrieval.hybrid.diversity import cap_per_article
-from tutor.retrieval.hybrid.lexical import BM25, tokenize
+from tutor.retrieval.hybrid.lexical import BM25, singularize, tokenize
 from tutor.retrieval.hybrid.packer import estimate_tokens, pack
 from tutor.retrieval.hybrid.passages import split_passages
 from tutor.retrieval.hybrid.ranking import (
@@ -71,6 +72,12 @@ _THREAD_JOIN_TIMEOUT_S = 0.5
 _DENSE_ARTICLE_TOP = 16
 _EMBED_QUERY_TIMEOUT_S = 1.0
 
+# Bound on ResearchEngine._response_cache: an unbounded dict keyed by raw
+# query text grows for the life of a long-running process (review pass 2,
+# finding 4). An `OrderedDict` capped at this size and evicted LRU-style
+# keeps memory bounded without needing a TTL.
+_RESPONSE_CACHE_MAXSIZE = 256
+
 _PROCEDURAL_RE = re.compile(r"\bhow (do|would|can|should) (i|you|we)\b", re.IGNORECASE)
 
 # Coverage-flag threshold (spec §7.3 "coverage signals are explainable").
@@ -85,14 +92,61 @@ def _is_procedural(query: str) -> bool:
 
 
 def _query_terms(query: str, topic_hint: str | None) -> set[str]:
-    """Content terms used for coverage checks: the query plus, per spec §5/§7.1,
-    the host-supplied ``topic_hint`` (current subject), which is what lets an
-    elliptical follow-up ("what about its moons?") still be judged covered.
+    """Content terms used for *candidate generation and ranking* (BM25 query
+    expansion, title boost, etc.): the query plus, per spec §5/§7.1, the
+    host-supplied ``topic_hint`` (current subject). NOT used for the
+    abstention/coverage gate -- see :func:`_coverage_terms`, since unioning
+    the topic_hint in there let a subject hint alone satisfy coverage for an
+    off-topic question (review pass 2, finding 2).
     """
     terms = set(tokenize(query))
     if topic_hint:
         terms |= set(tokenize(topic_hint))
     return terms
+
+
+# A query is treated as "elliptical" (too little content of its own to
+# judge coverage on) when it has at most this many content-bearing tokens
+# of its own, once both ``tokenize``'s stopwords/pronouns AND a small set
+# of generic conversational-continuation fillers (below) are stripped --
+# e.g. "what about its moons?" -> {"moons"}, "can you tell me more about
+# it?" -> {} (both "tell" and "more" are fillers). Only then does the
+# host-supplied topic_hint get folded into the *coverage* term set. An
+# ordinary question about a different subject, like "what's the capital of
+# France?" -> {"s", "capital", "france"} or "what is the
+# flibbertigibbetopolis effect?" -> {"flibbertigibbetopolis", "effect"},
+# keeps real content terms of its own once fillers are stripped and must
+# never be rescued by a topic_hint that merely happens to be the current
+# subject's own title (review pass 2, finding 2).
+_ELLIPTICAL_TERM_COUNT = 1
+
+# Generic conversational-continuation fillers: words that signal "keep
+# going on the current subject" rather than naming a subject of their own.
+# ``tokenize``'s stopword list already strips grammatical words (the, is,
+# about, ...); this small extra set catches the handful of common verbs a
+# "tell me more" / "explain further" style follow-up uses that aren't
+# stopwords but also aren't content words for coverage purposes.
+_CONTINUATION_FILLERS = frozenset({"tell", "more", "explain", "elaborate", "continue"})
+
+
+def _elliptical_term_count(query: str) -> int:
+    return len(frozenset(tokenize(query)) - _CONTINUATION_FILLERS)
+
+
+def _coverage_terms(query: str, topic_hint: str | None = None) -> frozenset[str]:
+    """Content terms used for the abstention/coverage gate: the query's own
+    terms only, except for the elliptical case (see
+    ``_ELLIPTICAL_TERM_COUNT``) where the topic_hint's terms are folded in
+    too so a follow-up like "what about its moons?" or "can you tell me
+    more about it?" can still be judged covered against the current
+    subject's article. A query with more content terms of its own is
+    judged strictly on those -- a topic_hint can never single-handedly
+    manufacture coverage for it (that was the bug: a subject hint alone
+    making an off-topic candidate look "covered")."""
+    own = frozenset(tokenize(query))
+    if topic_hint and _elliptical_term_count(query) <= _ELLIPTICAL_TERM_COUNT:
+        return own | frozenset(tokenize(topic_hint))
+    return own
 
 
 # Coverage is checked over the top few candidates, not just the single
@@ -111,19 +165,23 @@ def _best_coverage(
 ) -> dict[str, Any]:
     """The least-weak :func:`compute_coverage` result among the top-scored
     ``_COVERAGE_CANDIDATES_CHECKED`` candidates (any one of them being a
-    strong hit is enough to call the query covered). ``topic_hint_terms``
-    is accepted for symmetry with the query-term merge already done in
-    ``query_terms`` (see ``_query_terms``); it is not otherwise needed
-    here since a topic_hint-driven title match already shows up as a
-    normal ``title_match`` once its tokens are unioned into the query.
+    strong hit is enough to call the query covered). ``query_terms`` is
+    already the right term set for this call -- see ``_coverage_terms``,
+    which decides whether the topic_hint's terms belong in it (elliptical
+    queries only) *before* this function ever runs, since that decision
+    depends on the query text alone, not on any particular candidate.
+    ``topic_hint_terms`` is forwarded to :func:`compute_coverage`, which
+    may let a hint term satisfy ``title_match`` -- but only gated on this
+    same candidate's own-term text coverage also clearing the threshold
+    (pass-2b fix: a title match on hint terms alone is never sufficient by
+    itself).
     """
-    del topic_hint_terms
     if not candidates:
-        return compute_coverage(query_terms, None, None)
+        return compute_coverage(query_terms, None, None, hint_terms=topic_hint_terms)
     top = sorted(candidates, key=lambda c: -c["score"])[:_COVERAGE_CANDIDATES_CHECKED]
     best: dict[str, Any] | None = None
     for c in top:
-        cov = compute_coverage(query_terms, c["title"], c["text"])
+        cov = compute_coverage(query_terms, c["title"], c["text"], hint_terms=topic_hint_terms)
         if not cov["weak"]:
             return cov
         if best is None or cov["term_coverage"] > best["term_coverage"]:
@@ -133,25 +191,43 @@ def _best_coverage(
 
 
 def compute_coverage(
-    query_terms: set[str], title: str | None, text: str | None
+    query_terms: set[str],
+    title: str | None,
+    text: str | None,
+    hint_terms: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """Explainable coverage flags for a single candidate.
 
     Per spec §7.3 ("coverage signals are explainable (facets represented,
     entities missing, limits hit)") and §6 ("tier 2 only if coverage flags
     are weak after tier 1"). ``weak`` is True when there is no candidate at
-    all, or the candidate shares no query/topic-hint terms with the
-    query's content words (``query_terms`` already includes the
-    host-supplied topic_hint's tokens -- see ``_query_terms``) and its
-    title does not match any of them either.
+    all, or the candidate shares no ``query_terms`` with the candidate's
+    text/title -- ``query_terms`` here is whatever the caller decided is
+    the right coverage term set (see ``_coverage_terms``; for the
+    elliptical-fold case it already includes the topic_hint's tokens).
+
+    ``hint_terms``, when given, is the *separate* topic_hint token set
+    (pass-2b fix, docs/retrieval_baseline.md "Pass-2 fix"): a hint term
+    matching the title is only allowed to satisfy ``title_match`` when
+    ``query_terms``' own text coverage against this same candidate
+    *already* clears ``_COVERAGE_TERM_THRESHOLD`` on its own -- a title
+    match on hint terms alone (with the question's own content terms
+    otherwise uncovered) is never sufficient by itself. Matching tolerates
+    simple plural/singular differences (``singularize``) so "moon" in the
+    query matches "moons" in the text.
     """
     if not query_terms or title is None or text is None:
         return {"term_coverage": 0.0, "title_match": False, "weak": True}
 
-    passage_terms = set(tokenize(text))
-    title_terms = set(tokenize(title))
-    term_coverage = len(query_terms & passage_terms) / len(query_terms)
-    title_match = bool(query_terms & title_terms)
+    passage_terms = {singularize(t) for t in tokenize(text)}
+    title_terms = {singularize(t) for t in tokenize(title)}
+    norm_query_terms = {singularize(t) for t in query_terms}
+    term_coverage = len(norm_query_terms & passage_terms) / len(norm_query_terms)
+    title_match = bool(norm_query_terms & title_terms)
+    if not title_match and hint_terms:
+        norm_hint_terms = {singularize(t) for t in hint_terms}
+        if term_coverage >= _COVERAGE_TERM_THRESHOLD and (norm_hint_terms & title_terms):
+            title_match = True
     weak = (not title_match) and term_coverage < _COVERAGE_TERM_THRESHOLD
     return {"term_coverage": term_coverage, "title_match": title_match, "weak": weak}
 
@@ -314,7 +390,7 @@ class ResearchEngine:
         self._top_n_articles = min(max(top_n_articles, 1), _TOP_N_ARTICLES_CAP)
         self._workers: dict[str, Any] = {}
         self._fingerprints: dict[str, str] = {}
-        self._response_cache: dict[tuple[Any, ...], ResearchResponse] = {}
+        self._response_cache: OrderedDict[tuple[Any, ...], ResearchResponse] = OrderedDict()
 
     def close(self) -> None:
         for worker in self._workers.values():
@@ -587,6 +663,7 @@ class ResearchEngine:
         cache_key = (query, keywords_key, budget_tokens, deadline_s, topic_hint)
         cached = self._response_cache.get(cache_key)
         if cached is not None:
+            self._response_cache.move_to_end(cache_key)
             return dataclasses.replace(cached, timings={**cached.timings, "cache_hit": True})
 
         started = time.monotonic()
@@ -612,6 +689,7 @@ class ResearchEngine:
         candidates: list[dict[str, Any]] = []
         any_timeout = False
         query_terms = _query_terms(query, topic_hint)
+        coverage_terms = _coverage_terms(query, topic_hint)
         topic_hint_terms = frozenset(tokenize(topic_hint)) if topic_hint else frozenset()
 
         # Embed the query at most once per request, bounded by whatever
@@ -669,7 +747,7 @@ class ResearchEngine:
         _consult(primary_archives)
 
         if fallback_archives and not soft_elapsed() and remaining() > 0:
-            preliminary_coverage = _best_coverage(candidates, query_terms, topic_hint_terms)
+            preliminary_coverage = _best_coverage(candidates, coverage_terms, topic_hint_terms)
             if preliminary_coverage["weak"]:
                 _consult(fallback_archives)
 
@@ -700,7 +778,7 @@ class ResearchEngine:
         budget = budget_tokens if budget_tokens is not None else self._default_budget_tokens
         packed = pack(capped, budget_tokens=budget, count_tokens=estimate_tokens)
 
-        coverage = _best_coverage(packed, query_terms, topic_hint_terms)
+        coverage = _best_coverage(packed, coverage_terms, topic_hint_terms)
 
         passages: list[ResearchPassage] = []
         if not coverage["weak"]:
@@ -742,4 +820,7 @@ class ResearchEngine:
             dense_note="; ".join(dense_notes) if dense_notes else None,
         )
         self._response_cache[cache_key] = response
+        self._response_cache.move_to_end(cache_key)
+        while len(self._response_cache) > _RESPONSE_CACHE_MAXSIZE:
+            self._response_cache.popitem(last=False)
         return response

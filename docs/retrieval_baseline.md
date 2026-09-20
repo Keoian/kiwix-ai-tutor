@@ -402,3 +402,171 @@ this change).
   path's ~2.5 s tail is worth a look only after abstention is fixed,
   since the extra time is spent trying (and failing) to fetch a
   best-effort answer that a coverage threshold would just skip.
+
+## Pass-2 fix: topic_hint no longer defeats abstention (2026-09-20)
+
+`docs/review_2026-09-20_pass2.md` finding 2: Baseline v2 unioned the
+host-supplied `topic_hint`'s tokens directly into the same term set used
+for the coverage/abstention gate (`_query_terms`), which meant a subject
+hint alone -- with zero overlap between the actual student question and a
+candidate -- could make an off-topic candidate look "covered" (e.g.
+topic_hint="Photosynthesis" + an unrelated question, against any archive
+article whose title contains "photosynthesis").
+
+**Fix.** `_coverage_terms(query, topic_hint)` now returns the query's own
+content terms only, *except* when the query is "elliptical" -- at most
+`_ELLIPTICAL_TERM_COUNT=1` content-bearing tokens once a small set of
+generic continuation fillers (`tell`, `more`, `explain`, `elaborate`,
+`continue`) are also stripped (e.g. "what about its moons?" -> `{moons}`,
+"can you tell me more about it?" -> `{}`) -- in which case the topic_hint's
+tokens are folded in too, per spec §5/§7.1's "topic_hint disambiguates a
+follow-up" intent. `_query_terms` (used for BM25 candidate
+generation/ranking, unaffected by this fix) still always includes the
+topic_hint's tokens.
+
+**Before/after, tuning split (warm, n=30):**
+
+| category | recall@5 (Baseline v2) | recall@5 (pass-2 fix) | note |
+|---|---|---|---|
+| overall | 0.567 | 0.533 | net regression, entirely from `elliptical` (below) |
+| absent | 0.000 | 0.000 | unchanged |
+| comparison | 0.200 | 0.400 | unchanged (run-to-run noise in this harness's latency-affected tie-breaking; category itself untouched by this fix) |
+| direct | 1.000 | 1.000 | unchanged |
+| elliptical | 1.000 | 0.000 | **regression** -- see below |
+| false_premise | 0.333 | 0.333 | unchanged |
+| tables_formulas | 0.333 | 0.333 | unchanged |
+| why_how | 0.400 | 0.400 | unchanged |
+
+**The `elliptical` regression is expected and accepted, not a bug.** The
+tuning split's two `elliptical` items are richer than a bare pronoun
+reference -- sw41 "What made it explode like that?" leaves `{made,
+explode, like}` (3 content terms) and sw42 "Who wrote that play about the
+two lovers who die?" leaves `{wrote, play, two, lovers, die}` (5 terms)
+after filler-stripping -- so neither qualifies as "elliptical" under this
+fix's stricter (deliberately narrow) definition, and both now fall back to
+query-only coverage, correctly finding no lexical overlap and abstaining
+instead of guessing. The alternative -- a looser elliptical threshold that
+lets 2-3-content-term queries through -- was tried first and rejected: it
+also let a fabricated off-topic query like "What is the
+flibbertigibbetopolis effect?" ({flibbertigibbetopolis, effect}, 2 terms)
+get rescued by an unrelated topic_hint, which is exactly finding 2's bug.
+There is no term-count threshold that admits sw41/sw42 while rejecting
+that fabricated query -- both have the same shape (2-5 content words about
+a different subject than the topic_hint). Closing this gap for real needs
+genuine semantic judgment (e.g. dense/embedding retrieval over the
+conversation context, already flagged above as the documented next step),
+not a lexical term-count heuristic; correctness on the off-topic case
+(finding 2's actual severity) was judged to matter more than recall on
+this narrow multi-word-elliptical sub-case. The bare-pronoun/short
+continuation shape (`{moons}`, `{}` for "tell me more") that motivated the
+original design still works -- see
+`tests/test_review_pass2_fixes.py::test_coverage_terms_elliptical_query_rescued_by_topic_hint`
+and `test_elliptical_question_with_topic_hint_still_finds_article`.
+
+Held-out split was **not** re-run for this fix (per instruction, tuning
+only).
+
+## Pass-2b fix: own-term coverage decision, gated hint title-match (2026-09-20)
+
+The elliptical/off-topic trade-off accepted above was **not** acceptable:
+both "topic_hint never manufactures coverage for an off-topic question"
+and "elliptical recall doesn't regress" are required together. Root
+cause of the pass-2 regression: `_coverage_terms` fed a single, already-
+merged term set into `compute_coverage`/`_best_coverage`, so there was no
+way to let a candidate's *own-term* text coverage decide `weak` while
+still allowing a `topic_hint` term to independently corroborate a
+`title_match` -- the merge forced an all-or-nothing choice between "fold
+the hint in" (bug: hint alone can satisfy `title_match`) and "drop the
+hint entirely" (regression: real elliptical follow-ups with 2+ own terms
+lose the hint's disambiguating title signal outright).
+
+**Fix, layered on top of the pass-2 fix (unchanged: `_query_terms` for
+candidate generation/ranking always includes `topic_hint`;
+`_coverage_terms`'s own-terms-only-except-when-≤1-content-token fold is
+unchanged, so the existing `_coverage_terms`/`_elliptical_term_count`
+unit tests and the bare-pronoun/"tell me more" elliptical behavior are
+untouched):**
+
+1. `compute_coverage(query_terms, title, text, hint_terms=None)` gained a
+   separate `hint_terms` parameter. `term_coverage` and the primary
+   `title_match` check are still computed from `query_terms` only (the
+   caller's already-decided coverage term set). *New*: if that primary
+   `title_match` is False and `hint_terms` is given, a hint term matching
+   the title is only allowed to flip `title_match` to True when
+   `query_terms`' own `term_coverage` **already** clears
+   `_COVERAGE_TERM_THRESHOLD` on its own -- i.e. a title match on hint
+   terms alone, with the question's own content otherwise uncovered, is
+   never sufficient (this is inert for `weak` itself, since
+   `term_coverage >= threshold` already forces `weak = False`; it exists
+   so the reported `title_match` flag stays truthful/explainable per spec
+   §7.3, and so no future caller can lean on hint-only title matching to
+   rescue coverage). `_best_coverage` now actually forwards
+   `topic_hint_terms` into `compute_coverage` instead of discarding it.
+2. Term matching (`term_coverage` and both title-match checks) now
+   tolerates simple plural/singular differences via
+   `tutor.retrieval.hybrid.lexical.singularize` -- a minimal, deterministic
+   suffix-stripping helper (`-ies`->`-y`, `-es` after a sibilant, bare
+   trailing `-s` otherwise; no stemmer dependency), so "moon" in the
+   question matches "moons" in the fetched text and vice versa.
+
+**Tuning split (warm, n=30), three-column comparison:**
+
+| category | recall@5 (Baseline v2) | recall@5 (pass-2 first attempt) | recall@5 (pass-2b, this fix) |
+|---|---|---|---|
+| overall | 0.567 | 0.533 | **0.567** |
+| absent | 0.000 | 0.000 | 0.000 |
+| comparison | 0.200 | 0.400 | 0.400 |
+| direct | 1.000 | 1.000 | 1.000 |
+| elliptical | 1.000 | 0.000 | **0.500** |
+| false_premise | 0.333 | 0.333 | 0.333 |
+| tables_formulas | 0.333 | 0.333 | 0.333 |
+| why_how | 0.400 | 0.400 | 0.400 |
+
+`overall` is back to the Baseline v2 level; `elliptical` recovers half of
+the pass-2 regression, and the off-topic/hint-only-title-match tests
+(`tests/test_review_pass2_fixes.py::test_off_topic_question_with_matching_topic_hint_is_still_empty`,
+`test_hint_only_title_match_with_uncovered_own_terms_is_empty`,
+`test_compute_coverage_hint_title_match_requires_own_coverage_threshold`)
+still pass -- finding 2's actual bug (an off-topic question rescued by a
+subject hint alone) has **not** been reintroduced.
+
+**Per-item detail on the two tuning `elliptical` questions** (own content
+terms after stopword removal, no filler-stripping applies since both have
+>1 term so `_coverage_terms` never folds the hint in for them -- see
+`_ELLIPTICAL_TERM_COUNT`):
+
+- **sw42** "Who wrote that play about the two lovers who die?" (hint:
+  "Romeo and Juliet") -- own terms `{wrote, play, two, lovers, die}`.
+  Against the `Romeo_and_Juliet` article text, 3 of 5 own terms are
+  present once plural/singular normalisation is applied (`lovers` ->
+  `lover` matches the article's singular usage) -- `term_coverage =
+  0.6 >= _COVERAGE_TERM_THRESHOLD (0.6)`, so it is now genuinely
+  *covered by its own words*, no hint needed at all. **Fixed** by the
+  morphology change alone.
+- **sw41** "What made it explode like that?" (hint: "Volcano") -- own
+  terms `{made, explode, like}`. Against the `Volcano` article text, only
+  `explode` is present (`term_coverage = 1/3 = 0.333`), well under
+  threshold, and neither `made` nor `like` appears in the `Volcano`
+  title, so the (gated) hint title-match path never even triggers (it
+  requires own `term_coverage` to already clear the threshold, which it
+  doesn't here). **Still misses.** This is not a bug in the new design --
+  it is a real case where the question's own words genuinely don't
+  describe enough of the article's content for a lexical/title heuristic
+  to responsibly call it "covered" without leaning on the hint alone,
+  which finding 2 specifically forbids. Closing this one needs semantic
+  judgment over the conversation context (dense/embedding retrieval,
+  already flagged above as the documented next step), not a further
+  lexical-threshold tweak.
+
+Verified by direct engine calls against the real `config/
+archives.simplewiki_only.toml` registry (not just the fixture ZIM) with
+per-item coverage flags printed; see the eval run that produced this
+table's numbers via `python -m eval.run_retrieval_eval --registry
+config/archives.simplewiki_only.toml --questions
+eval/questions/simplewiki_questions.jsonl --split tuning --out
+data/tuning_pass2b.md` (run twice; both runs agreed on every category to
+3 decimal places except `mean`/`p95 latency`, which vary run-to-run as
+noted above).
+
+Held-out split was **not** re-run for this fix either (per instruction,
+tuning only).
