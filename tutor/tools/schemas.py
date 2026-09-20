@@ -31,8 +31,12 @@ RESEARCH_TOOL: dict = {
                 },
                 "keywords": {
                     "type": "array",
-                    "description": "Optional extra keywords to refine the search.",
-                    "items": {"type": "string"},
+                    "description": (
+                        "Optional extra keywords to refine the search. Up to 3 "
+                        "short strings, each at most 40 characters."
+                    ),
+                    "items": {"type": "string", "maxLength": 40},
+                    "maxItems": 3,
                 },
             },
         },
@@ -132,6 +136,23 @@ def validate_tool_call(name: str, arguments_json: str) -> ValidationResult:
                 return ValidationResult(
                     ok=False, arguments=None, error="'keywords' must be an array of strings"
                 )
+            if len(keywords) > 3:
+                return ValidationResult(
+                    ok=False, arguments=None, error="'keywords' must have at most 3 items"
+                )
+            for item in keywords:
+                stripped = item.strip()
+                if not stripped:
+                    return ValidationResult(
+                        ok=False, arguments=None, error="'keywords' items must not be empty"
+                    )
+                if len(stripped) > 40:
+                    return ValidationResult(
+                        ok=False,
+                        arguments=None,
+                        error="'keywords' items must be at most 40 characters",
+                    )
+            arguments = {**arguments, "keywords": [k.strip() for k in keywords]}
     elif name == "calc":
         error = _validate_string_field(arguments["expression"], "expression")
         if error:

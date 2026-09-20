@@ -24,3 +24,9 @@ slots = true
 temperature = 0.5
 top_p = 0.9
 top_k = 20
+
+[app]
+host = "127.0.0.1"
+port = 8420
+data_dir = "data"
+registry_path = "config/archives.dev.toml"

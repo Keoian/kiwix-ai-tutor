@@ -1,0 +1,105 @@
+"""RED tests for the optional [app] table on tutor.settings.Config.
+
+New config knobs used by tutor.app.compose (WP-C4): host/port for uvicorn,
+plus data_dir and registry_path resolved relative to the repo root (the
+config file's parent's parent) when given as relative paths.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from tutor.settings import load_config
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEV_TOML = REPO_ROOT / "config" / "dev.toml"
+
+
+def _write_toml(path: Path, text: str) -> Path:
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+_BASE = """
+[runtime]
+runtime_dir = 'C:\\\\git\\\\bonsai'
+model_path = "models/Bonsai-8B-Q1_0.gguf"
+server_binary = "bin/llama-server.exe"
+
+[server]
+host = "127.0.0.1"
+port = 8080
+ctx_size = 32768
+cache_type_k = "q8_0"
+cache_type_v = "q8_0"
+n_gpu_layers = 99
+parallel = 1
+flash_attn = true
+jinja = true
+slots = true
+
+[sampling]
+temperature = 0.5
+top_p = 0.9
+top_k = 20
+"""
+
+
+def test_real_dev_toml_has_app_table_with_defaults_or_values():
+    cfg = load_config(DEV_TOML)
+    assert cfg.app.host
+    assert isinstance(cfg.app.port, int)
+    assert cfg.app.data_dir.is_absolute()
+    assert cfg.app.registry_path.is_absolute()
+
+
+def test_app_table_defaults_when_missing(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    config_path = _write_toml(config_dir / "dev.toml", _BASE)
+
+    cfg = load_config(config_path)
+
+    assert cfg.app.host == "127.0.0.1"
+    assert cfg.app.port == 8420
+    # data_dir defaults to "data" resolved relative to repo root, i.e. the
+    # config file's parent's parent.
+    assert cfg.app.data_dir == (tmp_path / "data").resolve()
+    assert cfg.app.registry_path == (tmp_path / "config" / "archives.dev.toml").resolve()
+
+
+def test_app_table_explicit_values_are_honored(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    text = _BASE + """
+[app]
+host = "0.0.0.0"
+port = 9000
+data_dir = "custom_data"
+registry_path = "config/archives.custom.toml"
+"""
+    config_path = _write_toml(config_dir / "dev.toml", text)
+
+    cfg = load_config(config_path)
+
+    assert cfg.app.host == "0.0.0.0"
+    assert cfg.app.port == 9000
+    assert cfg.app.data_dir == (tmp_path / "custom_data").resolve()
+    assert cfg.app.registry_path == (tmp_path / "config" / "archives.custom.toml").resolve()
+
+
+def test_app_table_absolute_paths_are_kept_as_is(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    abs_data_dir = tmp_path / "elsewhere" / "data"
+    # Use a TOML literal string (single quotes) so backslashes on Windows
+    # are not treated as escape sequences.
+    text = _BASE + f"""
+[app]
+data_dir = '{abs_data_dir}'
+"""
+    config_path = _write_toml(config_dir / "dev.toml", text)
+
+    cfg = load_config(config_path)
+
+    assert cfg.app.data_dir == abs_data_dir.resolve()

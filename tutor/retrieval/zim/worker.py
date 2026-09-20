@@ -14,6 +14,7 @@ request. Only plain, picklable data ever crosses the pipe — libzim objects
 from __future__ import annotations
 
 import multiprocessing as mp
+import threading
 import time
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
@@ -117,6 +118,13 @@ class ZimWorker:
         self._process: Any = None
         self._conn: Connection | None = None
         self._closed = False
+        # Guards process/connection lifecycle (start/request/_terminate_child/
+        # close) so overlapping requests from several threads on the same
+        # ZimWorker cannot race on ``self._process``/``self._conn``. Requests
+        # are inherently serialized on a single worker's pipe anyway (only
+        # one in-flight request per worker), so this lock does not add
+        # meaningful contention beyond what already existed logically.
+        self._lock = threading.RLock()
 
     def __enter__(self) -> "ZimWorker":
         self.start()
@@ -132,6 +140,10 @@ class ZimWorker:
         return None
 
     def start(self) -> None:
+        with self._lock:
+            self._start_locked()
+
+    def _start_locked(self) -> None:
         if self._closed:
             raise WorkerClosed("Cannot start a closed ZimWorker.")
         if self._process is not None and self._process.is_alive():
@@ -148,6 +160,10 @@ class ZimWorker:
         self._conn = parent_conn
 
     def _terminate_child(self) -> None:
+        with self._lock:
+            self._terminate_child_locked()
+
+    def _terminate_child_locked(self) -> None:
         if self._process is not None:
             try:
                 if self._process.is_alive():
@@ -164,43 +180,70 @@ class ZimWorker:
         self._conn = None
 
     def request(self, op: str, *, deadline_s: float, **kwargs: Any) -> WorkerResult:
-        if self._closed:
-            raise WorkerClosed("Cannot request on a closed ZimWorker.")
-        self.start()
-        assert self._conn is not None
-        started = time.monotonic()
-        try:
-            self._conn.send((op, kwargs))
-        except (OSError, EOFError, BrokenPipeError) as exc:
-            self._terminate_child()
+        # Held for the whole request (including the poll wait) so that a
+        # request whose deadline fires and kills/restarts the child can
+        # never race with another thread's concurrent request on the same
+        # ZimWorker mutating ``self._process``/``self._conn`` underneath it.
+        # A single worker process serves one request at a time regardless,
+        # so this does not reduce real concurrency.
+        with self._lock:
+            if self._closed:
+                raise WorkerClosed("Cannot request on a closed ZimWorker.")
+            self._start_locked()
+            assert self._conn is not None
+            started = time.monotonic()
+            try:
+                self._conn.send((op, kwargs))
+            except (OSError, EOFError, BrokenPipeError) as exc:
+                self._terminate_child_locked()
+                return WorkerResult(
+                    status="error",
+                    value=None,
+                    error=str(exc),
+                    elapsed_s=time.monotonic() - started,
+                )
+
+            ready = self._conn.poll(deadline_s)
+            if not ready:
+                self._terminate_child_locked()
+                return WorkerResult(
+                    status="timeout",
+                    value=None,
+                    error=f"deadline of {deadline_s}s exceeded for op={op!r}",
+                    elapsed_s=time.monotonic() - started,
+                )
+
+            try:
+                status, value, error = self._conn.recv()
+            except (EOFError, OSError, ConnectionResetError) as exc:
+                self._terminate_child_locked()
+                return WorkerResult(
+                    status="error",
+                    value=None,
+                    error=str(exc),
+                    elapsed_s=time.monotonic() - started,
+                )
+
             return WorkerResult(
-                status="error", value=None, error=str(exc), elapsed_s=time.monotonic() - started
+                status=status, value=value, error=error, elapsed_s=time.monotonic() - started
             )
 
-        ready = self._conn.poll(deadline_s)
-        if not ready:
-            self._terminate_child()
-            return WorkerResult(
-                status="timeout",
-                value=None,
-                error=f"deadline of {deadline_s}s exceeded for op={op!r}",
-                elapsed_s=time.monotonic() - started,
-            )
+    def interrupt(self) -> None:
+        """Kill the current child (if any) without closing the worker.
 
-        try:
-            status, value, error = self._conn.recv()
-        except (EOFError, OSError, ConnectionResetError) as exc:
-            self._terminate_child()
-            return WorkerResult(
-                status="error", value=None, error=str(exc), elapsed_s=time.monotonic() - started
-            )
-
-        return WorkerResult(
-            status=status, value=value, error=error, elapsed_s=time.monotonic() - started
-        )
+        Used by callers that gave up waiting on a slow ``request()`` call:
+        killing the child unblocks the in-flight ``conn.poll``/``conn.recv``
+        in whatever thread is still running that request, so it can return
+        promptly instead of being abandoned while holding the worker's
+        lock indefinitely. A later ``request()`` lazily starts a fresh
+        child, same as after any other timeout-triggered restart.
+        """
+        with self._lock:
+            self._terminate_child_locked()
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._terminate_child()
-        self._closed = True
+        with self._lock:
+            if self._closed:
+                return
+            self._terminate_child_locked()
+            self._closed = True

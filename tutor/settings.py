@@ -74,10 +74,19 @@ class ServerConfig:
 
 
 @dataclass(frozen=True)
+class AppConfig:
+    host: str
+    port: int
+    data_dir: Path
+    registry_path: Path
+
+
+@dataclass(frozen=True)
 class Config:
     runtime: RuntimeConfig
     server: ServerConfig
     sampling: SamplingConfig
+    app: AppConfig
 
 
 def _require_table(data: dict, name: str) -> dict:
@@ -194,7 +203,39 @@ def load_config(path: Path) -> Config:
 
     sampling = SamplingConfig(temperature=temperature, top_p=top_p, top_k=top_k)
 
-    return Config(runtime=runtime, server=server, sampling=sampling)
+    # [app] is optional; every key defaults, and relative data_dir/
+    # registry_path values resolve against the repo root, i.e. the config
+    # file's parent's parent (config/dev.toml -> repo root).
+    app_table = data.get("app", {})
+    if not isinstance(app_table, dict):
+        raise ConfigError("[app] must be a table")
+
+    repo_root = path.resolve().parent.parent
+
+    def _app_str(key: str, default: str) -> str:
+        value = app_table.get(key, default)
+        return _require_type(value, str, "app", key)
+
+    def _app_int(key: str, default: int) -> int:
+        value = app_table.get(key, default)
+        return _require_type(value, int, "app", key)
+
+    def _app_path(key: str, default: str) -> Path:
+        value = app_table.get(key, default)
+        value = _require_type(value, str, "app", key)
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            candidate = repo_root / candidate
+        return candidate.resolve()
+
+    app = AppConfig(
+        host=_app_str("host", "127.0.0.1"),
+        port=_app_int("port", 8420),
+        data_dir=_app_path("data_dir", "data"),
+        registry_path=_app_path("registry_path", "config/archives.dev.toml"),
+    )
+
+    return Config(runtime=runtime, server=server, sampling=sampling, app=app)
 
 
 def _main(argv: list[str]) -> int:

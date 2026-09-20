@@ -72,3 +72,51 @@ def build_uvicorn_config(cfg: Any, app: Any = None):
         host=cfg.server.host,
         port=cfg.server.port,
     )
+
+
+def _default_serve(app: FastAPI, *, host: str, port: int) -> None:
+    """Run ``app`` under uvicorn on ``host``/``port``. Only exercised for
+    real by the run scripts, never by the unit test suite (`serve` is an
+    injectable seam for tests)."""
+    import uvicorn
+
+    uvicorn.run(app, host=host, port=port)
+
+
+def _parse_args(argv: list[str]):
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="python -m tutor.app.main")
+    parser.add_argument(
+        "--config",
+        required=True,
+        help="Path to a TOML config file (e.g. config/dev.toml).",
+    )
+    return parser.parse_args(argv)
+
+
+def _main(argv: list[str], *, serve: Callable[..., None] = _default_serve) -> int:
+    import sys
+
+    from tutor.settings import ConfigError, load_config
+
+    args = _parse_args(argv)
+
+    try:
+        cfg = load_config(Path(args.config))
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    from tutor.app.compose import build_deps
+
+    deps = build_deps(cfg)
+    app = create_app(deps)
+    serve(app, host=cfg.app.host, port=cfg.app.port)
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    raise SystemExit(_main(sys.argv[1:]))

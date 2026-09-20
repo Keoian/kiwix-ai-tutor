@@ -45,13 +45,16 @@ RESPONSE_VERSION = 1
 
 _FULLTEXT_LIMIT = 20
 _TITLE_LIMIT = 10
-_TOP_N_ARTICLES = 8
+_TOP_N_ARTICLES = 6  # spec §7.2 step 4: "Top 6 articles (cap 10)."
+_TOP_N_ARTICLES_CAP = 10
 _DIVERSITY_CAP = 2
 _DEFAULT_BUDGET_TOKENS = 2000
 _DEFAULT_HARD_DEADLINE_S = 8.0
+_DEFAULT_SOFT_DEADLINE_S = 3.0
 _PER_OP_DEADLINE_CAP_S = 3.0
 _MIN_OP_DEADLINE_S = 0.05
 _QUEUE_SLACK_S = 0.05
+_THREAD_JOIN_TIMEOUT_S = 0.5
 
 _PROCEDURAL_RE = re.compile(r"\bhow (do|would|can|should) (i|you|we)\b", re.IGNORECASE)
 
@@ -131,6 +134,24 @@ def _call_worker(worker: Any, op: str, *, deadline_s: float, **kwargs: Any) -> W
     try:
         return result_box.get(timeout=deadline_s + _QUEUE_SLACK_S)
     except queue.Empty:
+        # The worker call outlived its deadline. Kill the child so the
+        # in-flight request unblocks (its `conn.poll`/`conn.recv` inside
+        # `worker.request` returns instead of being abandoned mid-call),
+        # then join the thread briefly so the next `_call_worker` on this
+        # worker cannot overlap with a still-running previous request.
+        interrupt = getattr(worker, "interrupt", None)
+        interrupted = False
+        if callable(interrupt):
+            try:
+                interrupt()
+                interrupted = True
+            except Exception:  # noqa: BLE001 - best-effort
+                pass
+        if interrupted:
+            # Killing the child should unblock the in-flight request almost
+            # immediately; join briefly to avoid overlapping the next call
+            # to this worker with a request thread that is still finishing.
+            thread.join(timeout=_THREAD_JOIN_TIMEOUT_S)
         return None
 
 
@@ -146,7 +167,9 @@ class ResearchEngine:
         worker_factory: Any = None,
         ranking_flags: RankingFlags | None = None,
         hard_deadline_s: float = _DEFAULT_HARD_DEADLINE_S,
+        soft_deadline_s: float = _DEFAULT_SOFT_DEADLINE_S,
         default_budget_tokens: int = _DEFAULT_BUDGET_TOKENS,
+        top_n_articles: int = _TOP_N_ARTICLES,
     ) -> None:
         self._registry = registry
         self._snapshot_store = snapshot_store
@@ -155,7 +178,11 @@ class ResearchEngine:
         self._worker_factory = worker_factory or (lambda path: ZimWorker(path))
         self._ranking_flags = ranking_flags or RankingFlags()
         self._hard_deadline_s = hard_deadline_s
+        self._soft_deadline_s = soft_deadline_s
         self._default_budget_tokens = default_budget_tokens
+        # Spec §7.2 step 4: "Top 6 articles (cap 10)" -- the spec's cap wins
+        # over any caller-supplied config value.
+        self._top_n_articles = min(max(top_n_articles, 1), _TOP_N_ARTICLES_CAP)
         self._workers: dict[str, Any] = {}
         self._fingerprints: dict[str, str] = {}
         self._response_cache: dict[tuple[Any, ...], ResearchResponse] = {}
@@ -189,7 +216,11 @@ class ResearchEngine:
         return entries
 
     def _process_archive(
-        self, entry: ArchiveEntry, query: str, remaining: Any
+        self,
+        entry: ArchiveEntry,
+        query: str,
+        remaining: Any,
+        keywords: list[str] | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         worker = self._get_worker(entry)
         timed_out = False
@@ -200,6 +231,12 @@ class ResearchEngine:
         # so search uses the same pinned tokenizer as BM25 rather than the
         # raw question string.
         tokens = tokenize(query)
+        # Spec §7.2 step 1: "plus the model keywords if present" -- append
+        # the (already-validated) model-supplied keywords to the lexical
+        # query terms used for candidate generation.
+        if keywords:
+            for kw in keywords:
+                tokens.extend(tokenize(kw))
         search_query = " ".join(tokens)
 
         def _op_deadline() -> float:
@@ -254,7 +291,7 @@ class ResearchEngine:
             return [], timed_out
 
         fused_articles = rrf_fuse([[h.path for h in fulltext_hits], [h.path for h in title_hits]])
-        top_paths = [path for path, _ in fused_articles[:_TOP_N_ARTICLES]]
+        top_paths = [path for path, _ in fused_articles[: self._top_n_articles]]
         article_rank = {path: i for i, path in enumerate(top_paths)}
 
         fingerprint_digest = self._fingerprint_digest(entry)
@@ -318,20 +355,29 @@ class ResearchEngine:
         self,
         query: str,
         *,
+        keywords: list[str] | None = None,
         budget_tokens: int | None = None,
         deadline_s: float | None = None,
+        soft_deadline_s: float | None = None,
         topic_hint: str | None = None,
     ) -> ResearchResponse:
-        cache_key = (query, budget_tokens, deadline_s, topic_hint)
+        keywords_key = tuple(keywords) if keywords else None
+        cache_key = (query, keywords_key, budget_tokens, deadline_s, topic_hint)
         cached = self._response_cache.get(cache_key)
         if cached is not None:
             return dataclasses.replace(cached, timings={**cached.timings, "cache_hit": True})
 
         started = time.monotonic()
         hard_deadline = deadline_s if deadline_s is not None else self._hard_deadline_s
+        soft_deadline = soft_deadline_s if soft_deadline_s is not None else self._soft_deadline_s
+        # The soft deadline can never exceed the hard one.
+        soft_deadline = min(soft_deadline, hard_deadline)
 
         def remaining() -> float:
             return hard_deadline - (time.monotonic() - started)
+
+        def soft_elapsed() -> bool:
+            return (time.monotonic() - started) >= soft_deadline
 
         archives = self._route(query, topic_hint)
         consulted: list[dict[str, Any]] = []
@@ -342,8 +388,14 @@ class ResearchEngine:
             if remaining() <= 0:
                 any_timeout = True
                 break
+            # Spec §7.4: soft deadline (3s) -- once elapsed, stop consulting
+            # further archives and return what is ready as "partial" rather
+            # than waiting all the way to the hard deadline.
+            if soft_elapsed():
+                any_timeout = True
+                break
             consulted.append({"id": entry.id, "storage": entry.storage, "tier": entry.tier})
-            cands, timed_out = self._process_archive(entry, query, remaining)
+            cands, timed_out = self._process_archive(entry, query, remaining, keywords=keywords)
             any_timeout = any_timeout or timed_out
             candidates.extend(cands)
 

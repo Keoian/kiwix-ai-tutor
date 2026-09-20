@@ -9,6 +9,9 @@ runtime/
 index_store/
 .cache/
 
+# Tutor app runtime data (snapshot DB, sessions, etc.)
+data/
+
 # Python
 __pycache__/
 *.py[cod]
