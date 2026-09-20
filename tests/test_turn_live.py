@@ -32,7 +32,7 @@ from tutor.settings import load_config
 
 pytestmark = pytest.mark.integration
 
-_CONFIG_PATHS = ["config/dev.toml"]
+_CONFIG_PATHS = ["config/dev.toml", "config/dev.granite.toml"]
 _TURN_TIMEOUT_S = 300
 
 
