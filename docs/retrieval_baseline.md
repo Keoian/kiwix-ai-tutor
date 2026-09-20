@@ -1218,3 +1218,45 @@ behavior appeared.
 - Deadlines still enforced: **met** (0 partial/deadline statuses, both
   before and after).
 - IPC-wait share vs 76% baseline: **unchanged**, ~76% (measured).
+
+## Baseline v8 -- deferred snippets + request memo
+
+**Fix 1 (deferred snippets) NOT implemented.** Traced every consumer
+(measured basis: task brief's own instruction to check before coding):
+`_process_archive`'s `_score_articles`/`hit_meta` uses each `search_fulltext`
+hit's `.snippet` (lead-text proxy) as a *ranking* signal, for **every**
+hit `search_fulltext` returns (up to 20), to decide `top_paths` itself --
+not only for hits that already survived to some later "kept" stage.
+`search_titles` never builds a snippet (`with_snippet=False` already).
+There is no post-ranking-only subset to defer to without changing which
+articles rank where, which the brief rules out ("no ranking change is
+acceptable"). Shipping "snippets(paths) only for top_paths" would be a
+ranking change (top_paths itself depends on snippets); not shipped.
+
+**Fix 2 (per-request op memo) implemented**: `_call_worker`/
+`_call_worker_multi` in `research.py` take an optional `memo` dict, keyed
+by `(id(worker), op, sorted(kwargs))`; `research()` creates one `memo` per
+request, shared across every archive consulted. A duplicate `(op, kwargs)`
+-- including two identical sub-ops in the same `multi` batch -- is served
+from the memo; only new sub-ops reach the worker. Errors are never
+memoized (retried). TDD: `tests/test_research_op_memo.py` (RED before,
+green after), full suite unaffected.
+
+Measured (`data/perq_v8_compare.py`, tuning split, real archive at
+`C:\kiwix\`, `config/archives.simplewiki_only.toml`, memo ON vs memo OFF
+i.e. exact v7 behavior, same process, run twice):
+
+| metric | v7 (doc) | v8 memo-OFF | v8 memo-ON |
+|---|---|---|---|
+| recall@1/3/5 | 0.595/0.690/0.762 | 0.595/0.690/0.762 | 0.595/0.690/0.762 |
+| MRR | 0.645 | 0.645 | 0.645 |
+| mean latency (s), run2 | 1.309-1.319 | 1.446 | 1.444 |
+| p95 latency (s), run2 | 3.125-3.187 | 3.375 | 3.328 |
+
+Recall/MRR **measured, byte-identical** to v7; per-question passages/
+snippets diffed for all 42 tuning questions (not just 10) -- **zero
+changed questions**. Latency **NOT met** (<=1.0s bar): memo-ON vs
+memo-OFF are within run-to-run noise of each other (~2ms), i.e. this
+question set's real duplicate-call rate is too small relative to the
+96%-share snippet cost (unfixed) to move the mean. Deadlines unaffected
+(memo only removes round-trips on cache hits).

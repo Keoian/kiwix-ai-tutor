@@ -598,26 +598,109 @@ def _call_worker_dispatch(
         return None
 
 
-def _call_worker(worker: Any, op: str, *, deadline_s: float, **kwargs: Any) -> WorkerResult | None:
-    """Call ``worker.request`` off-thread; see :func:`_call_worker_dispatch`."""
-    return _call_worker_dispatch(
+def _memo_key(worker: Any, op: str, kwargs: dict[str, Any]) -> tuple[Any, ...]:
+    """Key for the per-request (worker, op, args) -> result memo (Fix 2,
+    docs/retrieval_latency_profile.md "Ranked candidate fixes" #2).
+    Scoped by ``id(worker)`` too, not just ``(op, kwargs)``, so two
+    different archives' workers (which can legitimately return different
+    results for the same op/kwargs) never share a cache slot.
+    """
+    return (id(worker), op, tuple(sorted(kwargs.items())))
+
+
+def _call_worker(
+    worker: Any,
+    op: str,
+    *,
+    deadline_s: float,
+    memo: dict[tuple[Any, ...], dict[str, Any]] | None = None,
+    **kwargs: Any,
+) -> WorkerResult | None:
+    """Call ``worker.request`` off-thread; see :func:`_call_worker_dispatch`.
+
+    When ``memo`` is given, an ``(worker, op, kwargs)`` combination already
+    seen (successfully) this request is returned from the memo instead of
+    being re-sent to the worker (Fix 2). Only successful (``status ==
+    "ok"``) results are memoized; a request/timeout/error is always retried.
+    """
+    if memo is not None:
+        key = _memo_key(worker, op, kwargs)
+        cached = memo.get(key)
+        if cached is not None:
+            return WorkerResult(
+                status=cached["status"], value=cached["value"], error=cached["error"],
+                elapsed_s=0.0,
+            )
+    result = _call_worker_dispatch(
         worker, deadline_s, lambda: worker.request(op, deadline_s=deadline_s, **kwargs)
     )
+    if memo is not None and result is not None and result.status == "ok":
+        key = _memo_key(worker, op, kwargs)
+        memo[key] = {"status": result.status, "value": result.value, "error": result.error}
+    return result
 
 
 def _call_worker_multi(
-    worker: Any, ops: list[tuple[str, dict[str, Any]]], *, deadline_s: float
+    worker: Any,
+    ops: list[tuple[str, dict[str, Any]]],
+    *,
+    deadline_s: float,
+    memo: dict[tuple[Any, ...], dict[str, Any]] | None = None,
 ) -> WorkerResult | None:
     """Batch ``ops`` into a single ``multi`` round-trip (see
     ``docs/worker_batching_design.md``); off-thread the same way as
     :func:`_call_worker`. ``result.value`` (when not ``None``) is a list,
     same order/length as ``ops``, of ``{"status", "value", "error"}`` dicts.
+
+    When ``memo`` is given (Fix 2, docs/retrieval_latency_profile.md
+    "Ranked candidate fixes" #2), any sub-op whose ``(worker, op, kwargs)``
+    already has a successful cached result -- either from an earlier call
+    this request, or from an earlier, identical sub-op elsewhere in this
+    same ``ops`` list -- is answered from the memo, and only the genuinely
+    new sub-ops are sent to the worker (deduplicated by key, so two
+    identical uncached sub-ops in one batch are still only sent once).
+    Errors are never memoized, so a failed sub-op is retried next time.
+    Deadlines are unaffected: this only ever removes round-trips, it never
+    changes ``deadline_s`` or skips the deadline check on a real call.
     """
     if not ops:
         return WorkerResult(status="ok", value=[], error=None, elapsed_s=0.0)
-    return _call_worker_dispatch(
-        worker, deadline_s, lambda: worker.request("multi", deadline_s=deadline_s, ops=ops)
-    )
+    if memo is None:
+        return _call_worker_dispatch(
+            worker, deadline_s, lambda: worker.request("multi", deadline_s=deadline_s, ops=ops)
+        )
+
+    keys = [_memo_key(worker, op, kwargs) for op, kwargs in ops]
+    result_slots: list[dict[str, Any] | None] = [memo.get(k) for k in keys]
+
+    send_ops: list[tuple[str, dict[str, Any]]] = []
+    send_index_by_key: dict[tuple[Any, ...], int] = {}
+    for i, key in enumerate(keys):
+        if result_slots[i] is None and key not in send_index_by_key:
+            send_index_by_key[key] = len(send_ops)
+            send_ops.append(ops[i])
+
+    if send_ops:
+        fresh = _call_worker_dispatch(
+            worker, deadline_s, lambda: worker.request("multi", deadline_s=deadline_s, ops=send_ops)
+        )
+        if fresh is None or fresh.status not in ("ok", "partial"):
+            err_msg = "worker call timed out" if fresh is None else (fresh.error or "multi failed")
+            fresh_values: list[dict[str, Any]] = [
+                {"status": "error", "value": None, "error": err_msg} for _ in send_ops
+            ]
+        else:
+            fresh_values = fresh.value
+        for key, send_idx in send_index_by_key.items():
+            sub = fresh_values[send_idx]
+            if sub["status"] == "ok":
+                memo[key] = sub
+        for i, key in enumerate(keys):
+            if result_slots[i] is None:
+                result_slots[i] = fresh_values[send_index_by_key[key]]
+
+    overall_status = "ok" if all(r["status"] == "ok" for r in result_slots) else "partial"
+    return WorkerResult(status=overall_status, value=result_slots, error=None, elapsed_s=0.0)
 
 
 def _call_bounded(
@@ -794,6 +877,7 @@ class ResearchEngine:
         keywords: list[str] | None = None,
         topic_hint: str | None = None,
         query_vec: Sequence[float] | None = None,
+        memo: dict[tuple[Any, ...], dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], bool, str | None, list[dict[str, Any]]]:
         worker = self._get_worker(entry)
         timed_out = False
@@ -829,7 +913,7 @@ class ResearchEngine:
 
         def _search(op: str, joined_query: str, limit: int) -> tuple[list[Any], bool]:
             res = _call_worker(
-                worker, op, deadline_s=_op_deadline(), query=joined_query, limit=limit
+                worker, op, deadline_s=_op_deadline(), memo=memo, query=joined_query, limit=limit
             )
             if res is None or res.status != "ok":
                 return [], True
@@ -903,7 +987,7 @@ class ResearchEngine:
             ("search_fulltext", {"query": search_query, "limit": _FULLTEXT_LIMIT}),
             ("search_titles", {"query": search_query, "limit": _TITLE_LIMIT}),
         ]
-        initial_res = _call_worker_multi(worker, initial_ops, deadline_s=_op_deadline())
+        initial_res = _call_worker_multi(worker, initial_ops, deadline_s=_op_deadline(), memo=memo)
 
         def _unpack_initial(index: int) -> tuple[list[Any], bool]:
             if initial_res is None or initial_res.status not in ("ok", "partial"):
@@ -978,6 +1062,7 @@ class ResearchEngine:
                     worker,
                     [("estimated_matches", {"term": t}) for t in uncached_terms],
                     deadline_s=_op_deadline(),
+                    memo=memo,
                 )
                 for i, term in enumerate(uncached_terms):
                     sub_result = (
@@ -1038,7 +1123,9 @@ class ResearchEngine:
                         ("search_titles", {"query": term, "limit": _ENTITY_TITLE_RESULTS})
                     )
                     entity_ops.append(("search_fulltext", {"query": term, "limit": 1}))
-                entity_res = _call_worker_multi(worker, entity_ops, deadline_s=_op_deadline())
+                entity_res = _call_worker_multi(
+                    worker, entity_ops, deadline_s=_op_deadline(), memo=memo
+                )
                 for i in range(len(entity_terms)):
                     if entity_res is None or entity_res.status not in ("ok", "partial"):
                         timed_out = True
@@ -1239,6 +1326,7 @@ class ResearchEngine:
                 worker,
                 [("fetch_entry", {"path": path}) for path in top_paths],
                 deadline_s=fetch_deadline,
+                memo=memo,
             )
             if fetch_res is None or fetch_res.status not in ("ok", "partial"):
                 timed_out = True
@@ -1406,6 +1494,14 @@ class ResearchEngine:
                     dense_notes.append(note)
                     query_vec = None
 
+        # Fix 2 (docs/retrieval_latency_profile.md "Ranked candidate fixes"
+        # #2): one memo dict for the whole request, shared across every
+        # archive consulted (keyed by worker identity too -- see
+        # ``_memo_key`` -- so different archives' workers never collide),
+        # so a duplicate (op, kwargs) issued anywhere in this request hits
+        # the worker at most once.
+        op_memo: dict[tuple[Any, ...], dict[str, Any]] = {}
+
         def _consult(entries: list[ArchiveEntry]) -> None:
             nonlocal any_timeout, dense_used
             for entry in entries:
@@ -1427,6 +1523,7 @@ class ResearchEngine:
                     keywords=keywords,
                     topic_hint=topic_hint,
                     query_vec=query_vec,
+                    memo=op_memo,
                 )
                 any_timeout = any_timeout or timed_out
                 if dense_note is not None:
