@@ -192,7 +192,7 @@ class _SessionStore:
     ``create() -> str``, ``get(session_id) -> Session | None``, and
     ``set_subject(session_id, subject) -> bool``."""
 
-    def __init__(self, count_tokens, *, seed_exchange: bool = False) -> None:
+    def __init__(self, count_tokens, *, seed_exchange: bool = False, profiles: Any = None) -> None:
         self._count_tokens = count_tokens
         self._sessions: dict[str, Session] = {}
         self._lesson_by_session: dict[str, str] = {}
@@ -206,6 +206,24 @@ class _SessionStore:
         # (or doesn't carry) whatever it was seeded with at creation, so
         # this flag is never applied on resume.
         self._seed_exchange = seed_exchange
+        # Optional ProfileStore: when given, a lesson-attached session's
+        # ``profile_summary`` is populated from the lesson's owning
+        # profile (HANDOFF.md "Reading level" follow-up -- the profile's
+        # grade level is meant to reach the system prompt). ``None``
+        # (the default, and every plain ``create()`` session) leaves
+        # ``profile_summary`` unset, matching ``Session``'s own default.
+        self._profiles = profiles
+
+    def _profile_summary_for(self, lessons: Any, lesson_id: str) -> str | None:
+        if self._profiles is None:
+            return None
+        lesson = lessons.get_lesson(lesson_id)
+        if lesson is None or not lesson.profile_id:
+            return None
+        profile = self._profiles.get(lesson.profile_id)
+        if profile is None:
+            return None
+        return profile.prompt_summary()
 
     def create(self) -> str:
         with self._lock:
@@ -227,6 +245,7 @@ class _SessionStore:
         lesson, no prior turns): every completed turn on this session is
         then persisted into ``lessons`` by the turn runner."""
         session = lessons.new_session(lesson_id, count_tokens=self._count_tokens)
+        session.profile_summary = self._profile_summary_for(lessons, lesson_id)
         if self._seed_exchange:
             from tutor.app.seed_exchange import seed_session
 
@@ -238,6 +257,7 @@ class _SessionStore:
         attach it to a fresh session id. Raises ``ValueError`` for an
         unknown lesson (``LessonStore.resume``'s own contract)."""
         session = lessons.resume(lesson_id, count_tokens=self._count_tokens)
+        session.profile_summary = self._profile_summary_for(lessons, lesson_id)
         return self._register(session, lesson_id)
 
     def lesson_for(self, session_id: str) -> str | None:
@@ -551,12 +571,16 @@ def build_deps(cfg: Any, *, llm: Any = None, research_engine: Any = None) -> App
     count_tokens = _make_count_tokens(llm)
     from tutor.app.seed_exchange import SEED_EXCHANGE_VARIANT
 
+    profiles = ProfileStore(data_dir / "profiles.sqlite")
     prompt_variant = getattr(cfg.app, "prompt_variant", "current")
-    sessions = _SessionStore(count_tokens, seed_exchange=prompt_variant == SEED_EXCHANGE_VARIANT)
+    sessions = _SessionStore(
+        count_tokens,
+        seed_exchange=prompt_variant == SEED_EXCHANGE_VARIANT,
+        profiles=profiles,
+    )
     calc = _CalcTool()
     budget = Budget.for_ceiling(cfg.server.ctx_size)
 
-    profiles = ProfileStore(data_dir / "profiles.sqlite")
     lessons = LessonStore(data_dir / "lessons.sqlite")
     turn_logger = TurnLogger(data_dir / "logs" / "turns.jsonl")
     resource_monitor = ResourceMonitor()

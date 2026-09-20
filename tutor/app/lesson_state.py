@@ -168,6 +168,16 @@ class LessonStore:
                 (lesson_id,),
             ).fetchone()
 
+    def get_lesson(self, lesson_id: str) -> Lesson | None:
+        """Public accessor for a lesson's lifecycle fields (id, profile_id,
+        subject, ended), used to look up a lesson's owning profile without
+        exposing the raw row (e.g. to fetch the profile's grade level for
+        the system prompt -- see ``tutor.app.compose._SessionStore``)."""
+        row = self._get_lesson_row(lesson_id)
+        if row is None:
+            return None
+        return Lesson(id=row[0], profile_id=row[1], subject=row[2], ended=bool(row[3]))
+
     def end_lesson(self, lesson_id: str) -> None:
         with self._lock:
             self.connection.execute("UPDATE lessons SET ended = 1 WHERE id = ?", (lesson_id,))
