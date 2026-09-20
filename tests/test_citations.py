@@ -211,3 +211,28 @@ def test_render_evidence_renders_every_passage_and_preserves_order():
 def test_render_evidence_empty_packet_returns_empty_or_blank_string():
     rendered = render_evidence({"passages": []})
     assert rendered.strip() == ""
+
+
+def test_render_evidence_appends_citation_reminder_after_non_empty_packet():
+    """Measured (eval/run_turn_eval.py, docs/citation_experiment.md): a
+    one-line reminder appended at the end of the evidence block raised the
+    live citation rate from 0.20 to 0.60 on the fixture questions. The
+    label stays at the START of each passage line (unchanged)."""
+    packet = {
+        "passages": [
+            {
+                "label": "S1",
+                "id": "p1",
+                "title": "Water",
+                "text": "Water is wet.",
+                "kind": "article",
+            }
+        ]
+    }
+    rendered = render_evidence(packet)
+    assert rendered.startswith("[S1]")
+    assert rendered.rstrip().endswith("Cite the sources you use like [S1].")
+
+
+def test_render_evidence_no_reminder_appended_for_empty_packet():
+    assert render_evidence({"passages": []}).strip() == ""

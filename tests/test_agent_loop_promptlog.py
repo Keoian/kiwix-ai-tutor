@@ -38,7 +38,7 @@ class FakeLlmClient:
         self._scripts = list(scripts)
         self.calls: list[list[dict]] = []
 
-    def stream_chat(self, messages, *, max_tokens=None, tools=None, cancel=None):
+    def stream_chat(self, messages, *, max_tokens=None, tools=None, cancel=None, temperature=None):
         self.calls.append([dict(m) for m in messages])
         script = self._scripts.pop(0)
         yield from script

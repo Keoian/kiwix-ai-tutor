@@ -37,21 +37,24 @@ class _FakePassage:
 
 
 class _FakeResponse:
-    def __init__(self, passages):
+    def __init__(self, passages, status="ok"):
         self.passages = passages
+        self.status = status
 
 
 class _FakeEngine:
     """Deterministic fake: returns a canned ranking per question id."""
 
-    def __init__(self, rankings: dict[str, list[str]]):
+    def __init__(self, rankings: dict[str, list[str]], statuses: dict[str, str] | None = None):
         self._rankings = rankings
+        self._statuses = statuses or {}
         self.calls = []
 
     def research(self, query, **kwargs):
         self.calls.append(query)
         paths = self._rankings.get(query, [])
-        return _FakeResponse([_FakePassage(p) for p in paths])
+        status = self._statuses.get(query, "ok")
+        return _FakeResponse([_FakePassage(p) for p in paths], status=status)
 
 
 def _write_questions(tmp_path: Path, rows: list[dict]) -> Path:
@@ -98,6 +101,23 @@ def test_evaluate_recall_at_k_rank_three_only_counts_from_k3():
 def test_evaluate_miss_scores_zero_recall_and_mrr():
     engine = _FakeEngine({"Q1?": ["x", "y", "z"]})
     questions = load_questions_from_rows([_row("q1", "Q1?", ["a"])])
+    report = evaluate(engine, questions)
+    assert report.recall_at_k[5] == 0.0
+    assert report.mrr == 0.0
+
+
+def test_evaluate_unanswerable_scored_correct_when_status_empty():
+    engine = _FakeEngine({"Q1?": []}, statuses={"Q1?": "empty"})
+    questions = load_questions_from_rows([_row("q1", "Q1?", [], category="unanswerable")])
+    report = evaluate(engine, questions)
+    assert report.recall_at_k[1] == 1.0
+    assert report.recall_at_k[5] == 1.0
+    assert report.mrr == 1.0
+
+
+def test_evaluate_unanswerable_scored_wrong_when_status_ok_with_passages():
+    engine = _FakeEngine({"Q1?": ["x", "y"]}, statuses={"Q1?": "ok"})
+    questions = load_questions_from_rows([_row("q1", "Q1?", [], category="unanswerable")])
     report = evaluate(engine, questions)
     assert report.recall_at_k[5] == 0.0
     assert report.mrr == 0.0

@@ -15,7 +15,17 @@ referenced in the text; a label with no matching passage is flagged
 ``unresolved=True`` rather than silently dropped.
 
 ``render_evidence`` renders a retrieval packet's passages as the evidence
-block appended to the prompt, marking Q&A-kind passages with ``[Q&A]``.
+block appended to the prompt, marking Q&A-kind passages with ``[Q&A]``,
+with each passage's ``[S#]`` label at the START of its line and a short
+citation reminder appended at the END of the block (never inside a
+passage, so it is never mistaken for sourced text).
+
+Measured (eval/run_turn_eval.py, docs/citation_experiment.md, live
+1-bit-8B model, fixture ZIM, 5 factual questions): the trailing reminder
+alone raised the citation rate from 0.20 to 0.60 -- the biggest single
+lever of the variants tried (a one-shot example in the system prompt,
+a shorter imperative system prompt, and temperature 0.2 all did worse or
+no better). It was adopted as the host's default rendering.
 """
 
 from __future__ import annotations
@@ -73,11 +83,21 @@ def resolve_citations(text: str, packet_passages: list[dict]) -> list[Citation]:
     return citations
 
 
+_CITATION_REMINDER = "Cite the sources you use like [S1]."
+
+
 def render_evidence(packet: dict) -> str:
     """Render a retrieval packet's passages as an evidence block, one
-    line/block per passage, marking Q&A-kind passages with "[Q&A]"."""
+    line/block per passage (label at the start), marking Q&A-kind
+    passages with "[Q&A]", followed by a short citation reminder line --
+    unless the packet has no passages, in which case an empty string is
+    returned (no reminder to cite evidence that was never shown)."""
+    passages = packet.get("passages", [])
+    if not passages:
+        return ""
     lines = []
-    for passage in packet.get("passages", []):
+    for passage in passages:
         marker = " [Q&A]" if passage.get("kind") == "qa" else ""
         lines.append(f"[{passage['label']}]{marker} {passage.get('text', '')}")
+    lines.append(_CITATION_REMINDER)
     return "\n".join(lines)

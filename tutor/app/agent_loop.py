@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from tutor.app.citations import extract_labels, render_evidence
 from tutor.app.prompt import PromptOverflow
@@ -44,6 +45,16 @@ _STUDENT_SAFE_ERROR = (
     "Sorry, I ran into a problem answering that. Please try asking again."
 )
 
+_SYSTEM_PROMPT_PATH = Path(__file__).with_name("system_prompt.txt")
+
+
+def _load_default_system_text() -> str:
+    """Read the host's default system prompt from ``system_prompt.txt``
+    (kept in a plain-text file so it's easy to review/diff independently
+    of the code, and so ``eval/run_turn_eval.py`` can swap variants in
+    without touching this module's source)."""
+    return _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
+
 
 @dataclass
 class TurnResult:
@@ -54,6 +65,14 @@ class TurnResult:
     calc_calls: int = 0
     cached_tokens: int | None = 0
     events: list = field(default_factory=list)
+    uncited: bool = False
+    """True when the route was a factual pre-retrieval (evidence was
+    supplied) but the model's final answer contains no [S#] label at all.
+    Per spec §11/§12 the host never fabricates a citation the model did
+    not write; this flag only tells the UI to show an "uncited" notice
+    (§12's chat pane already distinguishes source-backed/computed/own-
+    example statement styles, so this is the same kind of provenance
+    signal, not a new citation)."""
 
 
 def _passage_to_dict(passage) -> dict:
@@ -131,6 +150,8 @@ def run_turn(
     budget,
     emit,
     cancel: threading.Event | None = None,
+    system_text_override: str | None = None,
+    temperature: float | None = None,
 ) -> TurnResult:
     research_calls = 0
     calc_calls = 0
@@ -141,9 +162,9 @@ def run_turn(
     use_log = log is not None and hasattr(log, "append_user")
 
     system_text = (
-        "You are an offline tutor. Teach rather than answer outright, cite "
-        "[S#] for source-backed statements, and use the calc tool before "
-        "asserting arithmetic beyond single-digit numbers."
+        system_text_override
+        if system_text_override is not None
+        else _load_default_system_text()
     )
     profile_summary = getattr(session, "profile_summary", None)
     if profile_summary:
@@ -213,7 +234,9 @@ def run_turn(
         usage: dict = {}
         errored = False
 
-        for evt in llm.stream_chat(messages, tools=TOOLS, cancel=cancel):
+        for evt in llm.stream_chat(
+            messages, tools=TOOLS, cancel=cancel, temperature=temperature
+        ):
             if evt.kind == "token":
                 answer_text_parts.append(evt.text or "")
                 emit(evt)
@@ -250,8 +273,10 @@ def run_turn(
 
         if not tool_calls:
             answer_text = "".join(answer_text_parts)
+            labels = extract_labels(answer_text)
             if use_log:
-                log.append_assistant(answer_text, cited_labels=extract_labels(answer_text))
+                log.append_assistant(answer_text, cited_labels=labels)
+            uncited = route.startswith("preretrieve") and not labels
             return TurnResult(
                 status="ok",
                 answer_text=answer_text,
@@ -260,6 +285,7 @@ def run_turn(
                 calc_calls=calc_calls,
                 cached_tokens=usage.get("cached_tokens", 0),
                 events=events,
+                uncited=uncited,
             )
 
         # Record the assistant's tool-call turn, then dispatch each call.

@@ -201,9 +201,12 @@ def test_factual_question_pre_retrieves_streams_and_resolves_citations(live_app)
     if not citations:
         pytest.xfail(
             "model behaviour: no [S#] citation emitted for this fixture "
-            "question (measured 0/3 runs on 2026-09-20 against "
-            "config/dev.toml's Bonsai-8B-Q1_0 model with a single fixture "
-            "archive; see docs/M3_report.md)"
+            "question (measured 3/5 (60%) on 2026-09-20 across 5 fixture "
+            "questions against config/dev.toml's Bonsai-8B-Q1_0 model, "
+            "after adopting the evidence-block citation reminder in "
+            "tutor.app.citations.render_evidence -- up from 0.20 with the "
+            "prior renderer, still below the 80% bar for a hard assertion; "
+            "see eval/run_turn_eval.py and docs/citation_experiment.md)"
         )
 
 

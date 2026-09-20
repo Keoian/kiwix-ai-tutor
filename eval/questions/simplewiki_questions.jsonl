@@ -1,0 +1,60 @@
+{"id": "sw01", "question": "What is photosynthesis?", "expected_paths": ["Photosynthesis"], "category": "direct", "split": "tuning"}
+{"id": "sw02", "question": "What is the Pythagorean theorem?", "expected_paths": ["Pythagorean_theorem"], "category": "direct", "split": "tuning"}
+{"id": "sw03", "question": "What is algebra?", "expected_paths": ["Algebra"], "category": "direct", "split": "tuning"}
+{"id": "sw04", "question": "What is the water cycle?", "expected_paths": ["Water_cycle"], "category": "direct", "split": "tuning"}
+{"id": "sw05", "question": "What is a chemical bond?", "expected_paths": ["Chemical_bond"], "category": "direct", "split": "tuning"}
+{"id": "sw06", "question": "What is the periodic table?", "expected_paths": ["Periodic_table"], "category": "direct", "split": "tuning"}
+{"id": "sw07", "question": "What is geometry?", "expected_paths": ["Geometry"], "category": "direct", "split": "tuning"}
+{"id": "sw08", "question": "What is the Solar System?", "expected_paths": ["Solar_System"], "category": "direct", "split": "tuning"}
+{"id": "sw09", "question": "What is gravity?", "expected_paths": ["Gravity"], "category": "direct", "split": "tuning"}
+{"id": "sw10", "question": "What is a volcano?", "expected_paths": ["Volcano"], "category": "direct", "split": "tuning"}
+{"id": "sw11", "question": "What is democracy?", "expected_paths": ["Democracy"], "category": "direct", "split": "heldout"}
+{"id": "sw12", "question": "Who was William Shakespeare?", "expected_paths": ["William_Shakespeare"], "category": "direct", "split": "heldout"}
+{"id": "sw13", "question": "What is a metaphor?", "expected_paths": ["Metaphor"], "category": "direct", "split": "heldout"}
+{"id": "sw14", "question": "What is DNA?", "expected_paths": ["DNA"], "category": "direct", "split": "heldout"}
+{"id": "sw15", "question": "What is an ecosystem?", "expected_paths": ["Ecosystem"], "category": "direct", "split": "heldout"}
+{"id": "sw16", "question": "What is an atom?", "expected_paths": ["Atom"], "category": "direct", "split": "heldout"}
+{"id": "sw17", "question": "What is a prime number?", "expected_paths": ["Prime_number"], "category": "direct", "split": "heldout"}
+{"id": "sw18", "question": "Who was Charles Darwin?", "expected_paths": ["Charles_Darwin"], "category": "direct", "split": "heldout"}
+{"id": "sw19", "question": "What is a noun?", "expected_paths": ["Noun"], "category": "direct", "split": "heldout"}
+{"id": "sw20", "question": "What is a verb?", "expected_paths": ["Verb"], "category": "direct", "split": "heldout"}
+{"id": "sw21", "question": "What caused World War Two?", "expected_paths": ["World_War_II"], "category": "why_how", "split": "tuning"}
+{"id": "sw22", "question": "Why did the French Revolution happen?", "expected_paths": ["French_Revolution"], "category": "why_how", "split": "tuning"}
+{"id": "sw23", "question": "How do Newton's laws of motion explain how things move?", "expected_paths": ["Newton's_laws_of_motion"], "category": "why_how", "split": "tuning"}
+{"id": "sw24", "question": "Why do earthquakes happen?", "expected_paths": ["Earthquake"], "category": "why_how", "split": "tuning"}
+{"id": "sw25", "question": "How does cellular respiration work in cells?", "expected_paths": ["Cellular_respiration"], "category": "why_how", "split": "tuning"}
+{"id": "sw26", "question": "Why is climate change happening?", "expected_paths": ["Climate_change"], "category": "why_how", "split": "heldout"}
+{"id": "sw27", "question": "Why did the Industrial Revolution start?", "expected_paths": ["Industrial_Revolution"], "category": "why_how", "split": "heldout"}
+{"id": "sw28", "question": "How did the Great Depression start?", "expected_paths": ["Great_Depression"], "category": "why_how", "split": "heldout"}
+{"id": "sw29", "question": "Why does the Cold War matter in history?", "expected_paths": ["Cold_War"], "category": "why_how", "split": "heldout"}
+{"id": "sw30", "question": "How does continental drift explain how continents move?", "expected_paths": ["Continental_drift"], "category": "why_how", "split": "heldout"}
+{"id": "sw31", "question": "What is the difference between a mammal and a reptile?", "expected_paths": ["Mammal", "Reptile"], "category": "comparison", "split": "tuning"}
+{"id": "sw32", "question": "How is a frog different from a butterfly?", "expected_paths": ["Frog", "Butterfly"], "category": "comparison", "split": "tuning"}
+{"id": "sw33", "question": "What is the difference between Ancient Egypt and Ancient Rome?", "expected_paths": ["Ancient_Egypt", "Ancient_Rome"], "category": "comparison", "split": "tuning"}
+{"id": "sw34", "question": "How are a noun and a verb different?", "expected_paths": ["Noun", "Verb"], "category": "comparison", "split": "tuning"}
+{"id": "sw35", "question": "What is the difference between velocity and density?", "expected_paths": ["Velocity", "Density"], "category": "comparison", "split": "tuning"}
+{"id": "sw36", "question": "How does World War One compare to World War Two?", "expected_paths": ["World_War_I", "World_War_II"], "category": "comparison", "split": "heldout"}
+{"id": "sw37", "question": "What is the difference between Isaac Newton and Albert Einstein's ideas?", "expected_paths": ["Isaac_Newton", "Albert_Einstein"], "category": "comparison", "split": "heldout"}
+{"id": "sw38", "question": "How is a simile different from a metaphor?", "expected_paths": ["Simile", "Metaphor"], "category": "comparison", "split": "heldout"}
+{"id": "sw39", "question": "What is the difference between a photon and a mole of atoms?", "expected_paths": ["Photon", "Atom"], "category": "comparison", "split": "heldout"}
+{"id": "sw40", "question": "How does an earthquake compare to a volcanic eruption?", "expected_paths": ["Earthquake", "Volcanic_eruption"], "category": "comparison", "split": "heldout"}
+{"id": "sw41", "question": "What made it explode like that?", "expected_paths": ["Volcano"], "category": "elliptical", "split": "tuning"}
+{"id": "sw42", "question": "Who wrote that play about the two lovers who die?", "expected_paths": ["Romeo_and_Juliet"], "category": "elliptical", "split": "tuning"}
+{"id": "sw43", "question": "What is it made of, again?", "expected_paths": ["Atom"], "category": "elliptical", "split": "heldout"}
+{"id": "sw44", "question": "How fast does it travel through space?", "expected_paths": ["Speed_of_light"], "category": "elliptical", "split": "heldout"}
+{"id": "sw45", "question": "Who ended up winning that war in Europe?", "expected_paths": ["World_War_II"], "category": "elliptical", "split": "heldout"}
+{"id": "sw46", "question": "What is the flibbertigibbetopolis effect in physics?", "expected_paths": [], "category": "absent", "split": "tuning"}
+{"id": "sw47", "question": "Tell me about the country of Nonexistenttopicxyzabc.", "expected_paths": [], "category": "absent", "split": "tuning"}
+{"id": "sw48", "question": "What year did unicorns go extinct?", "expected_paths": [], "category": "false_premise", "split": "tuning"}
+{"id": "sw49", "question": "What is the capital of the Moon?", "expected_paths": [], "category": "false_premise", "split": "tuning"}
+{"id": "sw50", "question": "How many legs does a snake have?", "expected_paths": [], "category": "false_premise", "split": "tuning"}
+{"id": "sw51", "question": "What is the national dish of Atlantis?", "expected_paths": [], "category": "absent", "split": "heldout"}
+{"id": "sw52", "question": "Who was the fifth president of Mars?", "expected_paths": [], "category": "false_premise", "split": "heldout"}
+{"id": "sw53", "question": "What is the boiling point of gold at sea level on the Moon?", "expected_paths": [], "category": "false_premise", "split": "heldout"}
+{"id": "sw54", "question": "Tell me about the ziggurat-building empire of Quibblonia.", "expected_paths": [], "category": "absent", "split": "heldout"}
+{"id": "sw55", "question": "What is a groobly number in maths?", "expected_paths": [], "category": "absent", "split": "heldout"}
+{"id": "sw56", "question": "What does the multiplication table look like?", "expected_paths": ["Multiplication_table"], "category": "tables_formulas", "split": "tuning"}
+{"id": "sw57", "question": "What is the chemical formula written for water?", "expected_paths": ["Chemical_formula"], "category": "tables_formulas", "split": "tuning"}
+{"id": "sw58", "question": "What is a table made of, as furniture?", "expected_paths": ["Table_(furniture)"], "category": "tables_formulas", "split": "tuning"}
+{"id": "sw59", "question": "What are metric prefixes used for in units?", "expected_paths": ["Metric_prefix"], "category": "tables_formulas", "split": "heldout"}
+{"id": "sw60", "question": "What is a fraction in maths?", "expected_paths": ["Fraction_(mathematics)"], "category": "tables_formulas", "split": "heldout"}

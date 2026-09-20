@@ -187,6 +187,7 @@ def _make_turn_runner(*, sessions: _SessionStore, llm, research_engine, calc, bu
                     "calc_calls": result.calc_calls,
                     "cached_tokens": result.cached_tokens or 0,
                     "tokens_used": session.log.tokens_used(),
+                    "uncited": result.uncited,
                 },
             )
         elif result.status == "cancelled":

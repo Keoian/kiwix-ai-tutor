@@ -29,3 +29,15 @@ open + metadata only.
 
 Every archive present on D:\Kiwix validated as VALID with a full-text index; none were
 NO_FULLTEXT_INDEX or corrupt.
+
+## simplewiki tier-1 archive (M2, 2026-09-20)
+
+`C:\kiwix\wikipedia_en_simple_all_maxi_2026-05.zim` (3.4 GB, SSD) now exists and was
+validated with `tutor.retrieval.zim.archive.validate_archive` + `fingerprint`:
+
+| id | state | has_fulltext_index | article_count | uuid | digest (sha256, truncated) |
+|---|---|---|---|---|---|
+| simplewiki | VALID | True | 394566 | 7623b2f2-ca9e-08b6-c254-d17e4b9131e7 | 63e73b397230ad9fc5a22040173fd1375a0bba3... |
+
+Metadata: language `eng`, name `wikipedia_en_simple_all`, title "Wikipedia in simple
+English", date `2026-05-10`.

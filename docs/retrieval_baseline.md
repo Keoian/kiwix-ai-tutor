@@ -81,10 +81,157 @@ in-memory fixture ZIM built by `tests/zim_fixtures.py`:
 (`tests/test_retrieval_eval.py::test_end_to_end_fixture_recall_at_5_meets_bar`
 asserts `recall@5 >= 0.75`; the fixture run above clears that bar.)
 
-## Real tier-1 baseline: PENDING
+## Real tier-1 baseline (M2, 2026-09-20)
 
-`C:\kiwix\wikipedia_en_simple_all_maxi_2026-05.zim` is **not yet
-available** -- only a `.part` file exists at that path (~797 MB so far,
-download in progress via `fetch.log`). No evaluation was run against it;
-this baseline will be extended once the download completes and the
-`.part` suffix is gone.
+`C:\kiwix\wikipedia_en_simple_all_maxi_2026-05.zim` (394,566 articles, SSD)
+is now present and validated (see `docs/archive_registry.md`). Evaluated
+against a registry containing **only** `simplewiki` (`eval/tmp/
+simplewiki_only.toml`), using `eval/questions/simplewiki_questions.jsonl`
+(60 questions, 30 tuning / 30 held-out, 7 categories: `direct`,
+`why_how`, `comparison`, `elliptical`, `absent`, `false_premise`,
+`tables_formulas` -- see docs/plan/offline_tutor_spec_v0.3.md §15's
+60-question structure; `absent`/`false_premise` stand in for that
+spec's "ambiguity/false-premise/absent" bucket, scored as correct only
+when the engine returns `status == "empty"` with no passages). Every
+`expected_paths` entry was verified to resolve through
+`tutor.retrieval.zim.resolve.resolve_entry` in the real archive and to
+contain an expected keyword before being added to the question file
+(scratch verification script, not checked in). The archive uses a flat,
+underscore-joined path scheme with no namespace prefix (e.g.
+`Photosynthesis`, `Newton's_laws_of_motion`), discovered via
+`search_titles` -- `resolve_entry` does not fall back to title search,
+so a caller must already know this scheme.
+
+### Tuning split (warm, n=30)
+
+| metric | recall@1 | recall@3 | recall@5 | mrr | mean latency (s) | n |
+|---|---|---|---|---|---|---|
+| overall | 0.467 | 0.500 | 0.500 | 0.481 | 0.652 | 30 |
+| absent | 0.000 | 0.000 | 0.000 | 0.000 | 1.273 | 2 |
+| comparison | 0.200 | 0.400 | 0.400 | 0.267 | 0.659 | 5 |
+| direct | 1.000 | 1.000 | 1.000 | 1.000 | 0.480 | 10 |
+| elliptical | 0.000 | 0.000 | 0.000 | 0.000 | 0.618 | 2 |
+| false_premise | 0.000 | 0.000 | 0.000 | 0.000 | 0.568 | 3 |
+| tables_formulas | 0.333 | 0.333 | 0.333 | 0.370 | 0.516 | 3 |
+| why_how | 0.400 | 0.400 | 0.400 | 0.400 | 0.884 | 5 |
+
+### Tuning split (cold: first run after clearing `.retrieval_eval_cache`, n=30)
+
+Overall recall/MRR are identical to the warm run (same deterministic
+pipeline, only latency changes): mean latency 0.922 s (cold, first run
+after clearing `.retrieval_eval_cache`) vs 0.652 s (warm, immediately
+rerun with the same cache) -- the ~40% cold penalty is worker startup
+plus first-touch disk I/O on the 3.4 GB archive. Both are comfortably
+inside the 8 s hard deadline. A dedicated per-query p50/p95 percentile
+run was attempted but the scratch script crashed on a Windows file-lock
+race when tearing down the ZIM worker between cold/warm phases; it was
+not repeated within this milestone's time box. The category means below
+(0.48 s-2.5 s) are the best available signal on tail latency, and the
+absent/false_premise tail (worth investigating, see failure analysis)
+is the one category plausibly close to or over the 1.5 s warm-p95 spec
+target on a per-query basis.
+
+### Held-out split (warm, n=30)
+
+| metric | recall@1 | recall@3 | recall@5 | mrr | mean latency (s) | n |
+|---|---|---|---|---|---|---|
+| overall | 0.567 | 0.600 | 0.600 | 0.578 | 1.126 | 30 |
+| absent | 0.000 | 0.000 | 0.000 | 0.000 | 2.250 | 3 |
+| comparison | 0.400 | 0.600 | 0.600 | 0.467 | 0.819 | 5 |
+| direct | 1.000 | 1.000 | 1.000 | 1.000 | 0.692 | 10 |
+| elliptical | 0.000 | 0.000 | 0.000 | 0.000 | 1.635 | 3 |
+| false_premise | 0.000 | 0.000 | 0.000 | 0.000 | 2.547 | 2 |
+| tables_formulas | 0.500 | 0.500 | 0.500 | 0.500 | 0.742 | 2 |
+| why_how | 0.800 | 0.800 | 0.800 | 0.800 | 0.906 | 5 |
+
+Held-out `expected_paths` were chosen from domain knowledge plus the
+existence/keyword check only, before ever running the engine on them --
+no tuning was done against this split.
+
+### Latency (all 60 questions, storage class ssd)
+
+Warm/cold means above are drawn from the eval harness's own
+per-question timer (includes worker round-trip, BM25, RRF, packing).
+See `docs/plan/offline_tutor_spec_v0.3.md` §15's "Retrieval latency:
+warm p95 <= 1.5 s; hard deadline 8 s" gate: every individual query in
+both splits completed well under the 8 s hard deadline; the slowest
+individual query observed (an `absent`/`false_premise` item that
+exhausts the tier-1 fallback path) was ~2.5 s, above the 1.5 s p95
+target -- flagged below as a tuning candidate, not fixed in this
+milestone per the "no tuning on held-out, small justified changes only"
+constraint.
+
+Across all 60 questions (one warm pass): `partial` status rate 0.0%
+(no query hit the per-op deadline cap against this SSD-resident
+archive), mean packed tokens 1091.1 (well under the 2000-token default
+budget, consistent with the small `_TOP_N_ARTICLES = 8` / diversity-cap
+= 2 producing fewer packed passages than the budget allows for
+single-article `direct` questions).
+
+### Failure analysis
+
+`direct` questions hit recall@1 = 1.0 on both splits: single-topic
+lexical lookups are where BM25 + title-suggestion RRF shines. Every
+other category has a real miss pattern:
+
+1. **`why_how` (sw21, "What caused World War Two?")** -- top hits were
+   `Causes_of_World_War_I` (near-duplicate title, wrong war) ahead of
+   `World_War_II` itself; BM25 over-weights the literal token overlap
+   ("caused"/"Causes") over the year/number distinguishing the two
+   wars.
+2. **`comparison` (sw31, "difference between a mammal and a reptile")**
+   -- returned `Synapsid`/`Vertebrate`/`Difference` (a spurious hit on
+   the literal word "difference") instead of either target article;
+   comparison questions need per-entity sub-queries, not one fused
+   query, to recall both sides.
+3. **`elliptical` (sw41, "What made it explode like that?")** -- with
+   no antecedent, the pipeline has no way to resolve "it"; it returned
+   `Chlorine_dioxide`/`Hand_grenade` (topically "explode"-adjacent but
+   wrong). Elliptical follow-ups need conversation-state carryover,
+   which pure single-shot lexical retrieval structurally cannot supply
+   -- this is a known-scope gap, not a bug.
+4. **`tables_formulas` (sw57, "chemical formula for water")** -- missed
+   `Chemical_formula` entirely (`Anion`/`Grignard_reagent` instead);
+   the query's dominant content word "water" pulled in chemistry
+   articles that mention water, outranking the conceptually-relevant
+   but lexically-thin `Chemical_formula` article.
+5. **`absent`/`false_premise` (all 10 items across both splits)** --
+   recall is 0.000 by construction of the current scoring rule: the
+   engine never returns `status == "empty"` for these queries because
+   its lexical fallback (per-token OR search) reliably surfaces *some*
+   article for almost any English phrase, even a fabricated proper
+   noun ("Quibblonia", "flibbertigibbetopolis"). The pipeline has no
+   confidence/abstention signal today -- it always answers with its
+   best lexical guess. This is the single most consequential gap
+   surfaced by this eval: real students *will* ask false-premise or
+   off-corpus questions, and the tutor currently has no way to notice.
+
+### What would most likely help next (hypotheses, unvalidated)
+
+- **Abstention signal (highest expected payoff).** Add a coverage
+  score (e.g. top BM25/RRF score below a threshold, or Xapian relevance
+  below a floor) so `status` can become `"empty"`/`"weak"` for
+  off-corpus and false-premise queries instead of always returning a
+  best-effort guess. This is the WP-B8 `coverage.weak` flag already
+  scaffolded in the response contract (`coverage: {"weak": bool}`) --
+  it just isn't populated yet.
+- **Multi-entity comparison queries.** For "difference between X and
+  Y" phrasing, run two focused sub-queries (one per named entity) and
+  union/interleave results instead of one fused query -- would likely
+  fix most `comparison` misses.
+- **Title-boost ranking flag (WP-B8, currently OFF).** `why_how` misses
+  like sw21 look like exactly the "near-duplicate title" case a title
+  boost or exact-title exact-match short-circuit is meant to catch;
+  worth an eval run with `title_boost` on to see if it clears the
+  tuning bar without regressing held-out, before flipping it on for
+  real.
+- **Dense/embedding retrieval (WP-B7/M4).** `elliptical` misses are
+  out of lexical retrieval's reach by construction (no antecedent to
+  match tokens against); dense retrieval over the *conversation
+  context* rather than the bare question is the documented next step
+  in the spec's phase plan, not a same-milestone fix.
+- Given the 90-minute measured window, per-question latency is not the
+  bottleneck (median well under 1 s on SSD); the false_premise/absent
+  path's ~2.5 s tail is worth a look only after abstention is fixed,
+  since the extra time is spent trying (and failing) to fetch a
+  best-effort answer that a coverage threshold would just skip.

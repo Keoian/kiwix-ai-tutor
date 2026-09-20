@@ -74,6 +74,19 @@ def _score_one(
     started = time.monotonic()
     response = engine.research(question.question)
     elapsed = time.monotonic() - started
+
+    if not question.expected_paths:
+        # Unanswerable/absent items: correct iff the engine reports no (or
+        # weak) coverage rather than confidently returning passages. See
+        # docs/plan/offline_tutor_spec_v0.3.md §15 "ambiguity/false-premise/
+        # absent" category -- the eval fixture format predates this case, so
+        # we approximate "answered nothing" as status == "empty" with no
+        # passages returned.
+        status = getattr(response, "status", "ok")
+        correct = status == "empty" and not response.passages
+        value = 1.0 if correct else 0.0
+        return {k: value for k in ks}, value, elapsed
+
     paths = [p.path for p in response.passages]
     hit_rank: int | None = None
     for i, path in enumerate(paths):
