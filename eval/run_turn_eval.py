@@ -29,6 +29,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from eval.attribution_scoring import (
+    micro_average_backed_sentence_rate,
+    sentence_attribution_counts,
+)
+from eval.attribution_scoring import (
+    unbacked_number_rate as _unbacked_number_rate,
+)
 from tutor.app.citations import detect_evidence_dump, extract_labels, resolve_citations
 
 _QUESTIONS_PATH = Path(__file__).parent / "questions" / "fixture_questions.jsonl"
@@ -83,6 +90,13 @@ class AnswerRecord:
     this answer, already computed by the caller (``run_variant`` below)
     since it needs the retrieval packet's passages, which this record does
     not otherwise carry."""
+    passages: list[dict] = field(default_factory=list)
+    """The turn's known passages (same shape as ``resolve_citations``'s
+    ``packet_passages``: dicts with "label"/"id"/"text"/"path"/... keys),
+    used by ``score_answer`` to compute ``backed_sentence_rate`` /
+    ``has_unbacked_number`` via ``tutor.app.citations.attribute_sentences``.
+    Kept on the record (not just derived in ``run_variant``) so a JSON
+    dump of ``AnswerRecord``-shaped details can be rescored offline."""
 
 
 def score_answer(record: AnswerRecord) -> dict:
@@ -111,6 +125,8 @@ def score_answer(record: AnswerRecord) -> dict:
     lowered = record.answer_text.lower()
     taught = any(marker in lowered for marker in _TEACHING_MARKERS)
 
+    attribution = sentence_attribution_counts(record.answer_text, record.passages)
+
     return {
         "question_id": record.question_id,
         "has_citation": has_citation,
@@ -123,6 +139,10 @@ def score_answer(record: AnswerRecord) -> dict:
         "taught": taught,
         "evidence_dump": record.evidence_dump,
         "uncited": not has_citation,
+        "attributed_sentences": attribution["attributed_sentences"],
+        "unbacked_sentences": attribution["unbacked_sentences"],
+        "has_unbacked_number": attribution["has_unbacked_number"],
+        "backed_sentence_rate": attribution["backed_sentence_rate"],
     }
 
 
@@ -161,7 +181,11 @@ def aggregate(scores: list[dict]) -> dict:
             "on_topic_rate": 0.0,
             "taught_rate": 0.0,
             "avg_answer_len_chars": 0.0,
+            "backed_sentence_rate": 0.0,
+            "unbacked_number_rate": 0.0,
         }
+    backed_rate = micro_average_backed_sentence_rate(scores)
+    number_rate = _unbacked_number_rate(scores)
     return {
         "n": n,
         "citation_rate": sum(s["has_citation"] for s in scores) / n,
@@ -171,6 +195,11 @@ def aggregate(scores: list[dict]) -> dict:
         "on_topic_rate": sum(s["on_topic_citation"] for s in scores) / n,
         "taught_rate": sum(s["taught"] for s in scores) / n,
         "avg_answer_len_chars": sum(s["answer_len_chars"] for s in scores) / n,
+        # backed_sentence_rate / unbacked_number_rate (docs/attribution_design.md):
+        # micro-averaged over sentence counts, not a plain mean of per-turn
+        # rates -- see eval.attribution_scoring.
+        "backed_sentence_rate": backed_rate if backed_rate is not None else 0.0,
+        "unbacked_number_rate": number_rate if number_rate is not None else 0.0,
     }
 
 
@@ -178,8 +207,9 @@ def render_report(variant_summaries: dict[str, dict]) -> str:
     """Render a Markdown table, one row per variant, in insertion order."""
     header = (
         "| Variant | n | citation_rate | all_resolve_rate | supported_citation_rate "
-        "| evidence_dump_rate | on_topic_rate | taught_rate | avg_len |\n"
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|"
+        "| evidence_dump_rate | on_topic_rate | taught_rate | backed_sentence_rate "
+        "| unbacked_number_rate | avg_len |\n"
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
     )
     rows = []
     for name, summary in variant_summaries.items():
@@ -187,7 +217,8 @@ def render_report(variant_summaries: dict[str, dict]) -> str:
             f"| {name} | {summary['n']} | {summary['citation_rate']:.2f} "
             f"| {summary['all_resolve_rate']:.2f} | {summary['supported_citation_rate']:.2f} "
             f"| {summary['evidence_dump_rate']:.2f} | {summary['on_topic_rate']:.2f} "
-            f"| {summary['taught_rate']:.2f} | {summary['avg_answer_len_chars']:.0f} |"
+            f"| {summary['taught_rate']:.2f} | {summary['backed_sentence_rate']:.2f} "
+            f"| {summary['unbacked_number_rate']:.2f} | {summary['avg_answer_len_chars']:.0f} |"
         )
     return "\n".join([header, *rows])
 
@@ -268,6 +299,7 @@ def run_variant(
                 evidence_dump=detect_evidence_dump(
                     result.answer_text, resolved_citations, known_passages
                 ),
+                passages=known_passages,
             )
             scored = score_answer(record)
             scored["calc_calls"] = result.calc_calls
@@ -283,6 +315,18 @@ def run_variant(
                     "answer_text": result.answer_text,
                     "citations": citations,
                     "route": result.route,
+                    # Kept (compactly -- only the fields attribute_sentences
+                    # needs) so the per-question JSON dump can be rescored
+                    # offline without re-running retrieval.
+                    "passages": [
+                        {
+                            "label": p.get("label"),
+                            "id": p.get("id"),
+                            "path": p.get("path"),
+                            "text": p.get("text"),
+                        }
+                        for p in known_passages
+                    ],
                 }
             )
     finally:

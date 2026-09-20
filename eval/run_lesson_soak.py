@@ -38,6 +38,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from eval.attribution_scoring import (
+    micro_average_backed_sentence_rate,
+    sentence_attribution_counts,
+)
+from eval.attribution_scoring import (
+    unbacked_number_rate as _unbacked_number_rate,
+)
+
 # ---------------------------------------------------------------------------
 # The scripted lesson (pure data)
 # ---------------------------------------------------------------------------
@@ -153,6 +161,17 @@ class TurnRecord:
     unsupported_labels: list[str] = field(default_factory=list)
     citation_quality: str | None = None
     evidence_dump: bool = False
+    passages: list[dict] = field(default_factory=list)
+    """The turn's known passages (same shape ``resolve_citations``/
+    ``attribute_sentences`` take), used by ``aggregate`` to compute
+    ``backed_sentence_rate``/``unbacked_number_rate`` (docs/
+    attribution_design.md) and kept in the per-turn JSON dump
+    (``write_turns_dump``) so a run can be rescored offline. NOTE: the
+    live ``run_soak`` below currently has no passage text to put here --
+    the ``citations`` SSE event (``tutor/app/compose.py``) carries label/
+    path/support flags only, not passage bodies -- so this stays ``[]``
+    for real soaks until that event is extended (out of this task's
+    scope: eval/ only)."""
 
     @property
     def is_factual(self) -> bool:
@@ -210,6 +229,12 @@ def aggregate(records: list[TurnRecord]) -> dict[str, Any]:
     supported_turns = sum(1 for r in factual if r.labels and not r.unsupported_labels)
     evidence_dump_turns = sum(1 for r in factual if r.evidence_dump)
 
+    attribution_counts = [
+        sentence_attribution_counts(r.answer_text, r.passages) for r in factual
+    ]
+    backed_sentence_rate = micro_average_backed_sentence_rate(attribution_counts)
+    unbacked_number_rate = _unbacked_number_rate(attribution_counts)
+
     calc_items = [r for r in ok if r.expected_calc is not None]
     calc_correct = [r for r in calc_items if r.calc_correct]
 
@@ -254,6 +279,8 @@ def aggregate(records: list[TurnRecord]) -> dict[str, Any]:
         "supported_turns": supported_turns,
         "supported_rate": (supported_turns / len(factual)) if factual else None,
         "evidence_dump_turns": evidence_dump_turns,
+        "backed_sentence_rate": backed_sentence_rate,
+        "unbacked_number_rate": unbacked_number_rate,
         "calc_items": len(calc_items),
         "calc_correct": len(calc_correct),
         "calc_accuracy": (len(calc_correct) / len(calc_items)) if calc_items else None,
@@ -420,6 +447,16 @@ def render_report(
     lines.append(
         f"| uncited_rate | {_fmt(summary['uncited_rate'])} | "
         "factual turns with no [S#] citation at all (== 1 - cited_rate) |"
+    )
+    lines.append(
+        f"| backed_sentence_rate | {_fmt(summary['backed_sentence_rate'])} | "
+        "host-side sentence attribution (tutor.app.citations.attribute_sentences): "
+        "attributed sentences / (attributed + unbacked sentences), micro-averaged "
+        "over factual turns |"
+    )
+    lines.append(
+        f"| unbacked_number_rate | {_fmt(summary['unbacked_number_rate'])} | "
+        "factual turns with >=1 sentence carrying a figure attributed to no passage |"
     )
     lines.append("")
 
@@ -784,6 +821,11 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
                         unsupported_labels=unsupported_labels,
                         citation_quality=citation_quality,
                         evidence_dump=evidence_dump,
+                        # See TurnRecord.passages docstring: the wire
+                        # protocol has no passage text today, so
+                        # backed_sentence_rate/unbacked_number_rate read
+                        # as None for a live soak until that's added.
+                        passages=[],
                     )
                 )
 

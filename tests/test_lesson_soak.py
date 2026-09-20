@@ -113,6 +113,7 @@ def _rec(**kwargs) -> TurnRecord:
         unsupported_labels=[],
         citation_quality="ok",
         evidence_dump=False,
+        passages=[],
     )
     base.update(kwargs)
     return TurnRecord(**base)
@@ -227,6 +228,62 @@ def test_aggregate_empty_records_does_not_crash():
 
 
 # ---------------------------------------------------------------------------
+# backed_sentence_rate / unbacked_number_rate (docs/attribution_design.md,
+# eval.attribution_scoring), over factual turns only, computed from
+# answer_text + passages via tutor.app.citations.attribute_sentences.
+# ---------------------------------------------------------------------------
+
+_PASSAGE = {
+    "label": "S1",
+    "id": "p1",
+    "title": "Photosynthesis",
+    "path": "Bio/Photosynthesis",
+    "text": "Plants use sunlight to make food through photosynthesis.",
+}
+
+
+def test_aggregate_backed_sentence_rate_over_factual_turns():
+    records = [
+        _rec(
+            index=1,
+            route="preretrieve",
+            answer_text="Plants use sunlight to make food [S1].",
+            labels=["S1"],
+            passages=[_PASSAGE],
+        ),
+        _rec(
+            index=2,
+            route="preretrieve",
+            answer_text="It happened in exactly the year 1523.",
+            labels=[],
+            uncited=True,
+            passages=[_PASSAGE],
+        ),
+        # non-factual turn: excluded from the denominator regardless of text.
+        _rec(index=3, route="action", answer_text="It happened in the year 1523.", passages=[]),
+    ]
+    summary = aggregate(records)
+    assert summary["backed_sentence_rate"] == pytest.approx(0.5)
+    assert summary["unbacked_number_rate"] == pytest.approx(0.5)
+
+
+def test_aggregate_backed_sentence_rate_none_when_no_factual_turns():
+    records = [_rec(index=1, route="action")]
+    summary = aggregate(records)
+    assert summary["backed_sentence_rate"] is None
+    assert summary["unbacked_number_rate"] is None
+
+
+def test_write_turns_dump_carries_passages_for_offline_rescoring(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    records = [_rec(index=1, passages=[_PASSAGE])]
+    out_path = str(tmp_path / "docs" / "fake_soak.md")
+    dump_path = write_turns_dump(records, out_path)
+    payload = json.loads(Path(dump_path).read_text(encoding="utf-8"))
+    assert payload[0]["passages"] == [_PASSAGE]
+
+
+# ---------------------------------------------------------------------------
 # render_report
 # ---------------------------------------------------------------------------
 
@@ -279,6 +336,22 @@ def test_render_report_includes_citations_table_for_factual_turns():
     assert "supported_turns / supported_rate" in report
     assert "evidence_dump_turns" in report
     assert "1 - cited_rate" in report or "1 - uncited_rate" in report
+
+
+def test_render_report_includes_backed_sentence_and_unbacked_number_rates():
+    records = [
+        _rec(
+            index=1,
+            route="preretrieve",
+            answer_text="Plants use sunlight to make food [S1].",
+            labels=["S1"],
+            passages=[_PASSAGE],
+        ),
+    ]
+    summary = aggregate(records)
+    report = render_report(summary, [], {"generated_at": "t", "resume_check": "SKIPPED"})
+    assert "backed_sentence_rate" in report
+    assert "unbacked_number_rate" in report
 
 
 # ---------------------------------------------------------------------------

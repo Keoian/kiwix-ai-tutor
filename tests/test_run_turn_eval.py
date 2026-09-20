@@ -21,6 +21,7 @@ def _record(**overrides) -> AnswerRecord:
         answer_text="",
         citations=[],
         evidence_dump=False,
+        passages=[],
     )
     base.update(overrides)
     return AnswerRecord(**base)
@@ -278,3 +279,99 @@ def test_score_answer_uncited_flag_mirrors_has_citation():
         citations=[{"label": "S1", "path": "pythagorean_theorem", "unresolved": False}],
     )
     assert score_answer(record2)["uncited"] is False
+
+
+# ---------------------------------------------------------------------------
+# Host-side sentence attribution (docs/attribution_design.md,
+# tutor.app.citations.attribute_sentences): backed_sentence_rate,
+# unbacked_number_rate. AnswerRecord carries the turn's ``passages`` (same
+# shape as ``resolve_citations``'s ``packet_passages``) so scoring can call
+# ``attribute_sentences`` without re-running retrieval.
+# ---------------------------------------------------------------------------
+
+_PASSAGE = {
+    "label": "S1",
+    "id": "p1",
+    "title": "Pythagorean theorem",
+    "path": "pythagorean_theorem",
+    "text": "A right triangle satisfies a^2+b^2=c^2, the Pythagorean theorem.",
+}
+
+
+def test_score_answer_reports_backed_sentence_rate_and_unbacked_number():
+    record = _record(
+        answer_text="A right triangle satisfies a^2+b^2=c^2 [S1].",
+        citations=[{"label": "S1", "path": "pythagorean_theorem", "unresolved": False}],
+        passages=[_PASSAGE],
+    )
+    scored = score_answer(record)
+    assert scored["attributed_sentences"] == 1
+    assert scored["unbacked_sentences"] == 0
+    assert scored["backed_sentence_rate"] == 1.0
+    assert scored["has_unbacked_number"] is False
+
+
+def test_score_answer_flags_unbacked_number_from_invented_figure():
+    record = _record(
+        answer_text="The theorem was proven in the year 1523 exactly.",
+        passages=[_PASSAGE],
+    )
+    scored = score_answer(record)
+    assert scored["has_unbacked_number"] is True
+    assert scored["backed_sentence_rate"] == 0.0
+
+
+def test_score_answer_passages_defaults_to_empty_list():
+    record = _record(answer_text="A short claim with no passages given.")
+    scored = score_answer(record)
+    assert scored["unbacked_sentences"] == 1
+
+
+def test_aggregate_micro_averages_backed_sentence_rate_and_unbacked_number_rate():
+    scores = [
+        score_answer(
+            _record(
+                answer_text="A right triangle satisfies a^2+b^2=c^2 [S1].",
+                citations=[{"label": "S1", "path": "pythagorean_theorem", "unresolved": False}],
+                passages=[_PASSAGE],
+            )
+        ),
+        score_answer(
+            _record(
+                answer_text="It was discovered in the year 1523 exactly.",
+                passages=[_PASSAGE],
+            )
+        ),
+    ]
+    summary = aggregate(scores)
+    # turn 1: 1 attributed / 0 unbacked; turn 2: 0 attributed / 1 unbacked
+    # (unbacked_number). Micro average over pooled counts: 1/2.
+    assert summary["backed_sentence_rate"] == 0.5
+    assert summary["unbacked_number_rate"] == 0.5
+
+
+def test_aggregate_empty_input_zeroes_attribution_rates_too():
+    summary = aggregate([])
+    assert summary["backed_sentence_rate"] == 0.0
+    assert summary["unbacked_number_rate"] == 0.0
+
+
+def test_render_report_includes_backed_sentence_and_unbacked_number_columns():
+    summaries = {
+        "baseline": aggregate(
+            [
+                score_answer(
+                    _record(
+                        answer_text="A right triangle satisfies a^2+b^2=c^2 [S1].",
+                        citations=[
+                            {"label": "S1", "path": "pythagorean_theorem", "unresolved": False}
+                        ],
+                        passages=[_PASSAGE],
+                    )
+                )
+            ]
+        ),
+    }
+    report = render_report(summaries)
+    assert "backed_sentence_rate" in report
+    assert "unbacked_number_rate" in report
