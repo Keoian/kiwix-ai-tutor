@@ -19,6 +19,7 @@ from eval.run_lesson_soak import (
     aggregate,
     build_script,
     cycle_script,
+    process_turn_stream,
     render_report,
     score_calc,
     turns_dump_path,
@@ -272,6 +273,89 @@ def test_aggregate_backed_sentence_rate_none_when_no_factual_turns():
     summary = aggregate(records)
     assert summary["backed_sentence_rate"] is None
     assert summary["unbacked_number_rate"] is None
+
+
+def test_aggregate_prefers_attribution_event_over_passages_when_present():
+    # A live soak: no passage text (passages=[]), but the server's own
+    # "attributions" SSE event was captured. aggregate must score from the
+    # event, not fall back to (empty) passages, which would read as
+    # zero-denominator/None.
+    event = {
+        "attributions": [
+            {"sentence_span": [0, 10], "passage_id": "p1", "label": "S1", "score": 1.0,
+             "model_cited": True},
+        ],
+        "unbacked": [{"span": [11, 20], "reason": "unbacked_number"}],
+    }
+    records = [
+        _rec(index=1, route="preretrieve", passages=[], attribution_event=event),
+    ]
+    summary = aggregate(records)
+    assert summary["backed_sentence_rate"] == pytest.approx(0.5)
+    assert summary["unbacked_number_rate"] == pytest.approx(1.0)
+
+
+def test_aggregate_falls_back_to_passages_when_no_attribution_event():
+    records = [
+        _rec(
+            index=1,
+            route="preretrieve",
+            answer_text="Plants use sunlight to make food [S1].",
+            labels=["S1"],
+            passages=[_PASSAGE],
+            attribution_event=None,
+        ),
+    ]
+    summary = aggregate(records)
+    assert summary["backed_sentence_rate"] == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# process_turn_stream (pure SSE-line reduction used by run_soak)
+# ---------------------------------------------------------------------------
+
+
+def _sse(event, data):
+    return [f"event: {event}", f"data: {json.dumps(data)}", ""]
+
+
+def test_process_turn_stream_captures_attribution_event():
+    attributions_payload = {
+        "attributions": [
+            {"sentence_span": [0, 5], "passage_id": "p1", "label": "S1", "score": 1.0,
+             "model_cited": True},
+        ],
+        "unbacked": [],
+    }
+    lines = (
+        _sse("token", {"text": "Hello"})
+        + _sse("citations", {"citations": [{"label": "S1"}], "unsupported_labels": []})
+        + _sse("attributions", attributions_payload)
+        + _sse("done", {"status": "ok", "answer": "Hello [S1]."})
+    )
+    clock = iter([1.0, 1.1, 1.2, 1.3])
+    result = process_turn_stream(lines, t0=0.0, now=lambda: next(clock))
+    assert result["attribution_event"] == attributions_payload
+    assert result["status"] == "ok"
+    assert result["answer_text"] == "Hello [S1]."
+    assert result["ttft"] == pytest.approx(1.0)
+
+
+def test_process_turn_stream_no_attributions_event_leaves_it_none():
+    lines = _sse("done", {"status": "ok", "answer": "Hi."})
+    result = process_turn_stream(lines, t0=0.0, now=lambda: 0.5)
+    assert result["attribution_event"] is None
+
+
+def test_process_turn_stream_still_counts_eviction_and_calc():
+    lines = (
+        _sse("eviction", {"evicted_turns": 2})
+        + _sse("tool", {"name": "calc", "phase": "result"})
+        + _sse("done", {"status": "ok", "answer": "42"})
+    )
+    result = process_turn_stream(lines, t0=0.0, now=lambda: 1.0)
+    assert result["eviction_events"] == 1
+    assert result["calc_calls"] == 1
 
 
 def test_write_turns_dump_carries_passages_for_offline_rescoring(tmp_path, monkeypatch):

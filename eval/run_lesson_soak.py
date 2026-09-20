@@ -41,6 +41,7 @@ from typing import Any
 from eval.attribution_scoring import (
     micro_average_backed_sentence_rate,
     sentence_attribution_counts,
+    sentence_attribution_counts_from_event,
 )
 from eval.attribution_scoring import (
     unbacked_number_rate as _unbacked_number_rate,
@@ -166,12 +167,22 @@ class TurnRecord:
     ``attribute_sentences`` take), used by ``aggregate`` to compute
     ``backed_sentence_rate``/``unbacked_number_rate`` (docs/
     attribution_design.md) and kept in the per-turn JSON dump
-    (``write_turns_dump``) so a run can be rescored offline. NOTE: the
-    live ``run_soak`` below currently has no passage text to put here --
-    the ``citations`` SSE event (``tutor/app/compose.py``) carries label/
-    path/support flags only, not passage bodies -- so this stays ``[]``
-    for real soaks until that event is extended (out of this task's
-    scope: eval/ only)."""
+    (``write_turns_dump``) so a run can be rescored offline. Only used as a
+    fallback today: a live soak has no passage text to put here (the
+    ``citations`` SSE event carries label/path/support flags only, not
+    passage bodies), so this stays ``[]`` for real soaks -- see
+    ``attribution_event`` below, which a live soak *does* populate."""
+    attribution_event: dict | None = None
+    """The server's own ``attributions`` SSE event for this turn (commit
+    26c14d0, ``tutor/app/compose.py``): ``{"attributions": [...],
+    "unbacked": [...]}``, dumped verbatim from
+    ``tutor.app.citations.attribute_sentences``. When present, ``aggregate``
+    scores ``backed_sentence_rate``/``unbacked_number_rate`` from this
+    instead of recomputing from ``passages`` (which is empty in a live
+    soak) -- see ``eval.attribution_scoring.
+    sentence_attribution_counts_from_event``. ``None`` for older dumps or
+    non-factual turns, in which case ``aggregate`` falls back to the
+    ``passages`` path."""
 
     @property
     def is_factual(self) -> bool:
@@ -230,7 +241,10 @@ def aggregate(records: list[TurnRecord]) -> dict[str, Any]:
     evidence_dump_turns = sum(1 for r in factual if r.evidence_dump)
 
     attribution_counts = [
-        sentence_attribution_counts(r.answer_text, r.passages) for r in factual
+        sentence_attribution_counts_from_event(r.attribution_event)
+        if r.attribution_event is not None
+        else sentence_attribution_counts(r.answer_text, r.passages)
+        for r in factual
     ]
     backed_sentence_rate = micro_average_backed_sentence_rate(attribution_counts)
     unbacked_number_rate = _unbacked_number_rate(attribution_counts)
@@ -588,6 +602,88 @@ class _ResearchStatusRecorder:
         return taken
 
 
+def process_turn_stream(lines: Any, t0: float, now: Any) -> dict:
+    """Pure(-ish) reduction of one turn's raw SSE lines (as
+    ``httpx``/``requests``-style ``resp.iter_lines()`` yields them) into the
+    fields ``run_soak`` needs for a ``TurnRecord``. ``t0`` is the wall-clock
+    start of the turn (for ``ttft``/``tt_tool``); ``now`` is a zero-arg
+    clock (``time.monotonic`` in production, a fake counter in tests) so
+    this has no real I/O or timing dependency of its own -- only ``lines``
+    is impure, and it is just an iterable here.
+
+    Includes the ``attributions`` event (commit 26c14d0): stored verbatim
+    under ``attribution_event`` for ``aggregate`` to score from (see
+    ``TurnRecord.attribution_event``), never parsed further here.
+    """
+    state: dict[str, Any] = {
+        "ttft": None,
+        "tt_tool": None,
+        "route": None,
+        "citations": 0,
+        "citations_resolved": 0,
+        "uncited": False,
+        "calc_calls": 0,
+        "tokens_used": None,
+        "cached_tokens": None,
+        "status": "error",
+        "error": None,
+        "answer_text": "",
+        "eviction_events": 0,
+        "labels": [],
+        "unsupported_labels": [],
+        "citation_quality": None,
+        "evidence_dump": False,
+        "attribution_event": None,
+    }
+    event_name = None
+    for line in lines:
+        if line == "":
+            continue
+        if line.startswith("event: "):
+            event_name = line[len("event: "):]
+            continue
+        if not line.startswith("data: "):
+            continue
+        data = json.loads(line[len("data: "):])
+        n = now()
+        if event_name == "token":
+            if state["ttft"] is None:
+                state["ttft"] = n - t0
+            state["answer_text"] += data.get("text", "") or ""
+        elif event_name == "tool":
+            if state["tt_tool"] is None:
+                state["tt_tool"] = n - t0
+            if data.get("name") == "calc" and data.get("phase") == "result":
+                state["calc_calls"] += 1
+        elif event_name == "citations":
+            cites = data.get("citations", [])
+            state["citations"] = len(cites)
+            state["citations_resolved"] = sum(1 for c in cites if not c.get("unresolved"))
+            state["labels"] = [c.get("label") for c in cites if c.get("label")]
+            state["unsupported_labels"] = list(data.get("unsupported_labels", []))
+        elif event_name == "attributions":
+            state["attribution_event"] = data
+        elif event_name == "eviction":
+            # GAP 2 fix: eviction_reprefill is now forwarded live over SSE
+            # instead of this script reaching into PromptLog.evict.
+            state["eviction_events"] += 1
+        elif event_name == "done":
+            state["status"] = data.get("status", "error")
+            state["route"] = data.get("route")
+            state["tokens_used"] = data.get("tokens_used")
+            state["cached_tokens"] = data.get("cached_tokens")
+            state["uncited"] = bool(data.get("uncited"))
+            state["answer_text"] = data.get("answer") or state["answer_text"]
+            state["citation_quality"] = data.get("citation_quality")
+            state["evidence_dump"] = bool(data.get("evidence_dump"))
+            if data.get("calc_calls") is not None:
+                state["calc_calls"] = data["calc_calls"]
+        elif event_name == "error":
+            state["status"] = "error"
+            state["error"] = data.get("message")
+    return state
+
+
 def _make_soak_config(base_cfg: Any, data_dir: Path):
     server = dataclasses.replace(base_cfg.server)
     app_cfg = dataclasses.replace(base_cfg.app, data_dir=data_dir)
@@ -700,78 +796,34 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
                 )
 
                 t0 = time.monotonic()
-                ttft = None
-                tt_tool = None
-                route = None
-                citations = 0
-                citations_resolved = 0
-                uncited = False
-                calc_calls = 0
-                tokens_used = None
-                cached_tokens = None
-                status = "error"
-                error = None
-                answer_text = ""
-                eviction_events = 0
-                labels: list[str] = []
-                unsupported_labels: list[str] = []
-                citation_quality = None
-                evidence_dump = False
+                parsed: dict[str, Any] = {}
 
                 try:
                     with client.stream(
                         "POST", f"/api/session/{session_id}/turn", json=body, timeout=330
                     ) as resp:
-                        event_name = None
-                        for line in resp.iter_lines():
-                            if line == "":
-                                continue
-                            if line.startswith("event: "):
-                                event_name = line[len("event: "):]
-                                continue
-                            if not line.startswith("data: "):
-                                continue
-                            data = json.loads(line[len("data: "):])
-                            now = time.monotonic()
-                            if event_name == "token":
-                                if ttft is None:
-                                    ttft = now - t0
-                                answer_text += data.get("text", "") or ""
-                            elif event_name == "tool":
-                                if tt_tool is None:
-                                    tt_tool = now - t0
-                                if data.get("name") == "calc" and data.get("phase") == "result":
-                                    calc_calls += 1
-                            elif event_name == "citations":
-                                cites = data.get("citations", [])
-                                citations = len(cites)
-                                citations_resolved = sum(
-                                    1 for c in cites if not c.get("unresolved")
-                                )
-                                labels = [c.get("label") for c in cites if c.get("label")]
-                                unsupported_labels = list(data.get("unsupported_labels", []))
-                            elif event_name == "eviction":
-                                # GAP 2 fix: eviction_reprefill is now
-                                # forwarded live over SSE instead of this
-                                # script reaching into PromptLog.evict.
-                                eviction_events += 1
-                            elif event_name == "done":
-                                status = data.get("status", "error")
-                                route = data.get("route")
-                                tokens_used = data.get("tokens_used")
-                                cached_tokens = data.get("cached_tokens")
-                                uncited = bool(data.get("uncited"))
-                                answer_text = data.get("answer") or answer_text
-                                citation_quality = data.get("citation_quality")
-                                evidence_dump = bool(data.get("evidence_dump"))
-                                if data.get("calc_calls") is not None:
-                                    calc_calls = data["calc_calls"]
-                            elif event_name == "error":
-                                status = "error"
-                                error = data.get("message")
+                        parsed = process_turn_stream(resp.iter_lines(), t0, time.monotonic)
                 except Exception as exc:  # noqa: BLE001 - record and keep the soak going
-                    status = "error"
-                    error = str(exc)
+                    parsed = {"status": "error", "error": str(exc), "answer_text": ""}
+
+                ttft = parsed.get("ttft")
+                tt_tool = parsed.get("tt_tool")
+                route = parsed.get("route")
+                citations = parsed.get("citations", 0)
+                citations_resolved = parsed.get("citations_resolved", 0)
+                uncited = parsed.get("uncited", False)
+                calc_calls = parsed.get("calc_calls", 0)
+                tokens_used = parsed.get("tokens_used")
+                cached_tokens = parsed.get("cached_tokens")
+                status = parsed.get("status", "error")
+                error = parsed.get("error")
+                answer_text = parsed.get("answer_text", "")
+                eviction_events = parsed.get("eviction_events", 0)
+                labels = parsed.get("labels", [])
+                unsupported_labels = parsed.get("unsupported_labels", [])
+                citation_quality = parsed.get("citation_quality")
+                evidence_dump = parsed.get("evidence_dump", False)
+                attribution_event = parsed.get("attribution_event")
 
                 wall = time.monotonic() - t0
 
@@ -822,10 +874,11 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
                         citation_quality=citation_quality,
                         evidence_dump=evidence_dump,
                         # See TurnRecord.passages docstring: the wire
-                        # protocol has no passage text today, so
-                        # backed_sentence_rate/unbacked_number_rate read
-                        # as None for a live soak until that's added.
+                        # protocol has no passage text for the fallback
+                        # path, but attribution_event (below) carries the
+                        # server's own scoring for a live soak.
                         passages=[],
+                        attribution_event=attribution_event,
                     )
                 )
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 from eval.attribution_scoring import (
     micro_average_backed_sentence_rate,
     sentence_attribution_counts,
+    sentence_attribution_counts_from_event,
     unbacked_number_rate,
 )
 
@@ -79,3 +80,34 @@ def test_unbacked_number_rate_counts_turns_not_spans():
 
 def test_unbacked_number_rate_empty_is_none():
     assert unbacked_number_rate([]) is None
+
+
+def test_counts_from_event_all_backed():
+    event = {
+        "attributions": [
+            {"sentence_span": [0, 10], "passage_id": "p1", "label": "S1", "score": 1.0,
+             "model_cited": True},
+        ],
+        "unbacked": [],
+    }
+    counts = sentence_attribution_counts_from_event(event)
+    assert counts["attributed_sentences"] == 1
+    assert counts["unbacked_sentences"] == 0
+    assert counts["has_unbacked_number"] is False
+    assert counts["backed_sentence_rate"] == 1.0
+
+
+def test_counts_from_event_flags_unbacked_number():
+    event = {
+        "attributions": [],
+        "unbacked": [{"span": [0, 5], "reason": "unbacked_number"}],
+    }
+    counts = sentence_attribution_counts_from_event(event)
+    assert counts["unbacked_sentences"] == 1
+    assert counts["has_unbacked_number"] is True
+    assert counts["backed_sentence_rate"] == 0.0
+
+
+def test_counts_from_event_empty_denominator_is_none():
+    counts = sentence_attribution_counts_from_event({"attributions": [], "unbacked": []})
+    assert counts["backed_sentence_rate"] is None

@@ -48,6 +48,33 @@ def sentence_attribution_counts(answer_text: str, passages: list[dict]) -> dict:
     }
 
 
+def sentence_attribution_counts_from_event(event: dict) -> dict:
+    """Per-turn attribution counts derived from the server's own
+    ``attributions`` SSE event (``tutor/app/compose.py``, added 2026-09-20:
+    ``{"attributions": [...], "unbacked": [...]}``, dumped verbatim by the
+    host from ``tutor.app.citations.attribute_sentences``), instead of
+    recomputing attribution from ``passages`` client-side. Preferred
+    whenever the event is available (e.g. a live soak, where ``passages``
+    is otherwise empty -- see ``eval/run_lesson_soak.py``'s ``TurnRecord``),
+    since it reflects exactly what the host computed for that turn, not a
+    client-side re-derivation.
+
+    Same return shape as ``sentence_attribution_counts``.
+    """
+    attributions = event.get("attributions") or []
+    unbacked = event.get("unbacked") or []
+    attributed = len(attributions)
+    unbacked_count = len(unbacked)
+    has_unbacked_number = any(u.get("reason") == "unbacked_number" for u in unbacked)
+    denom = attributed + unbacked_count
+    return {
+        "attributed_sentences": attributed,
+        "unbacked_sentences": unbacked_count,
+        "has_unbacked_number": has_unbacked_number,
+        "backed_sentence_rate": (attributed / denom) if denom else None,
+    }
+
+
 def micro_average_backed_sentence_rate(counts: list[dict]) -> float | None:
     """Micro-average ``backed_sentence_rate`` across turns: sum of
     ``attributed_sentences`` over sum of ``(attributed_sentences +
