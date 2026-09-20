@@ -1,0 +1,26 @@
+# Dev config for running llama-server against the local Bonsai runtime.
+# runtime_dir is a machine-local path to the (read-only, non-repo) model/binary
+# checkout; it is a literal TOML string so backslashes are not escape sequences.
+# Mirrors C:\git\bonsai\start-server-32k.ps1 -> start-server.ps1 (32k ctx, q8_0 KV cache).
+
+[runtime]
+runtime_dir = 'C:\git\bonsai'
+model_path = "models/Bonsai-8B-Q1_0.gguf"
+server_binary = "bin/llama-server.exe"
+
+[server]
+host = "127.0.0.1"
+port = 8080
+ctx_size = 32768
+cache_type_k = "q8_0"
+cache_type_v = "q8_0"
+n_gpu_layers = 99
+parallel = 1
+flash_attn = true
+jinja = true
+slots = true
+
+[sampling]
+temperature = 0.5
+top_p = 0.9
+top_k = 20
