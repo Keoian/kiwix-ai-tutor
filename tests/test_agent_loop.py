@@ -210,6 +210,37 @@ def test_lesson1_pre_retrieve_happens_before_model_is_called():
     assert result.status == "ok"
 
 
+def test_lesson1_pre_retrieve_emits_a_tool_event_before_the_first_model_call():
+    """Regression test: the host's pre-retrieval (which happens for every
+    free-text question, before the model is ever called) must be visible
+    to the UI as a tool event, the same as a model-requested research
+    follow-up is (see the `emit({"kind": "tool_result", "name":
+    "research"})` call in the follow-up branch). Before this fix,
+    run_turn never called `emit` for the pre-retrieval call at all, so a
+    live turn's SSE stream carried no tool event ahead of its first
+    token."""
+    llm = FakeLlmClient([_final_answer_script("Water boils at 100C [S1].")])
+    research = FakeResearchEngine()
+    calc = FakeCalc()
+    events: list = []
+
+    run_turn(
+        _mk_session(),
+        _UserInput(kind="text", text="At what temperature does water boil?"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=_budget(),
+        emit=events.append,
+    )
+
+    kinds = [
+        (e.get("kind"), e.get("name")) if isinstance(e, dict) else (e.kind, None)
+        for e in events
+    ]
+    assert ("tool_result", "research") in kinds
+
+
 def test_lesson1_evidence_appended_before_first_model_call():
     llm = FakeLlmClient([_final_answer_script("Answer [S1].")])
     research = FakeResearchEngine()
@@ -385,6 +416,49 @@ def test_lesson5_calc_tool_called_and_result_in_answer():
     assert result.calc_calls == 1
     assert "4" in result.answer_text
     assert result.status == "ok"
+
+
+def test_assistant_tool_call_message_uses_openai_wire_format():
+    """Regression test: llama-server's OpenAI-compatible endpoint rejects
+    a `tool_calls` entry shaped `{"id", "name", "arguments_json"}` with
+    HTTP 500 ("Missing tool call type") -- confirmed live against
+    /v1/chat/completions. The assistant tool-call message run_turn
+    appends to `messages` (replayed verbatim to llm.stream_chat on the
+    next turn of the loop) must instead use the standard
+    `{"id", "type": "function", "function": {"name", "arguments"}}`
+    shape."""
+    llm = FakeLlmClient(
+        [
+            _tool_call_script("calc", {"expression": "2 + 2"}),
+            _final_answer_script("2 + 2 is 4."),
+        ]
+    )
+    research = FakeResearchEngine()
+    calc = FakeCalc()
+
+    run_turn(
+        _mk_session(),
+        _UserInput(kind="text", text="What is 2 + 2?"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=_budget(),
+        emit=lambda e: None,
+    )
+
+    # llm.calls[1] is the messages list passed to the SECOND stream_chat
+    # call, i.e. after the assistant's tool-call turn was appended.
+    second_call_messages = llm.calls[1]
+    assistant_msg = next(m for m in second_call_messages if m.get("role") == "assistant")
+    tool_call_entry = assistant_msg["tool_calls"][0]
+
+    assert tool_call_entry.get("type") == "function"
+    assert "id" in tool_call_entry
+    assert "function" in tool_call_entry
+    assert tool_call_entry["function"]["name"] == "calc"
+    assert "arguments" in tool_call_entry["function"]
+    assert "name" not in tool_call_entry
+    assert "arguments_json" not in tool_call_entry
 
 
 def test_lesson5_calc_calls_do_not_count_toward_research_cap():
@@ -654,3 +728,41 @@ def test_turn_result_logs_route_calc_calls_research_calls_and_cached_tokens():
     assert hasattr(result, "research_calls")
     # cached tokens is reported when the llm reports it; default 0/None is fine
     assert hasattr(result, "cached_tokens")
+
+
+def test_researched_passages_are_retained_on_the_session_for_citation_resolution():
+    """Regression test: run_turn must hand every research packet's passages
+    to session.retain_passages(...) so citations (resolved from
+    session.known_passages() by the app layer, e.g.
+    tutor.app.compose._make_turn_runner) can ever resolve a [S#] label.
+    Before this fix, run_turn never called retain_passages, so
+    session.known_passages() was always empty and every citation in a live
+    answer would resolve as unresolved."""
+
+    class _RetainingSession:
+        subject_hint = None
+        history: list = []
+
+        def __init__(self):
+            self.retained: list[dict] = []
+
+        def retain_passages(self, passages):
+            self.retained.extend(passages)
+
+    llm = FakeLlmClient([_final_answer_script("Water boils at 100C [S1].")])
+    research = FakeResearchEngine()
+    calc = FakeCalc()
+    session = _RetainingSession()
+
+    run_turn(
+        session,
+        _UserInput(kind="text", text="What is the boiling point of water?"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=_budget(),
+        emit=lambda e: None,
+    )
+
+    assert session.retained, "expected the pre-retrieved passages to be retained"
+    assert any(p.get("label") == "S1" for p in session.retained)

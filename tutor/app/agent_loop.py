@@ -68,6 +68,16 @@ def _passage_to_dict(passage) -> dict:
     }
 
 
+def _retain_passages(session, packet: dict) -> None:
+    """Hand a research packet's passages to ``session.retain_passages``
+    (if the session supports it) so citations can be resolved later from
+    ``session.known_passages()`` -- including after prompt-log eviction.
+    Sessions without the method (some fakes in unit tests) are a no-op."""
+    retain = getattr(session, "retain_passages", None)
+    if retain is not None:
+        retain(packet.get("passages", []))
+
+
 def _packet_from_response(response) -> dict:
     passages = getattr(response, "passages", None)
     if passages is None and isinstance(response, dict):
@@ -110,8 +120,10 @@ def run_turn(
         )
         research_calls += 1
         packet = _packet_from_response(response)
+        _retain_passages(session, packet)
         evidence_text = render_evidence(packet)
         messages.append({"role": "tool", "content": f"[research results]\n{evidence_text}"})
+        emit({"kind": "tool_result", "name": "research"})
 
     while True:
         if cancel is not None and cancel.is_set():
@@ -179,7 +191,14 @@ def run_turn(
                 "role": "assistant",
                 "content": None,
                 "tool_calls": [
-                    {"id": tc.id, "name": tc.name, "arguments_json": tc.arguments_json}
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": tc.arguments_json,
+                        },
+                    }
                     for tc in tool_calls
                 ],
             }
@@ -220,6 +239,7 @@ def run_turn(
                     research_calls += 1
                     followup_research_used = True
                     packet = _packet_from_response(response)
+                    _retain_passages(session, packet)
                     evidence_text = render_evidence(packet)
                     messages.append(
                         {
