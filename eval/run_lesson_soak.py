@@ -347,8 +347,9 @@ def render_report(
                   "that is expected, not a bug)")
     n_evict = summary["eviction_events_total"]
     lines.append(
-        f"- eviction_reprefill events observed: {n_evict} (measured, captured in-process; "
-        "not currently forwarded over SSE -- see docs/M5_notes.md gap note)"
+        f"- eviction_reprefill events observed: {n_evict} (measured; forwarded live over "
+        "SSE as an `eviction` event and counted from that event, not read out of "
+        "PromptLog in-process -- see docs/M5_report.md \"fixed after the soak\")"
     )
     lines.append("")
 
@@ -426,15 +427,6 @@ def render_report(
     lines.append(
         "- Real hardware measurements on the delivery machine (this soak ran on the dev GPU box)."
     )
-    lines.append(
-        "- Automatic wiring of session turns into `LessonStore.append_turn`/`save_session` "
-        "from `tutor.app.compose._make_turn_runner` (this soak drives that persistence "
-        "itself, in-process, to exercise the resume path -- routes.py does not yet do "
-        "this on every turn)."
-    )
-    lines.append("- Forwarding `eviction_reprefill` over the SSE wire (currently dropped by "
-                  "`compose._make_turn_runner`'s adapter; this soak reads eviction "
-                  "events in-process instead).")
     lines.append("")
 
     lines.append("Labeling: everything in \"Turns\"/\"Latency\"/\"Token growth\"/\"Prompt cache\"/"
@@ -526,7 +518,6 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
     # wrong (different cache/registry instance) -- instead we monkeypatch
     # the class method for the lifetime of this process. Safe: this process
     # only ever runs one soak.
-    from tutor.app.prompt import PromptLog
     from tutor.retrieval.research import ResearchEngine
 
     recorder_calls: list[tuple[str, float]] = []
@@ -543,21 +534,14 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
 
     ResearchEngine.research = _patched
 
-    eviction_counter = {"n": 0}
-    eviction_lock = threading.Lock()
-    _orig_evict = PromptLog.evict
-
-    def _patched_evict(self, budget):
-        event = _orig_evict(self, budget)
-        if event is not None:
-            with eviction_lock:
-                eviction_counter["n"] += 1
-        return event
-
-    PromptLog.evict = _patched_evict
     try:
         app = create_app(deps)
         with TestClient(app) as client:
+            # Lesson persistence (turn records + byte-identical-resume prompt
+            # log) is now the app's own responsibility (tutor.app.compose's
+            # turn_runner persists every completed turn into LessonStore when
+            # the session is attached this way) -- this soak no longer
+            # persists anything itself.
             profile_id = client.post(
                 "/api/profiles",
                 json={
@@ -567,10 +551,21 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
                     "reading_level": "grade6",
                 },
             ).json()["id"]
-            lesson_id = client.post(
-                f"/api/profiles/{profile_id}/lessons", json={"subject": "general"}
-            ).json()["id"]
-            session_id = client.post("/api/session").json()["session_id"]
+            created = client.post(
+                "/api/lesson", json={"profile_id": profile_id, "subject": "general"}
+            ).json()
+            lesson_id = created["lesson_id"]
+            session_id = created["session_id"]
+            # Note: the lesson is held under one fixed subject ("general")
+            # for the whole soak, on purpose -- LessonStore.append_turn/
+            # persist_turn enforce the same "a subject change starts a new
+            # lesson" rule the app itself follows (docs/plan risk register),
+            # so switching the *session's* subject_hint per scripted item
+            # (as earlier soaks did, purely to steer retrieval's topic_hint)
+            # would make every turn after the first switch silently fail to
+            # persist. The scripted lesson still exercises both subjects'
+            # content; it just no longer steers retrieval with a per-item
+            # topic hint.
 
             script = build_script()
             # Generous upper bound on turn count; the deadline check inside
@@ -592,12 +587,6 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
                 if time.monotonic() > deadline:
                     break
 
-                if item.subject:
-                    client.post(
-                        f"/api/session/{session_id}/subject",
-                        json={"subject": item.subject},
-                    )
-
                 body: dict[str, Any] = (
                     {"text": item.text} if item.kind == "text" else {"action": item.action}
                 )
@@ -615,6 +604,7 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
                 status = "error"
                 error = None
                 answer_text = ""
+                eviction_events = 0
 
                 try:
                     with client.stream(
@@ -644,6 +634,11 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
                                 citations_resolved = sum(
                                     1 for c in cites if not c.get("unresolved")
                                 )
+                            elif event_name == "eviction":
+                                # GAP 2 fix: eviction_reprefill is now
+                                # forwarded live over SSE instead of this
+                                # script reaching into PromptLog.evict.
+                                eviction_events += 1
                             elif event_name == "done":
                                 status = data.get("status", "error")
                                 route = data.get("route")
@@ -662,26 +657,11 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
 
                 wall = time.monotonic() - t0
 
-                session_obj = deps.sessions.get(session_id)
-                with eviction_lock:
-                    eviction_events, eviction_counter["n"] = eviction_counter["n"], 0
-                if session_obj is not None:
-                    try:
-                        deps.lessons.append_turn(
-                            lesson_id,
-                            subject="general",
-                            route=route or "unknown",
-                            calc_calls=calc_calls,
-                            research_calls=len(recorder_calls),
-                            citation_passage_ids=[],
-                            tokens_used=tokens_used or 0,
-                            cached_tokens=cached_tokens or 0,
-                            user_text=item.text,
-                            action=item.action,
-                        )
-                        deps.lessons.save_session(lesson_id, session_obj)
-                    except Exception:  # noqa: BLE001 - persistence is best-effort here
-                        pass
+                # GAP 1 fix: the app itself persists this turn (turn row +
+                # prompt-log snapshot, atomically) inside
+                # tutor.app.compose's turn_runner, because session_id was
+                # attached to lesson_id via POST /api/lesson above. This
+                # script no longer writes to LessonStore itself.
 
                 with recorder_lock:
                     calls_for_turn = list(recorder_calls)
@@ -754,11 +734,14 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
             summary = aggregate(records)
 
             # --- resume check: fresh app instance, same data_dir ---
-            resume_text = _resume_check(cfg)
+            from tutor.app.prompt import serialize_messages
+
+            pre_restart_session = deps.sessions.get(session_id)
+            pre_restart_bytes = serialize_messages(pre_restart_session.log.render())
+            resume_text = _resume_check(cfg, lesson_id, pre_restart_bytes)
 
     finally:
         ResearchEngine.research = _orig_research
-        PromptLog.evict = _orig_evict
 
     meta = {
         "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -783,42 +766,40 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
     return report
 
 
-def _resume_check(cfg: Any) -> str:
-    """Build a fresh AppDeps (fresh Session store) against the same
-    data_dir and confirm: (1) LessonStore.resume's rebuilt PromptLog
-    validates, (2) one more turn against the real llm succeeds when the
-    resumed Session is registered into the fresh app's session store."""
+def _resume_check(cfg: Any, lesson_id: str, pre_restart_bytes: bytes) -> str:
+    """Build a fresh AppDeps/app (a fresh process would rebuild these the
+    same way) over the same data_dir and confirm, entirely through the
+    real HTTP surface (GAP 1 fix: no reaching into LessonStore/Session
+    internals here anymore):
+
+    1. ``POST /api/lesson/{lesson_id}/resume`` succeeds and rebuilds a
+       prompt log that is byte-identical to what was persisted live.
+    2. one more turn against the real llm succeeds on the resumed session.
+    """
     from fastapi.testclient import TestClient
 
     from tutor.app.compose import build_deps
     from tutor.app.main import create_app
+    from tutor.app.prompt import serialize_messages
 
     try:
         deps2 = build_deps(cfg)
-        # Find the lesson we just wrote: single-lesson soak, so take the
-        # most recently created lesson id via a fresh LessonStore query.
-        # deps2.lessons is a new LessonStore instance over the same sqlite
-        # file, so its data is already on disk.
-
-        row = deps2.lessons.connection.execute(
-            "SELECT id FROM lessons ORDER BY rowid DESC LIMIT 1"
-        ).fetchone()
-        if row is None:
-            return "SKIPPED: no lesson was persisted during the soak."
-        lesson_id = row[0]
-
-        count_tokens = deps2.sessions._count_tokens  # same token counter as the live run
-        resumed_session = deps2.lessons.resume(lesson_id, count_tokens=count_tokens)
-        resumed_session.log.validate()
-
-        # Register the resumed session into the fresh app's in-memory
-        # session store under a fresh session_id, then drive one more turn
-        # through the real HTTP layer.
-        new_sid = deps2.sessions.create()
-        deps2.sessions._sessions[new_sid] = resumed_session
-
         app2 = create_app(deps2)
         with TestClient(app2) as client2:
+            resume_resp = client2.post(f"/api/lesson/{lesson_id}/resume")
+            if resume_resp.status_code != 200:
+                return f"FAIL: resume endpoint returned {resume_resp.status_code}."
+            new_sid = resume_resp.json()["session_id"]
+
+            resumed_session = deps2.sessions.get(new_sid)
+            resumed_session.log.validate()
+            resumed_bytes = serialize_messages(resumed_session.log.render())
+            if resumed_bytes != pre_restart_bytes:
+                return (
+                    "FAIL: resumed prompt log is not byte-identical to the "
+                    f"pre-restart log (lesson {lesson_id})."
+                )
+
             frames_status = []
             with client2.stream(
                 "POST",
@@ -831,12 +812,13 @@ def _resume_check(cfg: Any) -> str:
                         frames_status.append(line)
         ok = any("done" in f for f in frames_status)
         return (
-            "PASS (measured): resumed PromptLog validated cleanly and one additional turn "
-            f"completed successfully after resume (lesson {lesson_id})."
+            "PASS (measured): POST /api/lesson/{id}/resume rebuilt a byte-identical prompt "
+            "log (app-side persistence, no soak-driven persistence involved) and one "
+            f"additional turn completed successfully after resume (lesson {lesson_id})."
             if ok
             else (
-                "FAIL: resumed PromptLog validated but the follow-up turn did not complete "
-                f"(lesson {lesson_id})."
+                "FAIL: resumed PromptLog was byte-identical but the follow-up turn did not "
+                f"complete (lesson {lesson_id})."
             )
         )
     except Exception as exc:  # noqa: BLE001 - report, don't crash the soak on resume-check failure

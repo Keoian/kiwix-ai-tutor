@@ -196,6 +196,24 @@
     appendMessage("error", message);
   }
 
+  function appendEvictionNote(data) {
+    const wrapper = el("div", { className: "msg msg-note" });
+    const note = el("span", {
+      className: "eviction-note",
+      text:
+        "Trimmed " +
+        (data.evicted_turns != null ? data.evicted_turns : "some") +
+        " older turn(s) from context to make room (" +
+        (data.tokens_before != null ? data.tokens_before : "?") +
+        " -> " +
+        (data.tokens_after != null ? data.tokens_after : "?") +
+        " tokens).",
+    });
+    wrapper.appendChild(note);
+    chat.appendChild(wrapper);
+    chat.scrollTop = chat.scrollHeight;
+  }
+
   // ---------------------------------------------------------------------
   // Session
   // ---------------------------------------------------------------------
@@ -302,6 +320,8 @@
       }
     } else if (eventName === "citations") {
       renderCitations(tutorNode, data.citations);
+    } else if (eventName === "eviction") {
+      appendEvictionNote(data);
     } else if (eventName === "error") {
       appendError(data.message || "An error occurred.");
     } else if (eventName === "done") {
@@ -430,6 +450,16 @@
       }
     } else if (lastTurnMeta && lastTurnMeta.route) {
       rows.push(["Last route", String(lastTurnMeta.route)]);
+    }
+    if (body.last_eviction) {
+      rows.push([
+        "Last eviction",
+        (body.last_eviction.evicted_turns != null ? body.last_eviction.evicted_turns : "?") +
+          " turn(s), " +
+          (body.last_eviction.tokens_before != null ? body.last_eviction.tokens_before : "?") +
+          " -> " +
+          (body.last_eviction.tokens_after != null ? body.last_eviction.tokens_after : "?"),
+      ]);
     }
     rows.forEach(function (pair) {
       statusPanelBody.appendChild(el("dt", { text: pair[0] }));

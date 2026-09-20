@@ -346,6 +346,157 @@ def test_status_endpoint_includes_dense_object(tmp_path):
         assert "dense" in resp.json()
 
 
+# ---------------------------------------------------------------------------
+# GAP 1 (real M5 soak, docs/M5_report.md "known gaps"): the app itself
+# persists lesson turns, so an app restart can resume a lesson.
+# ---------------------------------------------------------------------------
+
+
+def test_full_app_persists_turns_and_resumes_byte_identical(tmp_path):
+    from tutor.app.prompt import serialize_messages
+
+    cfg = _cfg_with_unreachable_llm_and_missing_archives(tmp_path)
+    events = [
+        StreamEvent(kind="token", text="Answer text."),
+        StreamEvent(kind="done", finish_reason="stop", usage={"cached_tokens": 3}),
+    ]
+    fake_llm = _FakeLlm(events)
+
+    deps = build_deps(cfg, llm=fake_llm, research_engine=_FakeResearchEngine())
+    app = create_app(deps)
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/lesson", json={"profile_id": "p1", "subject": "math"}
+        ).json()
+        lesson_id = created["lesson_id"]
+        session_id = created["session_id"]
+
+        for text in ["What is 2+2?", "And 3+3?"]:
+            with client.stream(
+                "POST", f"/api/session/{session_id}/turn", json={"text": text}
+            ) as resp:
+                assert resp.status_code == 200
+                body = "".join(resp.iter_text())
+            assert "event: done" in body
+
+    pre_restart_session = deps.sessions.get(session_id)
+    pre_restart_bytes = serialize_messages(pre_restart_session.log.render())
+    pre_restart_session.log.validate()
+
+    # A fresh AppDeps/app built the same (production) way, over the same
+    # data dir -- simulating a process restart.
+    deps2 = build_deps(cfg, llm=fake_llm, research_engine=_FakeResearchEngine())
+    app2 = create_app(deps2)
+    with TestClient(app2) as client2:
+        resumed = client2.post(f"/api/lesson/{lesson_id}/resume").json()
+        new_session_id = resumed["session_id"]
+
+        resumed_session = deps2.sessions.get(new_session_id)
+        resumed_session.log.validate()
+        assert serialize_messages(resumed_session.log.render()) == pre_restart_bytes
+
+        with client2.stream(
+            "POST", f"/api/session/{new_session_id}/turn", json={"text": "One more thing?"}
+        ) as resp:
+            assert resp.status_code == 200
+            body = "".join(resp.iter_text())
+        assert "event: done" in body
+
+    turns = deps2.lessons.list_turns(lesson_id)
+    assert len(turns) == 3
+    assert all(t.route for t in turns)
+
+
+def test_no_lesson_attached_session_still_works_and_is_never_persisted(tmp_path):
+    cfg = _cfg_with_unreachable_llm_and_missing_archives(tmp_path)
+    events = [
+        StreamEvent(kind="token", text="Hi."),
+        StreamEvent(kind="done", finish_reason="stop", usage={}),
+    ]
+    deps = build_deps(cfg, llm=_FakeLlm(events), research_engine=_FakeResearchEngine())
+    app = create_app(deps)
+    with TestClient(app) as client:
+        session_id = client.post("/api/session").json()["session_id"]
+        with client.stream(
+            "POST", f"/api/session/{session_id}/turn", json={"text": "hi"}
+        ) as resp:
+            body = "".join(resp.iter_text())
+        assert "event: done" in body
+    assert deps.sessions.lesson_for(session_id) is None
+
+
+# ---------------------------------------------------------------------------
+# GAP 2: eviction_reprefill is forwarded as an SSE "eviction" event and
+# surfaced in /api/status's last_eviction.
+# ---------------------------------------------------------------------------
+
+
+def test_eviction_event_forwarded_over_sse_and_status(tmp_path):
+    from tutor.app.compose import _CalcTool, _make_status_provider, _make_turn_runner, _SessionStore
+    from tutor.app.prompt import Budget
+    from tutor.retrieval.registry import Registry
+
+    def count_tokens(text: str) -> int:
+        return len(text.split())
+
+    sessions = _SessionStore(count_tokens)
+    session_id = sessions.create()
+    session = sessions.get(session_id)
+    session.log.append_system("sys")
+    for i in range(3):
+        session.log.append_user(f"question {i} " * 5)
+        session.log.append_assistant(f"answer {i} " * 5, cited_labels=[])
+
+    # A tiny operating ceiling (system + history) forces eviction on the
+    # very next turn against this already-long pre-seeded history.
+    budget = Budget(ceiling=1000, system=1, history=2, newest=1000, generation=100, margin=1000)
+
+    events = [
+        StreamEvent(kind="token", text="ok"),
+        StreamEvent(kind="done", finish_reason="stop", usage={}),
+    ]
+    last_eviction: dict = {}
+    turn_runner = _make_turn_runner(
+        sessions=sessions,
+        llm=_FakeLlm(events),
+        research_engine=_FakeResearchEngine(),
+        calc=_CalcTool(),
+        budget=budget,
+        last_eviction=last_eviction,
+    )
+
+    frames = []
+
+    def emit(name, data):
+        frames.append((name, data))
+
+    turn_runner(session_id, _Input(kind="text", text="one more?"), emit, threading.Event())
+
+    names = [name for name, _ in frames]
+    assert "eviction" in names
+    eviction_data = dict(frames[names.index("eviction")][1])
+    assert eviction_data["evicted_turns"] >= 1
+    assert last_eviction[session_id]["evicted_turns"] >= 1
+    # Forwarded before the model's answer, per spec.
+    assert names.index("eviction") < names.index("done")
+
+    status_provider = _make_status_provider(
+        llm=_FakeLlm(events),
+        registry=Registry(archives=()),
+        sessions=sessions,
+        budget=budget,
+        model_name="m",
+        last_eviction=last_eviction,
+    )
+    status = status_provider(session_id=session_id)
+    assert status["last_eviction"]["evicted_turns"] >= 1
+
+    # A session with no eviction yet reports None.
+    other_session_id = sessions.create()
+    other_status = status_provider(session_id=other_session_id)
+    assert other_status["last_eviction"] is None
+
+
 def test_no_file_in_tutor_app_imports_retrieval_zim_directly():
     app_dir = REPO_ROOT / "tutor" / "app"
     offenders = []

@@ -76,6 +76,42 @@ class _FakeSessions:
         self._sessions[session_id]["subject"] = subject
         return True
 
+    def create_for_lesson(self, lessons, lesson_id: str) -> str:
+        session = lessons.new_session(lesson_id, count_tokens=None)
+        self._counter += 1
+        sid = f"sess-{self._counter}"
+        self._sessions[sid] = session
+        return sid
+
+    def resume_lesson(self, lessons, lesson_id: str) -> str:
+        session = lessons.resume(lesson_id, count_tokens=None)
+        self._counter += 1
+        sid = f"sess-{self._counter}"
+        self._sessions[sid] = session
+        return sid
+
+
+class _FakeLessons:
+    def __init__(self):
+        self._subjects: dict[str, str] = {}
+        self._counter = 0
+
+    def start_lesson(self, *, profile_id: str, subject: str) -> str:
+        self._counter += 1
+        lesson_id = f"lesson-{self._counter}"
+        self._subjects[lesson_id] = subject
+        return lesson_id
+
+    def new_session(self, lesson_id: str, *, count_tokens):
+        if lesson_id not in self._subjects:
+            raise ValueError(f"unknown lesson: {lesson_id}")
+        return {"subject": self._subjects[lesson_id]}
+
+    def resume(self, lesson_id: str, *, count_tokens):
+        if lesson_id not in self._subjects:
+            raise ValueError(f"unknown lesson: {lesson_id}")
+        return {"subject": self._subjects[lesson_id], "resumed": True}
+
 
 @dataclass
 class _ScriptedRunner:
@@ -119,7 +155,7 @@ def _fake_status_provider(session_id: str | None = None) -> dict:
     }
 
 
-def _make_app(tmp_path: Path, runner=None):
+def _make_app(tmp_path: Path, runner=None, lessons=None):
     store = SnapshotStore(tmp_path / "snaps.sqlite3")
     deps = AppDeps(
         turn_runner=runner or _ScriptedRunner(),
@@ -127,6 +163,7 @@ def _make_app(tmp_path: Path, runner=None):
         status_provider=_fake_status_provider,
         sessions=_FakeSessions(),
         subjects=["general", "math", "history"],
+        lessons=lessons,
     )
     app = create_app(deps)
     return app, deps
@@ -369,6 +406,55 @@ def test_source_endpoint_works_after_disposable_caches_cleared(client):
     # the snapshot store; the endpoint must still resolve the passage.
     resp = c.get("/api/source/p2")
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Lesson attach / resume (GAP 1 fix)
+# ---------------------------------------------------------------------------
+
+
+def test_create_lesson_without_lessons_configured_is_404(client):
+    c, _ = client
+    resp = c.post("/api/lesson", json={"profile_id": "p1", "subject": "math"})
+    assert resp.status_code == 404
+
+
+def test_create_lesson_returns_lesson_and_session_ids(tmp_path):
+    app, _ = _make_app(tmp_path, lessons=_FakeLessons())
+    with TestClient(app) as c:
+        resp = c.post("/api/lesson", json={"profile_id": "p1", "subject": "math"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["lesson_id"]
+        assert body["session_id"]
+
+        # The attached session is usable like any other for turns.
+        turn_resp = c.get(f"/api/status?session_id={body['session_id']}")
+        assert turn_resp.status_code == 200
+
+
+def test_resume_lesson_returns_a_fresh_session_id(tmp_path):
+    app, _ = _make_app(tmp_path, lessons=_FakeLessons())
+    with TestClient(app) as c:
+        created = c.post("/api/lesson", json={"profile_id": "p1", "subject": "math"}).json()
+        resumed = c.post(f"/api/lesson/{created['lesson_id']}/resume")
+        assert resumed.status_code == 200
+        body = resumed.json()
+        assert body["lesson_id"] == created["lesson_id"]
+        assert body["session_id"] != created["session_id"]
+
+
+def test_resume_unknown_lesson_is_404(tmp_path):
+    app, _ = _make_app(tmp_path, lessons=_FakeLessons())
+    with TestClient(app) as c:
+        resp = c.post("/api/lesson/no-such-lesson/resume")
+        assert resp.status_code == 404
+
+
+def test_resume_lesson_without_lessons_configured_is_404(client):
+    c, _ = client
+    resp = c.post("/api/lesson/anything/resume")
+    assert resp.status_code == 404
 
 
 # ---------------------------------------------------------------------------

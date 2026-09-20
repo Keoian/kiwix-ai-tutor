@@ -242,6 +242,65 @@ class TestResumeRebuildsByteIdenticalLog:
         assert after_bytes.startswith(before_bytes)
 
 
+class TestPersistTurnAtomic:
+    """``persist_turn`` (app-side persistence, used by
+    tutor.app.compose._persist_turn) writes the turn row and the prompt
+    log snapshot in one transaction."""
+
+    def test_persist_turn_writes_turn_row_and_prompt_log_together(self, tmp_path):
+        profile_id = _make_profile_id(tmp_path)
+        store = LessonStore(tmp_path / "lessons.sqlite3")
+        lesson_id = store.start_lesson(profile_id=profile_id, subject="math")
+        session = store.new_session(lesson_id, count_tokens=_count_tokens)
+        session.log.append_system("You are a tutor.")
+        session.log.append_user("What is 2+2?")
+        session.log.append_assistant("It's 4.", cited_labels=[])
+
+        store.persist_turn(
+            lesson_id,
+            session,
+            subject="math",
+            route="action",
+            calc_calls=0,
+            research_calls=0,
+            citation_passage_ids=[],
+            tokens_used=session.log.tokens_used(),
+            cached_tokens=0,
+            user_text="What is 2+2?",
+        )
+
+        [turn] = store.list_turns(lesson_id)
+        assert turn.route == "action"
+
+        resumed = store.resume(lesson_id, count_tokens=_count_tokens)
+        assert serialize_messages(resumed.log.render()) == serialize_messages(
+            session.log.render()
+        )
+
+    def test_persist_turn_rejects_subject_change_without_writing_anything(self, tmp_path):
+        profile_id = _make_profile_id(tmp_path)
+        store = LessonStore(tmp_path / "lessons.sqlite3")
+        lesson_id = store.start_lesson(profile_id=profile_id, subject="math")
+        session = store.new_session(lesson_id, count_tokens=_count_tokens)
+        session.log.append_system("hi")
+        session.log.append_user("hello")
+
+        with pytest.raises(ValueError):
+            store.persist_turn(
+                lesson_id,
+                session,
+                subject="history",
+                route="action",
+                calc_calls=0,
+                research_calls=0,
+                citation_passage_ids=[],
+                tokens_used=0,
+                cached_tokens=0,
+            )
+
+        assert store.list_turns(lesson_id) == []
+
+
 class TestLessonStoreSqliteDiscipline:
     def test_database_is_wal_mode(self, tmp_path):
         db_path = tmp_path / "lessons.sqlite3"

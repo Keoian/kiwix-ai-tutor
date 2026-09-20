@@ -90,10 +90,34 @@ or a repeat here).
 
 PASS (measured): resumed PromptLog validated cleanly and one additional turn completed successfully after resume (lesson bfcbc171f90a41d091d6567ac60d7d53).
 
+## Fixed after the soak
+
+The real 30-minute soak above (the numbers in every section up to and including "Resume check") exposed two product gaps that the soak script had been papering over by doing the work itself. Both are now fixed in the app, not just in the soak harness:
+
+- **GAP 1 -- the real app did not persist lessons.** `tutor/app/routes.py`/`tutor/app/compose.py` never wrote turns into `LessonStore`, so after a real app restart a student's lesson could not actually be resumed (this 30-minute soak persisted turns itself, in-process, purely to exercise the resume path). Fixed: `POST /api/lesson` attaches a session to a brand-new lesson (`lesson_id` + `session_id`); `POST /api/lesson/{id}/resume` rebuilds a session from a persisted lesson. `tutor.app.compose`'s `turn_runner` now persists every completed turn (including error/cancelled turns, log repaired-if-needed first) atomically -- one SQLite transaction writing both the turn row and the prompt-log snapshot (`LessonStore.persist_turn`) -- so a crash between turns loses at most the in-flight turn. A subject change on an attached session follows the pre-existing `LessonStore` rule (start a new lesson) rather than corrupting the current one. Sessions with no lesson attached are unaffected.
+  - Tests: `tests/test_lesson_state.py::TestPersistTurnAtomic`, `tests/test_compose.py::test_full_app_persists_turns_and_resumes_byte_identical`, `tests/test_compose.py::test_no_lesson_attached_session_still_works_and_is_never_persisted`, `tests/test_routes.py::test_create_lesson_returns_lesson_and_session_ids`, `tests/test_routes.py::test_resume_lesson_returns_a_fresh_session_id`, `tests/test_routes.py::test_resume_unknown_lesson_is_404`.
+- **GAP 2 -- `eviction_reprefill` events were not forwarded to the client.** Fixed: `tutor.app.compose`'s turn adapter now emits an SSE `eviction` event (evicted turn count, tokens before/after) at the moment eviction fires, before the next model call, and remembers the session's last eviction for `/api/status`'s `last_eviction` field. `tutor/ui/app.js` shows a small unobtrusive note in the chat pane and the status panel (`textContent` only).
+  - Tests: `tests/test_compose.py::test_eviction_event_forwarded_over_sse_and_status`; `tests/test_ui_static.py` stays green (no `innerHTML`, `textContent` used).
+
+`eval/run_lesson_soak.py` was simplified accordingly: it now creates/attaches its lesson via `POST /api/lesson`, no longer monkeypatches `PromptLog.evict` or calls `LessonStore.append_turn`/`save_session` itself (the app does that), counts `eviction_reprefill` from the `eviction` SSE event, and its `_resume_check` drives `POST /api/lesson/{id}/resume` over real HTTP instead of touching `LessonStore`/`Session` internals directly. `tests/test_lesson_soak.py` (pure-function unit tests only) stayed green throughout.
+
+### 3-minute confirmation run (measured, `data/soak_short_confirm.md`, NOT a re-run of the 30-minute soak above)
+
+`python -m eval.run_lesson_soak --config config/dev.toml --minutes 3 --out data/soak_short_confirm.md` against the live dev llama-server:
+
+- turns completed: **7** (ok: 7, errored: 0)
+- research status mix: **ok: 3, partial: 2** (previously empty on the 30-minute run due to a since-fixed recorder aliasing bug -- now populated, confirming that fix)
+- mean research call elapsed: 3.528s
+- ttft: p50=20.406s, p95=33.568s
+- cache hit ratio mean: 0.943
+- eviction_reprefill events observed: 0 (a 3-minute lesson at this token growth rate does not reach the eviction ceiling -- expected, not a bug; GAP 2's forwarding path is covered by the unit test above, not by this short run)
+- resume check: **PASS (measured)** -- "POST /api/lesson/{id}/resume rebuilt a byte-identical prompt log (app-side persistence, no soak-driven persistence involved) and one additional turn completed successfully after resume" (lesson `726314f24b6b4c049275258d3e6d4eab`)
+- llama-server /health stayed healthy for every sample: True
+
+This is a short confirmation only, run to validate the two fixes above against the live app end-to-end without repeating the 30-minute soak; it does not replace or update any of the 30-minute soak's own measured numbers above.
+
 ## Deferred to the Dell (M6)
 
 - Real hardware measurements on the delivery machine (this soak ran on the dev GPU box).
-- Automatic wiring of session turns into `LessonStore.append_turn`/`save_session` from `tutor.app.compose._make_turn_runner` (this soak drives that persistence itself, in-process, to exercise the resume path -- routes.py does not yet do this on every turn).
-- Forwarding `eviction_reprefill` over the SSE wire (currently dropped by `compose._make_turn_runner`'s adapter; this soak reads eviction events in-process instead).
 
 Labeling: everything in "Turns"/"Latency"/"Token growth"/"Prompt cache"/"Citations"/"Research status"/"Resource usage"/"Resume check" is **measured** from this run. The hardware prefill-collapse figures (21 t/s@4k / 11 t/s@8k) are **inferred** from a prior measurement, cited for context, not re-derived here.

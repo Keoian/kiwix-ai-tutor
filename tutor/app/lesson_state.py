@@ -222,6 +222,76 @@ class LessonStore:
             )
             self.connection.commit()
 
+    def persist_turn(
+        self,
+        lesson_id: str,
+        session: Session,
+        *,
+        subject: str,
+        route: str,
+        calc_calls: int,
+        research_calls: int,
+        citation_passage_ids: list[str],
+        tokens_used: int,
+        cached_tokens: int,
+        user_text: str | None = None,
+        action: str | None = None,
+        eviction_events: list[dict] | None = None,
+    ) -> None:
+        """Atomically persist one completed turn: the turn's metric row
+        AND the lesson's current prompt-log snapshot (``session.log``), in
+        a single SQLite transaction. This is the app-side counterpart to
+        ``append_turn`` + ``save_session`` called separately -- doing both
+        writes under one commit means a crash mid-persist can never leave
+        the turn row and the prompt log out of sync with each other; it
+        can only ever lose the whole (not-yet-committed) turn, exactly
+        like a crash before persistence started at all.
+        """
+        row = self._get_lesson_row(lesson_id)
+        if row is None:
+            raise ValueError(f"unknown lesson: {lesson_id}")
+        lesson_subject = row[2]
+        if subject != lesson_subject:
+            raise ValueError(
+                f"subject change ({lesson_subject!r} -> {subject!r}) requires a new lesson"
+            )
+
+        turn_id = uuid.uuid4().hex
+        entries = session.log.render()
+        with self._lock:
+            seq = self.connection.execute(
+                "SELECT COUNT(*) FROM turns WHERE lesson_id = ?", (lesson_id,)
+            ).fetchone()[0]
+            self.connection.execute(
+                """
+                INSERT INTO turns
+                    (id, lesson_id, subject, user_text, action, route, calc_calls,
+                     research_calls, citation_passage_ids, tokens_used, cached_tokens,
+                     eviction_events, seq)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    turn_id,
+                    lesson_id,
+                    subject,
+                    user_text,
+                    action,
+                    route,
+                    calc_calls,
+                    research_calls,
+                    json.dumps(citation_passage_ids),
+                    tokens_used,
+                    cached_tokens,
+                    json.dumps(eviction_events) if eviction_events is not None else None,
+                    seq,
+                ),
+            )
+            self.connection.execute(
+                "UPDATE lessons SET prompt_log_json = ? WHERE id = ?",
+                (json.dumps(entries), lesson_id),
+            )
+            self.connection.commit()
+
     def list_turns(self, lesson_id: str) -> list[Turn]:
         with self._lock:
             rows = self.connection.execute(

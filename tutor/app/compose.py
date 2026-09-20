@@ -192,6 +192,7 @@ class _SessionStore:
     def __init__(self, count_tokens) -> None:
         self._count_tokens = count_tokens
         self._sessions: dict[str, Session] = {}
+        self._lesson_by_session: dict[str, str] = {}
         self._counter = 0
         self._lock = threading.Lock()
 
@@ -201,6 +202,31 @@ class _SessionStore:
             session_id = f"sess-{self._counter}"
             self._sessions[session_id] = Session(self._count_tokens)
         return session_id
+
+    def _register(self, session: Session, lesson_id: str) -> str:
+        with self._lock:
+            self._counter += 1
+            session_id = f"sess-{self._counter}"
+            self._sessions[session_id] = session
+            self._lesson_by_session[session_id] = lesson_id
+        return session_id
+
+    def create_for_lesson(self, lessons: Any, lesson_id: str) -> str:
+        """Create a fresh session attached to ``lesson_id`` (a brand-new
+        lesson, no prior turns): every completed turn on this session is
+        then persisted into ``lessons`` by the turn runner."""
+        session = lessons.new_session(lesson_id, count_tokens=self._count_tokens)
+        return self._register(session, lesson_id)
+
+    def resume_lesson(self, lessons: Any, lesson_id: str) -> str:
+        """Rebuild ``lesson_id``'s prompt log from persisted state and
+        attach it to a fresh session id. Raises ``ValueError`` for an
+        unknown lesson (``LessonStore.resume``'s own contract)."""
+        session = lessons.resume(lesson_id, count_tokens=self._count_tokens)
+        return self._register(session, lesson_id)
+
+    def lesson_for(self, session_id: str) -> str | None:
+        return self._lesson_by_session.get(session_id)
 
     def get(self, session_id: str) -> Session | None:
         return self._sessions.get(session_id)
@@ -224,8 +250,20 @@ class _UserInputLike:
     action: str | None = None
 
 
-def _make_turn_runner(*, sessions: _SessionStore, llm, research_engine, calc, budget):
+def _make_turn_runner(
+    *,
+    sessions: _SessionStore,
+    llm,
+    research_engine,
+    calc,
+    budget,
+    lessons: Any = None,
+    last_eviction: dict | None = None,
+):
     from tutor.app.agent_loop import run_turn
+
+    if last_eviction is None:
+        last_eviction = {}
 
     def turn_runner(session_id, user_input, emit, cancel) -> None:
         session = sessions.get(session_id)
@@ -242,6 +280,19 @@ def _make_turn_runner(*, sessions: _SessionStore, llm, research_engine, calc, bu
                 # "error" and "done" StreamEvents carry no UI-facing frame
                 # of their own here: the turn's final status (below) is
                 # what the student sees, always via a student-safe message.
+                return
+            if isinstance(obj, dict) and obj.get("kind") == "eviction_reprefill":
+                # Emitted synchronously by run_turn before the model call
+                # that follows the eviction (see tutor.app.agent_loop and
+                # tutor.app.prompt.PromptLog.evict). Forwarded verbatim
+                # over SSE and remembered for /api/status.
+                payload = {
+                    "evicted_turns": obj.get("evicted_turns"),
+                    "tokens_before": obj.get("tokens_before"),
+                    "tokens_after": obj.get("tokens_after"),
+                }
+                last_eviction[session_id] = payload
+                emit("eviction", payload)
                 return
             if isinstance(obj, dict) and obj.get("kind") == "tool_result":
                 emit(
@@ -264,8 +315,10 @@ def _make_turn_runner(*, sessions: _SessionStore, llm, research_engine, calc, bu
             emit("error", {"message": _STUDENT_SAFE_ERROR})
             return
 
+        citation_passage_ids: list[str] = []
         if result.status == "ok":
             citations = resolve_citations(result.answer_text, session.known_passages())
+            citation_passage_ids = [c.passage_id for c in citations if c.passage_id]
             emit(
                 "citations",
                 {"citations": [dataclasses.asdict(c) for c in citations]},
@@ -288,7 +341,58 @@ def _make_turn_runner(*, sessions: _SessionStore, llm, research_engine, calc, bu
         else:
             emit("error", {"message": result.answer_text or _STUDENT_SAFE_ERROR})
 
+        if lessons is not None:
+            lesson_id = sessions.lesson_for(session_id)
+            if lesson_id is not None:
+                _persist_turn(
+                    lessons,
+                    lesson_id,
+                    session,
+                    user_input=user_input,
+                    result=result,
+                    citation_passage_ids=citation_passage_ids,
+                )
+
     return turn_runner
+
+
+def _persist_turn(lessons, lesson_id, session, *, user_input, result, citation_passage_ids) -> None:
+    """Best-effort, atomic per-turn persistence for a session attached to a
+    lesson (see ``routes.create_lesson``/``routes.resume_lesson``). A log
+    left invalid by a crashed tool call is repaired first (mirroring
+    ``LessonStore.resume``'s own repair-on-resume), so byte-identical
+    resume never has to replay a dangling ``tool_calls`` entry. A subject
+    change on the session (``subject != lesson.subject``) is the one
+    expected failure here -- per the existing ``LessonStore`` rule it
+    requires starting a new lesson, so it is swallowed rather than
+    crashing an already-answered turn.
+    """
+    log = getattr(session, "log", None)
+    if log is not None and hasattr(log, "repair") and not log.is_valid():
+        log.repair()
+
+    eviction_events = (
+        [dataclasses.asdict(e) for e in result.events] if result.events else None
+    )
+    try:
+        lessons.persist_turn(
+            lesson_id,
+            session,
+            subject=session.subject_hint or "",
+            route=result.route,
+            calc_calls=result.calc_calls,
+            research_calls=result.research_calls,
+            citation_passage_ids=citation_passage_ids,
+            tokens_used=session.log.tokens_used(),
+            cached_tokens=result.cached_tokens or 0,
+            user_text=user_input.text if user_input.kind == "text" else None,
+            action=user_input.action if user_input.kind == "action" else None,
+            eviction_events=eviction_events,
+        )
+    except ValueError:
+        # Subject changed mid-lesson: the existing LessonStore rule is
+        # "start a new lesson", not silently corrupt this one.
+        pass
 
 
 def _make_status_provider(
@@ -300,10 +404,13 @@ def _make_status_provider(
     model_name: str,
     resource_monitor: ResourceMonitor | None = None,
     dense_status: dict | None = None,
+    last_eviction: dict | None = None,
 ):
     dense_status = dict(dense_status) if dense_status is not None else dict(
         _DENSE_UNAVAILABLE_STATUS
     )
+    if last_eviction is None:
+        last_eviction = {}
 
     def status_provider(session_id: str | None = None) -> dict:
         healthy = llm.health()
@@ -343,6 +450,8 @@ def _make_status_provider(
             if session is not None:
                 result["tokens_used"] = session.log.tokens_used()
                 result["headroom"] = session.log.headroom(budget)
+            if session_id in last_eviction:
+                result["last_eviction"] = dict(last_eviction[session_id])
         return result
 
     return status_provider
@@ -385,6 +494,7 @@ def build_deps(cfg: Any, *, llm: Any = None, research_engine: Any = None) -> App
     lessons = LessonStore(data_dir / "lessons.sqlite")
     turn_logger = TurnLogger(data_dir / "logs" / "turns.jsonl")
     resource_monitor = ResourceMonitor()
+    last_eviction: dict[str, dict] = {}
 
     turn_runner = _make_turn_runner(
         sessions=sessions,
@@ -392,6 +502,8 @@ def build_deps(cfg: Any, *, llm: Any = None, research_engine: Any = None) -> App
         research_engine=research_engine,
         calc=calc,
         budget=budget,
+        lessons=lessons,
+        last_eviction=last_eviction,
     )
     status_provider = _make_status_provider(
         llm=llm,
@@ -401,6 +513,7 @@ def build_deps(cfg: Any, *, llm: Any = None, research_engine: Any = None) -> App
         model_name=cfg.runtime.model_path.name,
         resource_monitor=resource_monitor,
         dense_status=dense_status,
+        last_eviction=last_eviction,
     )
 
     return AppDeps(

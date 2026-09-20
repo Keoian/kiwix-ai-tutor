@@ -44,6 +44,26 @@ def build_router(deps: Any) -> APIRouter:
         session_id = deps.sessions.create()
         return {"session_id": session_id}
 
+    @router.post("/api/lesson")
+    def create_lesson(body: dict):
+        if deps.lessons is None:
+            raise HTTPException(status_code=404, detail="lessons not configured")
+        profile_id = body.get("profile_id", "")
+        subject = body.get("subject", "")
+        lesson_id = deps.lessons.start_lesson(profile_id=profile_id, subject=subject)
+        session_id = deps.sessions.create_for_lesson(deps.lessons, lesson_id)
+        return {"lesson_id": lesson_id, "session_id": session_id}
+
+    @router.post("/api/lesson/{lesson_id}/resume")
+    def resume_lesson(lesson_id: str):
+        if deps.lessons is None:
+            raise HTTPException(status_code=404, detail="lessons not configured")
+        try:
+            session_id = deps.sessions.resume_lesson(deps.lessons, lesson_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="unknown lesson") from exc
+        return {"lesson_id": lesson_id, "session_id": session_id}
+
     @router.post("/api/session/{session_id}/subject")
     def set_subject(session_id: str, body: dict):
         subject = body.get("subject")
