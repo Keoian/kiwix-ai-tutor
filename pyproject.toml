@@ -23,6 +23,14 @@ dependencies = [
     # WP-C3: tutor app HTTP server (SSE streaming UI backend).
     "fastapi>=0.110",
     "uvicorn>=0.29",
+    # WP-B7: dense sidecar brute-force top-k. A pure-Python dot product over
+    # ~100k x 384 fp16 vectors measured ~2.4s per query in this project's own
+    # benchmark (docs/dense_sidecar.md) -- about 50x over the < 50ms CPU
+    # query budget in docs/plan/offline_tutor_implementation_plan.md's WP-B7
+    # acceptance criterion. numpy's BLAS-backed matrix-vector product clears
+    # it comfortably; it is used only for that search-time computation, not
+    # for the on-disk format (plain struct-packed fp16).
+    "numpy>=1.26",
 ]
 
 [project.optional-dependencies]

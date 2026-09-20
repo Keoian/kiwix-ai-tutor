@@ -206,6 +206,173 @@ other category has a real miss pattern:
    surfaced by this eval: real students *will* ask false-premise or
    off-corpus questions, and the tutor currently has no way to notice.
 
+## Baseline v2: coverage flags + context (2026-09-20)
+
+Two structural bugs from the M2 baseline above are fixed here, per
+`docs/plan/offline_tutor_spec_v0.3.md` §5-§7 and `offline_tutor_kiwix_reuse_plan.md`'s
+coverage-flag notes:
+
+1. **Abstention.** `compute_coverage(query_terms, title, text)`
+   (`tutor/retrieval/research.py`) computes `term_coverage` (fraction of
+   query/topic-hint content words present in a candidate passage) and
+   `title_match` (any overlap with the candidate's title). A candidate is
+   `weak` when it has neither a title match nor `term_coverage >= 0.34`
+   (`_COVERAGE_TERM_THRESHOLD`, raised to `0.6` during tuning -- see
+   below). `_best_coverage` checks this over the top
+   `_COVERAGE_CANDIDATES_CHECKED = 3` scored candidates (not just rank-1,
+   since rank-1 is not always the semantically correct passage -- see
+   the v1 failure analysis above) and is used twice: (a) after tier 1 to
+   decide whether tier 2 is worth consulting at all (spec §6: "tier 2
+   only if coverage flags are weak after tier 1"), and (b) on the final
+   packed passages to set the response `status`. When the final coverage
+   is weak, `status` becomes `"empty"` (or `"partial"` if a deadline was
+   also hit) and **no passages are returned** -- the tutor gets an
+   honest "no evidence" signal instead of a confident wrong guess.
+2. **Elliptical/topic_hint context.** `research(topic_hint=...)` already
+   existed for archive routing; it now also (a) feeds the topic_hint's
+   tokens into the lexical search query and the BM25 ranking query
+   exactly like model-supplied `keywords` (`_query_terms`, used by
+   `compute_coverage` too, so a topic_hint-matched title counts as
+   covered), and (b) does a direct title lookup for the topic_hint
+   itself and guarantees it a slot in the per-archive candidate-article
+   pool (`_process_archive`), because spec §5 step 3 describes
+   `topic_hint` as "the current subject" -- an entity the lesson is
+   already about, not merely one more keyword to out-rank on lexical
+   score. `eval/run_retrieval_eval.py`'s `Question` gained an optional
+   `context` field (JSONL key `"context"`), passed to `research()` as
+   `topic_hint`; `eval/questions/simplewiki_questions.jsonl`'s five
+   `elliptical` items (sw41-sw45, both splits) now carry it (e.g.
+   `sw41` "What made it explode like that?" + `context: "Volcano"`).
+3. **`false_premise` expected_paths were wrong, not the engine.** Spec
+   §7.3's coverage story is "return the evidence about the real entity
+   and let the tutor correct the premise" -- a false-premise question
+   is not the same as an absent/off-corpus one. The question file's
+   `false_premise` items previously used `expected_paths: []` (scored
+   as "correct" only when the engine abstained), which contradicts that
+   design. Fixed to the real entity each question is actually about,
+   verified to exist via `search_titles` against the real archive
+   before editing:
+   `sw48` "unicorns go extinct" -> `Unicorn`, `sw49` "capital of the
+   Moon" -> `Moon`, `sw50` "legs does a snake have" -> `Snake`, `sw52`
+   "fifth president of Mars" -> `Mars`, `sw53` "boiling point of gold
+   ... on the Moon" -> `Gold`. `absent` items (genuinely off-corpus,
+   fabricated nouns like "Quibblonia") keep `expected_paths: []` and are
+   still scored via `status in ("empty", "partial") and not passages`
+   (widened from `status == "empty"` only -- see below).
+4. **Eval scoring: `"partial"` with no passages also counts as correct
+   abstention** for `expected_paths: []` items. Against the real tier-2
+   archives, an off-corpus query with weak tier-1 coverage can
+   legitimately hit the 3 s soft deadline while tier 2 is being
+   consulted and still correctly find nothing; that is still "no
+   coverage", not a wrong confident answer.
+
+### Threshold tuning (tuning split only, `n=30`)
+
+`_COVERAGE_TERM_THRESHOLD` was swept on the tuning split. `0.34` (the
+spec's own §7.3 language suggested a low bar) let single-word-title
+false positives through on `comparison` (BM25 rank-1 ties broken toward
+a topically-adjacent-but-wrong article, e.g. `Synapsid` for "mammal vs
+reptile", scored `term_coverage=0.5` and no title match, which cleared
+`0.34`, then never triggered the tier-2 fallback). Raising it to `0.6`
+made the coverage check honest enough to trigger tier-2 consultation for
+those harder queries instead of confidently guessing:
+
+| `_COVERAGE_TERM_THRESHOLD` | comparison recall@5 (tuning) | absent+false_premise recall@5 (tuning) |
+|---|---|---|
+| 0.34 | 0.200 | 0.200 |
+| 0.60 (chosen) | 0.200 | 0.400 |
+
+`comparison` itself did not improve with either threshold (its miss is
+a ranking/multi-entity-query problem, out of scope here since ranking
+flags stay OFF -- same root cause the v1 failure analysis already
+named); the threshold change's payoff is entirely in giving
+`absent`/`false_premise` a real shot at tier 2 and in not silently
+trusting a coincidental single-word title match.
+
+A known residual gap: two `stopwords_en.txt` fillers ("me", "about")
+were added because the existing list is small enough that ordinary
+conversational words survive tokenization and can produce a spurious
+single-word title match on a fallback candidate (e.g. "Tell me about
+the country of X" matching "Tell Me It's Real"). This is not fully
+solved -- a real word that is *also* a generic title (e.g. "Effect" for
+"What is the flibbertigibbetopolis **effect**?") can still slip past
+`title_match` because the coverage check has no corpus-wide term
+specificity/IDF signal to lean on; both `absent` misses in the tuning
+split are this exact failure mode.
+
+### Tuning split (warm, n=30) -- before / after
+
+| category | recall@5 (v1) | recall@5 (v2) | status change |
+|---|---|---|---|
+| overall | 0.500 | 0.567 | -- |
+| absent | 0.000 | 0.000 | still 0/2 (see residual gap above) |
+| comparison | 0.400 | 0.200 | tier-2 fallback now fires, but the underlying rank-1 miss is unchanged; see note above |
+| direct | 1.000 | 1.000 | unchanged |
+| elliptical | 0.000 | 1.000 | fixed by topic_hint context |
+| false_premise | 0.000 | 0.333 | `expected_paths` fix + real evidence now returned (1/3; `Unicorn`/`Moon` still missed -- no stemming for "unicorns"->"Unicorn", and "capital of the Moon" ranks `Natural_satellite`/`Capital` over `Moon`) |
+| tables_formulas | 0.333 | 0.333 | unchanged |
+| why_how | 0.400 | 0.400 | unchanged |
+
+### Held-out split (warm, n=30) -- before / after, run ONCE after tuning was frozen
+
+| category | recall@5 (v1) | recall@5 (v2) |
+|---|---|---|
+| overall | 0.600 | 0.700 |
+| absent | 0.000 | 0.333 |
+| comparison | 0.600 | 0.600 |
+| direct | 1.000 | 1.000 |
+| elliptical | 0.000 | 0.667 |
+| false_premise | 0.000 | 0.000 (both items, `Mars`/`Gold`, still missed by rank -- same "correct entity outranked" pattern as `comparison`) |
+| tables_formulas | 0.500 | 0.500 |
+| why_how | 0.800 | 0.800 |
+
+Overall held-out recall@5 improved 0.600 -> 0.700, driven entirely by
+`elliptical` (context fix) and `absent` (abstention fix); every other
+category is unchanged or a wash, as expected since ranking itself was
+not touched.
+
+### Latency: tier-2 gating and its trade-off
+
+The v1 baseline always searched every tier-1 **and tier-2** archive
+(`Registry.for_subject` returns both tiers unconditionally) --
+`config/archives.dev.toml`'s tier 2 includes a 60 GB full Wikipedia
+archive (`enwiki`) and a textbook archive on HDD. A `cProfile` run of one
+`comparison` query showed essentially all wall time inside
+`_winapi.WaitForMultipleObjects` waiting on the out-of-process ZIM
+worker (8.4 s total, two archives searched back-to-back) -- i.e. the
+waste was *always paying the enwiki round-trip*, not a Python-level
+inefficiency in `research.py` itself. `research()` now only consults
+tier 2 when `_best_coverage` over the tier-1-only candidates is weak
+(spec §6), via a `primary_archives` (tier 1 + gated tier 3) /
+`fallback_archives` (tier 2) split in `research()`.
+
+| split, category | mean latency v1 (s) | mean latency v2 (s) |
+|---|---|---|
+| tuning, direct | 0.480 | ~0.49 (unchanged: tier 2 skipped, as intended) |
+| held-out, direct | 0.692 | 0.631 |
+| held-out, why_how | 0.906 | 0.931 |
+| held-out, comparison | 0.819 | 3.809 |
+| held-out, absent | 2.250 | 3.568 |
+| held-out, false_premise | 2.547 | 5.226 |
+| held-out, overall | 1.126 | 1.956 |
+
+The trade-off is real and worth stating plainly: categories whose tier-1
+coverage is genuinely weak (`comparison`, `absent`, `false_premise`) now
+correctly pay for a tier-2 consultation they previously always paid for
+anyway, but sequential tier-1-then-tier-2 (no archive concurrency
+added here) plus the 60 GB archive's own worse-case Xapian search time
+pushed those categories' mean latency *up*, not down, and overall mean
+latency moved further from the spec's <=1 s warm target rather than
+closer to it. The category that matters most for a real lesson --
+`direct`, the common case -- did improve (fewer archives searched, as
+intended) or stayed flat. No further latency work was done here given
+the time box; the profiler pointed at "waiting on Xapian over a 60 GB
+archive" as inherent, not a bug, so the only remaining lever is
+concurrency (consult archives in parallel workers) or a smaller/faster
+tier-2 archive, neither of which is in this milestone's scope (worker
+concurrency touches `tutor/retrieval/zim/worker.py`, out of bounds for
+this change).
+
 ### What would most likely help next (hypotheses, unvalidated)
 
 - **Abstention signal (highest expected payoff).** Add a coverage

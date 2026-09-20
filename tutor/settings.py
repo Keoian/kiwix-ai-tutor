@@ -82,11 +82,33 @@ class AppConfig:
 
 
 @dataclass(frozen=True)
+class EmbeddingConfig:
+    """WP-B7: config for a second llama-server started with ``--embedding``.
+
+    Model path resolves against ``[runtime].runtime_dir`` the same way
+    ``[runtime].model_path`` does, so the embedding model can live in the
+    same runtime checkout without repeating the runtime dir. Optional --
+    a config with no ``[embedding]`` table simply has no dense sidecar
+    support (scripts/serve_embed.* require it; the chat server does not).
+    """
+
+    host: str
+    port: int
+    model_path: Path
+    dim: int
+
+    @property
+    def base_url(self) -> str:
+        return f"http://{self.host}:{self.port}"
+
+
+@dataclass(frozen=True)
 class Config:
     runtime: RuntimeConfig
     server: ServerConfig
     sampling: SamplingConfig
     app: AppConfig
+    embedding: EmbeddingConfig | None
 
 
 def _require_table(data: dict, name: str) -> dict:
@@ -235,7 +257,28 @@ def load_config(path: Path) -> Config:
         registry_path=_app_path("registry_path", "config/archives.dev.toml"),
     )
 
-    return Config(runtime=runtime, server=server, sampling=sampling, app=app)
+    # [embedding] is optional, like [app]; when present every key is
+    # required (no sensible default for a model path or port pair that
+    # must not collide with [server].port).
+    embedding_table = data.get("embedding")
+    embedding: EmbeddingConfig | None = None
+    if embedding_table is not None:
+        if not isinstance(embedding_table, dict):
+            raise ConfigError("[embedding] must be a table")
+        emb_host = _get(embedding_table, "embedding", "host", str)
+        emb_port = _get(embedding_table, "embedding", "port", int)
+        emb_model_path_str = _get(embedding_table, "embedding", "model_path", str)
+        emb_dim = _get(embedding_table, "embedding", "dim", int)
+        emb_model_path = Path(emb_model_path_str)
+        if not emb_model_path.is_absolute():
+            emb_model_path = runtime_dir / emb_model_path
+        if emb_dim <= 0:
+            raise ConfigError("'dim' in [embedding] must be a positive integer")
+        embedding = EmbeddingConfig(
+            host=emb_host, port=emb_port, model_path=emb_model_path, dim=emb_dim
+        )
+
+    return Config(runtime=runtime, server=server, sampling=sampling, app=app, embedding=embedding)
 
 
 def _main(argv: list[str]) -> int:
@@ -245,10 +288,14 @@ def _main(argv: list[str]) -> int:
     one argv element per line, so a shell script can build a command line
     without duplicating flag-building logic.
     """
-    if len(argv) != 2 or argv[0] != "--argv":
-        print("usage: python -m tutor.settings --argv <config.toml>", file=sys.stderr)
+    if len(argv) != 2 or argv[0] not in ("--argv", "--argv-embedding"):
+        print(
+            "usage: python -m tutor.settings (--argv|--argv-embedding) <config.toml>",
+            file=sys.stderr,
+        )
         return 2
 
+    mode = argv[0]
     config_path = Path(argv[1])
     try:
         cfg = load_config(config_path)
@@ -256,8 +303,25 @@ def _main(argv: list[str]) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
+    if mode == "--argv":
+        print(str(cfg.runtime.server_binary))
+        for item in cfg.server.to_argv(cfg.runtime, cfg.sampling):
+            print(item)
+        return 0
+
+    # --argv-embedding: same binary, a minimal argv for an embedding server
+    # (no sampling flags -- embeddings do not sample).
+    if cfg.embedding is None:
+        print("error: config has no [embedding] table", file=sys.stderr)
+        return 1
     print(str(cfg.runtime.server_binary))
-    for item in cfg.server.to_argv(cfg.runtime, cfg.sampling):
+    for item in [
+        "-m", str(cfg.embedding.model_path),
+        "--host", cfg.embedding.host,
+        "--port", str(cfg.embedding.port),
+        "--embedding",
+        "-ngl", str(cfg.server.n_gpu_layers),
+    ]:
         print(item)
     return 0
 

@@ -30,6 +30,11 @@ class Question:
     expected_paths: list[str]
     category: str
     split: str
+    # Host-supplied conversational context (spec §5 step 3:
+    # research(query=message, topic_hint=current_subject)). Populated for
+    # elliptical follow-ups whose referent lives in prior turns; None for
+    # every other category.
+    context: str | None = None
 
 
 def load_questions(path: Path) -> list[Question]:
@@ -48,6 +53,7 @@ def load_questions(path: Path) -> list[Question]:
                     expected_paths=list(row["expected_paths"]),
                     category=row.get("category", "direct"),
                     split=row.get("split", "tuning"),
+                    context=row.get("context"),
                 )
             )
     return questions
@@ -72,18 +78,20 @@ def _score_one(
     engine: Any, question: Question, ks: tuple[int, ...]
 ) -> tuple[dict[int, float], float, float]:
     started = time.monotonic()
-    response = engine.research(question.question)
+    response = engine.research(question.question, topic_hint=question.context)
     elapsed = time.monotonic() - started
 
     if not question.expected_paths:
         # Unanswerable/absent items: correct iff the engine reports no (or
         # weak) coverage rather than confidently returning passages. See
         # docs/plan/offline_tutor_spec_v0.3.md §15 "ambiguity/false-premise/
-        # absent" category -- the eval fixture format predates this case, so
-        # we approximate "answered nothing" as status == "empty" with no
-        # passages returned.
+        # absent" category. "partial" with no passages also counts:
+        # against the real tier-2 archives, an off-corpus query with weak
+        # tier-1 coverage can legitimately hit the soft deadline while tier
+        # 2 is consulted and still correctly find nothing -- that is still
+        # "no coverage", not a wrong confident answer.
         status = getattr(response, "status", "ok")
-        correct = status == "empty" and not response.passages
+        correct = status in ("empty", "partial") and not response.passages
         value = 1.0 if correct else 0.0
         return {k: value for k in ks}, value, elapsed
 

@@ -58,10 +58,87 @@ _THREAD_JOIN_TIMEOUT_S = 0.5
 
 _PROCEDURAL_RE = re.compile(r"\bhow (do|would|can|should) (i|you|we)\b", re.IGNORECASE)
 
+# Coverage-flag threshold (spec §7.3 "coverage signals are explainable").
+# Tuned on the tuning split of eval/questions/simplewiki_questions.jsonl --
+# see docs/retrieval_baseline.md "Baseline v2" for the before/after tables.
+_COVERAGE_TERM_THRESHOLD = 0.6
+
 
 def _is_procedural(query: str) -> bool:
     """Whether ``query`` reads as a "how do I ..."-style procedural ask."""
     return bool(_PROCEDURAL_RE.search(query))
+
+
+def _query_terms(query: str, topic_hint: str | None) -> set[str]:
+    """Content terms used for coverage checks: the query plus, per spec §5/§7.1,
+    the host-supplied ``topic_hint`` (current subject), which is what lets an
+    elliptical follow-up ("what about its moons?") still be judged covered.
+    """
+    terms = set(tokenize(query))
+    if topic_hint:
+        terms |= set(tokenize(topic_hint))
+    return terms
+
+
+# Coverage is checked over the top few candidates, not just the single
+# best-scored one: RRF/BM25 rank-1 is not always the semantically correct
+# passage (see docs/retrieval_baseline.md failure analysis), so requiring
+# *only* rank-1 to look relevant would wipe out perfectly good evidence
+# sitting at rank 2-3. Tuned on the tuning split alongside the term
+# threshold.
+_COVERAGE_CANDIDATES_CHECKED = 3
+
+
+def _best_coverage(
+    candidates: list[dict[str, Any]],
+    query_terms: set[str],
+    topic_hint_terms: frozenset[str],
+) -> dict[str, Any]:
+    """The least-weak :func:`compute_coverage` result among the top-scored
+    ``_COVERAGE_CANDIDATES_CHECKED`` candidates (any one of them being a
+    strong hit is enough to call the query covered). ``topic_hint_terms``
+    is accepted for symmetry with the query-term merge already done in
+    ``query_terms`` (see ``_query_terms``); it is not otherwise needed
+    here since a topic_hint-driven title match already shows up as a
+    normal ``title_match`` once its tokens are unioned into the query.
+    """
+    del topic_hint_terms
+    if not candidates:
+        return compute_coverage(query_terms, None, None)
+    top = sorted(candidates, key=lambda c: -c["score"])[:_COVERAGE_CANDIDATES_CHECKED]
+    best: dict[str, Any] | None = None
+    for c in top:
+        cov = compute_coverage(query_terms, c["title"], c["text"])
+        if not cov["weak"]:
+            return cov
+        if best is None or cov["term_coverage"] > best["term_coverage"]:
+            best = cov
+    assert best is not None
+    return best
+
+
+def compute_coverage(
+    query_terms: set[str], title: str | None, text: str | None
+) -> dict[str, Any]:
+    """Explainable coverage flags for a single candidate.
+
+    Per spec §7.3 ("coverage signals are explainable (facets represented,
+    entities missing, limits hit)") and §6 ("tier 2 only if coverage flags
+    are weak after tier 1"). ``weak`` is True when there is no candidate at
+    all, or the candidate shares no query/topic-hint terms with the
+    query's content words (``query_terms`` already includes the
+    host-supplied topic_hint's tokens -- see ``_query_terms``) and its
+    title does not match any of them either.
+    """
+    if not query_terms or title is None or text is None:
+        return {"term_coverage": 0.0, "title_match": False, "weak": True}
+
+    passage_terms = set(tokenize(text))
+    title_terms = set(tokenize(title))
+    term_coverage = len(query_terms & passage_terms) / len(query_terms)
+    title_match = bool(query_terms & title_terms)
+    weak = (not title_match) and term_coverage < _COVERAGE_TERM_THRESHOLD
+    return {"term_coverage": term_coverage, "title_match": title_match, "weak": weak}
 
 
 @dataclass(frozen=True)
@@ -221,6 +298,7 @@ class ResearchEngine:
         query: str,
         remaining: Any,
         keywords: list[str] | None = None,
+        topic_hint: str | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         worker = self._get_worker(entry)
         timed_out = False
@@ -237,6 +315,12 @@ class ResearchEngine:
         if keywords:
             for kw in keywords:
                 tokens.extend(tokenize(kw))
+        # Spec §5 step 3 / §7.1: the host-supplied topic_hint (current
+        # subject) is the referent for an elliptical follow-up ("what about
+        # its moons?"), so it feeds candidate search and ranking exactly
+        # like model-supplied keywords do.
+        topic_hint_tokens = tokenize(topic_hint) if topic_hint else []
+        tokens.extend(topic_hint_tokens)
         search_query = " ".join(tokens)
 
         def _op_deadline() -> float:
@@ -250,15 +334,19 @@ class ResearchEngine:
                 return [], True
             return (res.value or []), False
 
-        def _search_with_fallback(op: str, limit: int) -> tuple[list[Any], bool]:
+        def _search_with_fallback(op: str, limit: int) -> tuple[list[Any], bool, bool]:
             # Xapian's query parser ANDs bare terms together, so a natural-
             # language question with a stray non-corpus word (e.g. "tell",
             # "about") can zero out an otherwise-good query. When the joined
             # query returns nothing, fall back to merging each token's own
-            # single-term hits (deduplicated, first-seen order).
+            # single-term hits (deduplicated, first-seen order). The
+            # returned ``used_fallback`` flag is carried onto each result
+            # (see the "used_fallback" key below) purely for observability
+            # -- coverage itself is judged by term/title overlap (see
+            # ``compute_coverage``), not by which search path found it.
             hits, failed = _search(op, search_query, limit)
             if hits or failed or not tokens:
-                return hits, failed
+                return hits, failed, False
             merged: list[Any] = []
             seen: set[str] = set()
             any_failed = False
@@ -269,11 +357,23 @@ class ResearchEngine:
                     if hit.path not in seen:
                         seen.add(hit.path)
                         merged.append(hit)
-            return merged[:limit], any_failed
+            return merged[:limit], any_failed, True
 
-        fulltext_hits, fulltext_failed = _search_with_fallback("search_fulltext", _FULLTEXT_LIMIT)
-        title_hits, title_failed = _search_with_fallback("search_titles", _TITLE_LIMIT)
+        fulltext_hits, fulltext_failed, fulltext_fallback = _search_with_fallback(
+            "search_fulltext", _FULLTEXT_LIMIT
+        )
+        title_hits, title_failed, title_fallback = _search_with_fallback(
+            "search_titles", _TITLE_LIMIT
+        )
         timed_out = timed_out or fulltext_failed or title_failed
+        # Based on the full-text fallback only: a full-text AND-of-terms
+        # search failing outright is the strong signal that the query's
+        # content words never co-occur in any article. Title-suggestion
+        # search is inherently fuzzy/prefix-based and can independently
+        # return a single-word match (e.g. "tell" -> "Tell Me It's Real")
+        # without ever needing its own fallback, so it is not treated as
+        # corroborating evidence here.
+        used_fallback = fulltext_fallback
 
         logger.info(
             {
@@ -292,6 +392,23 @@ class ResearchEngine:
 
         fused_articles = rrf_fuse([[h.path for h in fulltext_hits], [h.path for h in title_hits]])
         top_paths = [path for path, _ in fused_articles[: self._top_n_articles]]
+
+        # Spec §5 step 3: topic_hint is "the current subject" -- i.e. an
+        # entity the lesson is already about, not merely a keyword to
+        # search for. An elliptical follow-up's own words ("what made it
+        # explode?") may not out-rank an unrelated but lexically closer
+        # article, so the topic_hint's own title is looked up directly and
+        # guaranteed a slot in the candidate pool rather than left to
+        # compete purely on the bare query's fused rank.
+        if topic_hint and topic_hint.strip() not in top_paths:
+            hint_hits, hint_failed = _search("search_titles", topic_hint, 1)
+            timed_out = timed_out or hint_failed
+            if hint_hits:
+                hint_path = hint_hits[0].path
+                if hint_path in top_paths:
+                    top_paths.remove(hint_path)
+                top_paths = [hint_path, *top_paths][: self._top_n_articles + 1]
+
         article_rank = {path: i for i, path in enumerate(top_paths)}
 
         fingerprint_digest = self._fingerprint_digest(entry)
@@ -315,7 +432,7 @@ class ResearchEngine:
         if not candidate_passages:
             return [], timed_out
 
-        tokenized_query = tokenize(query)
+        tokenized_query = tokenize(query) + topic_hint_tokens
         bm25 = BM25([tokenize(p.text) for p in candidate_passages])
         bm25_scores = bm25.scores(tokenized_query)
         bm25_order = sorted(
@@ -347,6 +464,7 @@ class ResearchEngine:
                     "end": p.end,
                     "score": score,
                     "kind": entry.kind,
+                    "used_fallback": used_fallback,
                 }
             )
         return results, timed_out
@@ -380,24 +498,44 @@ class ResearchEngine:
             return (time.monotonic() - started) >= soft_deadline
 
         archives = self._route(query, topic_hint)
+        # Spec §6: "Default search order: tier 1 -> tier 2 only if coverage
+        # flags are weak after tier 1." Tier 3 (subject/procedural-gated) is
+        # already filtered by _route and is consulted alongside tier 1.
+        primary_archives = [e for e in archives if e.tier != 2]
+        fallback_archives = [e for e in archives if e.tier == 2]
+
         consulted: list[dict[str, Any]] = []
         candidates: list[dict[str, Any]] = []
         any_timeout = False
+        query_terms = _query_terms(query, topic_hint)
+        topic_hint_terms = frozenset(tokenize(topic_hint)) if topic_hint else frozenset()
 
-        for entry in archives:
-            if remaining() <= 0:
-                any_timeout = True
-                break
-            # Spec §7.4: soft deadline (3s) -- once elapsed, stop consulting
-            # further archives and return what is ready as "partial" rather
-            # than waiting all the way to the hard deadline.
-            if soft_elapsed():
-                any_timeout = True
-                break
-            consulted.append({"id": entry.id, "storage": entry.storage, "tier": entry.tier})
-            cands, timed_out = self._process_archive(entry, query, remaining, keywords=keywords)
-            any_timeout = any_timeout or timed_out
-            candidates.extend(cands)
+        def _consult(entries: list[ArchiveEntry]) -> None:
+            nonlocal any_timeout
+            for entry in entries:
+                if remaining() <= 0:
+                    any_timeout = True
+                    break
+                # Spec §7.4: soft deadline (3s) -- once elapsed, stop
+                # consulting further archives and return what is ready as
+                # "partial" rather than waiting all the way to the hard
+                # deadline.
+                if soft_elapsed():
+                    any_timeout = True
+                    break
+                consulted.append({"id": entry.id, "storage": entry.storage, "tier": entry.tier})
+                cands, timed_out = self._process_archive(
+                    entry, query, remaining, keywords=keywords, topic_hint=topic_hint
+                )
+                any_timeout = any_timeout or timed_out
+                candidates.extend(cands)
+
+        _consult(primary_archives)
+
+        if fallback_archives and not soft_elapsed() and remaining() > 0:
+            preliminary_coverage = _best_coverage(candidates, query_terms, topic_hint_terms)
+            if preliminary_coverage["weak"]:
+                _consult(fallback_archives)
 
         candidates.sort(key=lambda c: -c["score"])
         capped = cap_per_article(
@@ -406,38 +544,41 @@ class ResearchEngine:
         budget = budget_tokens if budget_tokens is not None else self._default_budget_tokens
         packed = pack(capped, budget_tokens=budget, count_tokens=estimate_tokens)
 
-        passages: list[ResearchPassage] = []
-        for entry_dict in packed:
-            rp = ResearchPassage(
-                label=entry_dict["label"],
-                passage_id=entry_dict["passage_id"],
-                archive_id=entry_dict["archive_id"],
-                title=entry_dict["title"],
-                path=entry_dict["path"],
-                heading_path=tuple(entry_dict["heading_path"]),
-                text=entry_dict["text"],
-                start=entry_dict["start"],
-                end=entry_dict["end"],
-                score=entry_dict["score"],
-                kind=entry_dict["kind"],
-                estimated_tokens=estimate_tokens(entry_dict["text"]),
-            )
-            passages.append(rp)
-            self._snapshot_store.put(
-                rp, fingerprint_digest=self._fingerprints.get(rp.archive_id, "")
-            )
+        coverage = _best_coverage(packed, query_terms, topic_hint_terms)
 
-        if passages:
-            status = "partial" if any_timeout else "ok"
-        else:
+        passages: list[ResearchPassage] = []
+        if not coverage["weak"]:
+            for entry_dict in packed:
+                rp = ResearchPassage(
+                    label=entry_dict["label"],
+                    passage_id=entry_dict["passage_id"],
+                    archive_id=entry_dict["archive_id"],
+                    title=entry_dict["title"],
+                    path=entry_dict["path"],
+                    heading_path=tuple(entry_dict["heading_path"]),
+                    text=entry_dict["text"],
+                    start=entry_dict["start"],
+                    end=entry_dict["end"],
+                    score=entry_dict["score"],
+                    kind=entry_dict["kind"],
+                    estimated_tokens=estimate_tokens(entry_dict["text"]),
+                )
+                passages.append(rp)
+                self._snapshot_store.put(
+                    rp, fingerprint_digest=self._fingerprints.get(rp.archive_id, "")
+                )
+
+        if coverage["weak"]:
             status = "partial" if any_timeout else "empty"
+        else:
+            status = "partial" if any_timeout else "ok"
 
         elapsed = time.monotonic() - started
         response = ResearchResponse(
             version=RESPONSE_VERSION,
             status=status,
             passages=passages,
-            coverage={"weak": len(passages) == 0},
+            coverage=coverage,
             archives_consulted=consulted,
             timings={"elapsed_s": elapsed, "cache_hit": False},
         )

@@ -37,7 +37,7 @@ from pathlib import Path
 
 import pytest
 
-from tutor.retrieval.research import RankingFlags, ResearchEngine
+from tutor.retrieval.research import RankingFlags, ResearchEngine, compute_coverage
 from tutor.retrieval.snapshots import SnapshotStore
 from tutor.retrieval.zim.worker import WorkerResult
 
@@ -314,3 +314,131 @@ def test_redirects_deduped_in_results(registry_toml, snapshot_store, tmp_path):
     assert seen_paths.count("pythagorean_theorem") <= 2  # diversity cap, not per-redirect dup
     assert "redirect_a" not in seen_paths
     assert "redirect_b" not in seen_paths
+
+
+# ---------------------------------------------------------------------------
+# Coverage flags (offline_tutor_spec_v0.3.md §7.3: status "empty" when
+# evidence is genuinely absent; coverage signals are explainable).
+# ---------------------------------------------------------------------------
+
+
+def test_compute_coverage_title_match_is_not_weak():
+    coverage = compute_coverage(
+        query_terms={"pythagorean", "theorem"},
+        title="Pythagorean theorem",
+        text="Some unrelated filler text about nothing in particular here.",
+    )
+    assert coverage["title_match"] is True
+    assert coverage["weak"] is False
+
+
+def test_compute_coverage_high_term_overlap_is_not_weak():
+    coverage = compute_coverage(
+        query_terms={"pythagoras", "triangle", "hypotenuse", "right", "angle"},
+        title="Geometry intro",
+        text="Pythagoras discovered a rule about the right triangle and its hypotenuse.",
+    )
+    assert coverage["weak"] is False
+
+
+def test_compute_coverage_no_overlap_and_no_title_match_is_weak():
+    coverage = compute_coverage(
+        query_terms={"flibbertigibbetopolis", "quantum"},
+        title="Bread baking",
+        text="Bread is made from flour, water, yeast, and salt.",
+    )
+    assert coverage["term_coverage"] == 0.0
+    assert coverage["title_match"] is False
+    assert coverage["weak"] is True
+
+
+def test_compute_coverage_no_candidate_is_weak():
+    coverage = compute_coverage(query_terms={"anything"}, title=None, text=None)
+    assert coverage["weak"] is True
+
+
+def test_compute_coverage_empty_query_terms_is_weak():
+    coverage = compute_coverage(query_terms=set(), title="Anything", text="Anything")
+    assert coverage["weak"] is True
+
+
+def test_compute_coverage_topic_hint_title_match_is_not_weak():
+    # An elliptical follow-up ("what made it explode?") whose bare query
+    # has little to go on, but whose candidate's title matches the
+    # host-supplied topic_hint entity once merged into query_terms (see
+    # `_query_terms`), is trustworthy.
+    coverage = compute_coverage(
+        query_terms={"made", "explode", "volcano"},
+        title="Volcano",
+        text="A volcano is an opening that lets hot magma escape.",
+    )
+    assert coverage["weak"] is False
+    assert coverage["title_match"] is True
+
+
+# ---------------------------------------------------------------------------
+# Weak-coverage query returns status "empty" with no passages even when
+# some low-relevance candidates were fetched (not merely "zero hits").
+# ---------------------------------------------------------------------------
+
+
+def test_weak_coverage_query_returns_empty_and_no_passages(
+    registry_toml, snapshot_store, tmp_path
+):
+    engine = _engine(registry_toml, snapshot_store, tmp_path)
+    # "capital of the moon"-style false-premise/absent query against a
+    # fixture corpus with no matching article and no shared vocabulary.
+    resp = engine.research("What is the flibbertigibbetopolis effect?")
+    assert resp.status == "empty"
+    assert resp.passages == []
+    assert resp.coverage["weak"] is True
+
+
+# ---------------------------------------------------------------------------
+# topic_hint used as conversational context for elliptical follow-ups
+# (spec §5 step 3: research(query=message, topic_hint=current_subject)).
+# ---------------------------------------------------------------------------
+
+
+def test_topic_hint_disambiguates_elliptical_query(registry_toml, snapshot_store, tmp_path):
+    engine = _engine(registry_toml, snapshot_store, tmp_path)
+    resp = engine.research("Can you tell me more about it?", topic_hint="Pythagorean theorem")
+    assert resp.status in ("ok", "partial")
+    assert resp.passages
+    assert resp.passages[0].path == "pythagorean_theorem"
+
+
+# ---------------------------------------------------------------------------
+# Tier-2 gating: spec §6 "Default search order: tier 1 -> tier 2 only if
+# coverage flags are weak after tier 1."
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def two_storage_tier_registry_toml(tmp_path, fixture_zim):
+    return _write_registry_toml(
+        tmp_path,
+        fixture_zim,
+        [
+            {"id": "tier1", "tier": 1, "subjects": []},
+            {"id": "tier2", "tier": 2, "subjects": []},
+        ],
+    )
+
+
+def test_tier2_not_consulted_when_tier1_coverage_strong(
+    two_storage_tier_registry_toml, snapshot_store, tmp_path
+):
+    engine = _engine(two_storage_tier_registry_toml, snapshot_store, tmp_path)
+    resp = engine.research("What is the Pythagorean theorem?")
+    consulted_ids = {a["id"] for a in resp.archives_consulted}
+    assert consulted_ids == {"tier1"}
+
+
+def test_tier2_consulted_when_tier1_coverage_weak(
+    two_storage_tier_registry_toml, snapshot_store, tmp_path
+):
+    engine = _engine(two_storage_tier_registry_toml, snapshot_store, tmp_path)
+    resp = engine.research("What is the flibbertigibbetopolis effect?")
+    consulted_ids = {a["id"] for a in resp.archives_consulted}
+    assert "tier2" in consulted_ids

@@ -30,3 +30,18 @@ host = "127.0.0.1"
 port = 8420
 data_dir = "data"
 registry_path = "config/archives.dev.toml"
+
+# WP-B7: dense sidecar embedding server. Runs as a SECOND llama-server
+# (scripts/serve_embed.*) on its own port, alongside (not instead of) the
+# chat server above. model_path resolves against [runtime].runtime_dir the
+# same way [runtime].model_path does. dim must match the model's actual
+# output dimension (384 for the small embedding GGUFs this WP targets).
+[embedding]
+host = "127.0.0.1"
+port = 8081
+# Absolute path: this model lives in the repo's own runtime/models/ (fetched
+# for the WP-B7 live sample), not under [runtime].runtime_dir (the Bonsai
+# chat-model checkout) -- a relative path here would resolve against the
+# wrong directory. bge-small-en-v1.5 Q8_0 GGUF, 384-dim, ~37 MB.
+model_path = 'C:\git\kiwix-ai-tutor\runtime\models\embedding.gguf'
+dim = 384

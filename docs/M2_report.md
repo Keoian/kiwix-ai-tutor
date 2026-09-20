@@ -80,6 +80,27 @@ surfaced). Full per-category tables and failure analysis are in
   per-category means are recorded instead (see
   `docs/retrieval_baseline.md`).
 
+## Follow-up: Baseline v2 (coverage flags + context, same day)
+
+The two structural gaps this report's failure analysis called out --
+no abstention signal, and no conversational context for elliptical
+follow-ups -- are fixed; see `docs/retrieval_baseline.md`'s "Baseline
+v2: coverage flags + context" section for the full before/after tables,
+threshold-tuning notes, and the latency trade-off from gating tier-2
+consultation behind coverage (spec §6). Headline held-out recall@5:
+overall 0.600 -> 0.700, `elliptical` 0.000 -> 0.667, `absent` 0.000 ->
+0.333; `false_premise` and `comparison` are unchanged for reasons that
+are ranking/entity-resolution problems, not abstention problems, and
+out of scope for a coverage-flag change (ranking flags stay OFF).
+`eval/questions/simplewiki_questions.jsonl`'s `false_premise`
+`expected_paths` were also corrected from `[]` to the real entity each
+question is actually about (verified to exist in the archive), per the
+spec's "return evidence about the real entity" framing for false
+premises. Mean latency moved further from the <=1 s warm target for the
+weak-coverage categories (they now legitimately pay for a tier-2
+consultation), which is documented as an open trade-off, not silently
+absorbed.
+
 ## Test/lint status
 
 `python -m pytest -q -m "not integration"` and `python -m ruff check .`

@@ -76,6 +76,47 @@ def test_load_questions_parses_jsonl(tmp_path):
     assert questions[0].id == "q1"
     assert questions[0].expected_paths == ["a"]
     assert questions[1].split == "heldout"
+    assert questions[0].context is None
+
+
+def test_load_questions_parses_optional_context_field(tmp_path):
+    rows = [
+        {
+            "id": "q1",
+            "question": "What about its moons?",
+            "expected_paths": ["Jupiter"],
+            "category": "elliptical",
+            "split": "tuning",
+            "context": "Jupiter",
+        }
+    ]
+    path = _write_questions(tmp_path, rows)
+    questions = load_questions(path)
+    assert questions[0].context == "Jupiter"
+
+
+def test_evaluate_passes_context_as_topic_hint(tmp_path):
+    captured = {}
+
+    class _HintEngine:
+        def research(self, query, **kwargs):
+            captured["topic_hint"] = kwargs.get("topic_hint")
+            return _FakeResponse([_FakePassage("a")])
+
+    questions = load_questions_from_rows(
+        [
+            {
+                "id": "q1",
+                "question": "What about its moons?",
+                "expected_paths": ["a"],
+                "category": "elliptical",
+                "split": "tuning",
+                "context": "Jupiter",
+            }
+        ]
+    )
+    evaluate(_HintEngine(), questions)
+    assert captured["topic_hint"] == "Jupiter"
 
 
 def test_evaluate_recall_at_k_perfect_rank1():
@@ -113,6 +154,16 @@ def test_evaluate_unanswerable_scored_correct_when_status_empty():
     assert report.recall_at_k[1] == 1.0
     assert report.recall_at_k[5] == 1.0
     assert report.mrr == 1.0
+
+
+def test_evaluate_unanswerable_scored_correct_when_status_partial_with_no_passages():
+    # A real off-corpus query can hit the soft deadline while tier 2 is
+    # consulted (weak tier-1 coverage) and still correctly find nothing;
+    # that "partial + no passages" is still "no coverage", not a miss.
+    engine = _FakeEngine({"Q1?": []}, statuses={"Q1?": "partial"})
+    questions = load_questions_from_rows([_row("q1", "Q1?", [], category="unanswerable")])
+    report = evaluate(engine, questions)
+    assert report.recall_at_k[1] == 1.0
 
 
 def test_evaluate_unanswerable_scored_wrong_when_status_ok_with_passages():

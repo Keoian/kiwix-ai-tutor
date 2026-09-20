@@ -38,19 +38,19 @@
 {"id": "sw38", "question": "How is a simile different from a metaphor?", "expected_paths": ["Simile", "Metaphor"], "category": "comparison", "split": "heldout"}
 {"id": "sw39", "question": "What is the difference between a photon and a mole of atoms?", "expected_paths": ["Photon", "Atom"], "category": "comparison", "split": "heldout"}
 {"id": "sw40", "question": "How does an earthquake compare to a volcanic eruption?", "expected_paths": ["Earthquake", "Volcanic_eruption"], "category": "comparison", "split": "heldout"}
-{"id": "sw41", "question": "What made it explode like that?", "expected_paths": ["Volcano"], "category": "elliptical", "split": "tuning"}
-{"id": "sw42", "question": "Who wrote that play about the two lovers who die?", "expected_paths": ["Romeo_and_Juliet"], "category": "elliptical", "split": "tuning"}
-{"id": "sw43", "question": "What is it made of, again?", "expected_paths": ["Atom"], "category": "elliptical", "split": "heldout"}
-{"id": "sw44", "question": "How fast does it travel through space?", "expected_paths": ["Speed_of_light"], "category": "elliptical", "split": "heldout"}
-{"id": "sw45", "question": "Who ended up winning that war in Europe?", "expected_paths": ["World_War_II"], "category": "elliptical", "split": "heldout"}
+{"id": "sw41", "question": "What made it explode like that?", "expected_paths": ["Volcano"], "category": "elliptical", "split": "tuning", "context": "Volcano"}
+{"id": "sw42", "question": "Who wrote that play about the two lovers who die?", "expected_paths": ["Romeo_and_Juliet"], "category": "elliptical", "split": "tuning", "context": "Romeo and Juliet"}
+{"id": "sw43", "question": "What is it made of, again?", "expected_paths": ["Atom"], "category": "elliptical", "split": "heldout", "context": "Atom"}
+{"id": "sw44", "question": "How fast does it travel through space?", "expected_paths": ["Speed_of_light"], "category": "elliptical", "split": "heldout", "context": "Speed of light"}
+{"id": "sw45", "question": "Who ended up winning that war in Europe?", "expected_paths": ["World_War_II"], "category": "elliptical", "split": "heldout", "context": "World War II"}
 {"id": "sw46", "question": "What is the flibbertigibbetopolis effect in physics?", "expected_paths": [], "category": "absent", "split": "tuning"}
 {"id": "sw47", "question": "Tell me about the country of Nonexistenttopicxyzabc.", "expected_paths": [], "category": "absent", "split": "tuning"}
-{"id": "sw48", "question": "What year did unicorns go extinct?", "expected_paths": [], "category": "false_premise", "split": "tuning"}
-{"id": "sw49", "question": "What is the capital of the Moon?", "expected_paths": [], "category": "false_premise", "split": "tuning"}
-{"id": "sw50", "question": "How many legs does a snake have?", "expected_paths": [], "category": "false_premise", "split": "tuning"}
+{"id": "sw48", "question": "What year did unicorns go extinct?", "expected_paths": ["Unicorn"], "category": "false_premise", "split": "tuning"}
+{"id": "sw49", "question": "What is the capital of the Moon?", "expected_paths": ["Moon"], "category": "false_premise", "split": "tuning"}
+{"id": "sw50", "question": "How many legs does a snake have?", "expected_paths": ["Snake"], "category": "false_premise", "split": "tuning"}
 {"id": "sw51", "question": "What is the national dish of Atlantis?", "expected_paths": [], "category": "absent", "split": "heldout"}
-{"id": "sw52", "question": "Who was the fifth president of Mars?", "expected_paths": [], "category": "false_premise", "split": "heldout"}
-{"id": "sw53", "question": "What is the boiling point of gold at sea level on the Moon?", "expected_paths": [], "category": "false_premise", "split": "heldout"}
+{"id": "sw52", "question": "Who was the fifth president of Mars?", "expected_paths": ["Mars"], "category": "false_premise", "split": "heldout"}
+{"id": "sw53", "question": "What is the boiling point of gold at sea level on the Moon?", "expected_paths": ["Gold"], "category": "false_premise", "split": "heldout"}
 {"id": "sw54", "question": "Tell me about the ziggurat-building empire of Quibblonia.", "expected_paths": [], "category": "absent", "split": "heldout"}
 {"id": "sw55", "question": "What is a groobly number in maths?", "expected_paths": [], "category": "absent", "split": "heldout"}
 {"id": "sw56", "question": "What does the multiplication table look like?", "expected_paths": ["Multiplication_table"], "category": "tables_formulas", "split": "tuning"}
