@@ -14,8 +14,8 @@ depending on fa/ctk/ub).
 
 | Metric | Bonsai Q1_0 (previous) | Granite 4.0 H-Tiny | Ternary-Bonsai-8B (this run) |
 |---|---:|---:|---:|
-| Tool calls: parsed correct | 0/20 | 11/20 parsed, 19/20 correct decisions | 10/20 parsed, 20/20 correct decisions |
-| Tool calls: malformed | 20/20 | 0/20 (0.00%) | 0/20 (0.00%) |
+| Tool calls: parsed correct | 10/20 parsed, 20/20 correct decisions | 11/20 parsed, 19/20 correct decisions | 10/20 parsed, 20/20 correct decisions |
+| Tool calls: malformed | 0/20 (0.00%) | 0/20 (0.00%) | 0/20 (0.00%) |
 | Citation rate (18 real Q) | 0.11 | 0.44 | 0.17 |
 | Supported-citation rate | 0.00 | 0.11 | 0.00 |
 | Evidence-dump rate | 0.00 | 0.06 | 0.00 |
@@ -55,9 +55,7 @@ expected without any code change.
 ## Candid assessment
 
 Ternary-Bonsai-8B is a real step up from the previous Bonsai-8B-Q1_0
-build on the two things that mattered most in this product: **tool-call
-formation** (0% malformed vs 100% for Q1_0, and 20/20 correct decisions,
-better than even Granite's 19/20) and **numeric precision** (exact,
+build on **numeric precision** (exact,
 byte-for-byte helium figures in 3/3 runs, same as Granite, vs Q1_0's
 drifting digits). It also reuses the prompt cache correctly across turns
 (a >1.7x cache hit on turn 2 vs turn 1's total, well past the 0.7x bar) and
