@@ -1,0 +1,202 @@
+[
+  {
+    "id": "research_1",
+    "prompt": "Look up when the Roman Republic ended and cite it.",
+    "expect_call": true,
+    "expected_tool": "research",
+    "outcome": "parsed_call",
+    "tool_names": [
+      "research"
+    ],
+    "error": null
+  },
+  {
+    "id": "research_2",
+    "prompt": "What year did World War I start? Please look it up.",
+    "expect_call": true,
+    "expected_tool": "research",
+    "outcome": "parsed_call",
+    "tool_names": [
+      "research"
+    ],
+    "error": null
+  },
+  {
+    "id": "research_3",
+    "prompt": "Who wrote the play Hamlet? Find the source.",
+    "expect_call": true,
+    "expected_tool": "research",
+    "outcome": "parsed_call",
+    "tool_names": [
+      "research"
+    ],
+    "error": null
+  },
+  {
+    "id": "research_4",
+    "prompt": "What is the capital of Australia? Look it up to be sure.",
+    "expect_call": true,
+    "expected_tool": "research",
+    "outcome": "parsed_call",
+    "tool_names": [
+      "research"
+    ],
+    "error": null
+  },
+  {
+    "id": "research_5",
+    "prompt": "How many bones are in the adult human body? Cite a source.",
+    "expect_call": true,
+    "expected_tool": "research",
+    "outcome": "parsed_call",
+    "tool_names": [
+      "research"
+    ],
+    "error": null
+  },
+  {
+    "id": "calc_1",
+    "prompt": "What is 4871 * 392? Use the calculator.",
+    "expect_call": true,
+    "expected_tool": "calc",
+    "outcome": "parsed_call",
+    "tool_names": [
+      "calc"
+    ],
+    "error": null
+  },
+  {
+    "id": "calc_2",
+    "prompt": "Compute 12873 divided by 39 using the calculator.",
+    "expect_call": true,
+    "expected_tool": "calc",
+    "outcome": "parsed_call",
+    "tool_names": [
+      "calc"
+    ],
+    "error": null
+  },
+  {
+    "id": "calc_3",
+    "prompt": "What is 256 + 4789 - 123? Please calculate it exactly.",
+    "expect_call": true,
+    "expected_tool": "calc",
+    "outcome": "parsed_call",
+    "tool_names": [
+      "calc"
+    ],
+    "error": null
+  },
+  {
+    "id": "calc_4",
+    "prompt": "Use the calculator to find 37 squared plus 481.",
+    "expect_call": true,
+    "expected_tool": "calc",
+    "outcome": "parsed_call",
+    "tool_names": [
+      "calc"
+    ],
+    "error": null
+  },
+  {
+    "id": "calc_5",
+    "prompt": "What is 15% of 2480? Calculate it precisely.",
+    "expect_call": true,
+    "expected_tool": "calc",
+    "outcome": "parsed_call",
+    "tool_names": [
+      "calc"
+    ],
+    "error": null
+  },
+  {
+    "id": "no_call_greeting",
+    "prompt": "Hi there!",
+    "expect_call": false,
+    "expected_tool": null,
+    "outcome": "no_call",
+    "tool_names": [],
+    "error": null
+  },
+  {
+    "id": "no_call_thanks",
+    "prompt": "Thanks so much for the help!",
+    "expect_call": false,
+    "expected_tool": null,
+    "outcome": "no_call",
+    "tool_names": [],
+    "error": null
+  },
+  {
+    "id": "no_call_simplify",
+    "prompt": "Can you explain that more simply?",
+    "expect_call": false,
+    "expected_tool": null,
+    "outcome": "no_call",
+    "tool_names": [],
+    "error": null
+  },
+  {
+    "id": "no_call_opinion",
+    "prompt": "Do you think algebra is more fun than geometry?",
+    "expect_call": false,
+    "expected_tool": null,
+    "outcome": "no_call",
+    "tool_names": [],
+    "error": null
+  },
+  {
+    "id": "no_call_meta",
+    "prompt": "What kind of tutor are you?",
+    "expect_call": false,
+    "expected_tool": null,
+    "outcome": "no_call",
+    "tool_names": [],
+    "error": null
+  },
+  {
+    "id": "no_call_single_digit_add",
+    "prompt": "What is 4 + 3?",
+    "expect_call": false,
+    "expected_tool": null,
+    "outcome": "no_call",
+    "tool_names": [],
+    "error": null
+  },
+  {
+    "id": "no_call_single_digit_sub",
+    "prompt": "What is 9 - 5?",
+    "expect_call": false,
+    "expected_tool": null,
+    "outcome": "no_call",
+    "tool_names": [],
+    "error": null
+  },
+  {
+    "id": "no_call_rephrase",
+    "prompt": "Can you say that in a shorter sentence?",
+    "expect_call": false,
+    "expected_tool": null,
+    "outcome": "no_call",
+    "tool_names": [],
+    "error": null
+  },
+  {
+    "id": "no_call_goodbye",
+    "prompt": "Okay, that's all for today, bye!",
+    "expect_call": false,
+    "expected_tool": null,
+    "outcome": "no_call",
+    "tool_names": [],
+    "error": null
+  },
+  {
+    "id": "no_call_encourage",
+    "prompt": "Am I doing well in this lesson so far?",
+    "expect_call": false,
+    "expected_tool": null,
+    "outcome": "no_call",
+    "tool_names": [],
+    "error": null
+  }
+]

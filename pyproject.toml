@@ -21,7 +21,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["tutor*"]
+include = ["tutor*", "eval*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
