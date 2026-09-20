@@ -1,225 +1,197 @@
 # Handoff: offline school tutor (kiwix-ai-tutor)
 
-Written 2026-09-19 for the session that starts implementation after a `/clear`. Read this first, then
-`docs/plan/offline_tutor_implementation_plan.md`. You have no prior context; everything you need to
-start is here or in `docs/plan/`.
+Written 2026-09-20 ~15:00 for the session that continues after a `/clear`. You have no prior
+context. Read this, then `docs/bakeoff_dev/README.md`. The previous handoff is kept at
+`docs/HANDOFF_2026-09-19_original.md`; its house rules still apply and are restated in §2.
 
-**You are the orchestrator. Sub-agents write the code. Tests come first, always.**
+**You are the orchestrator. Sonnet sub-agents write the code. Tests come first.**
 
 ---
 
-## 1. What we are building
+## 1. Where the project stands
 
-An offline tutoring app for a student with no internet. A local llama-server runs a small model; the
-app retrieves evidence from Kiwix ZIM archives (offline Wikipedia, textbooks, Stack Exchange), feeds
-it to the model as citations, and teaches rather than answers. Two model-facing tools only:
-`research` and `calc`. Development happens on this Windows laptop; the shipping target is a Dell
-with a GTX 1060 6 GB running Linux Mint.
+M0–M3 done. M4 built but its gate FAILED on held-out (dense retrieval is off by default). M5 built
+and measured on Windows. M6/M7 need the Dell. 826 unit tests pass, ruff clean, CI (GitHub Actions,
+windows + ubuntu) green as of the last check. Everything is pushed; latest work commit `cdee690`,
+then this handoff.
 
-Authoritative documents, copied into this repo so you do not depend on the user's Downloads folder:
-
-| File | What it governs |
+| Report | What it holds |
 |---|---|
-| `docs/plan/offline_tutor_implementation_plan.md` | **Primary.** Milestones, work packages, order of work, cross-platform rules. v1.1. |
-| `docs/plan/offline_tutor_spec_v0.3.md` | Architecture, budgets, gates. Wins on budgets, caps, thresholds. |
-| `docs/plan/offline_tutor_kiwix_reuse_plan.md` | Donor code and algorithms. Wins on algorithm choices. |
+| `docs/M0_report.md` … `docs/M5_report.md`, `docs/M5_notes.md` | Milestone gates with evidence |
+| `docs/retrieval_baseline.md` | Retrieval v1→v6 with before/after tables (tuning split) |
+| `docs/M4_report.md`, `docs/hybrid_eval.md` | Why hybrid/dense is disabled |
+| `docs/citation_experiment.md` | Every citation measurement, incl. the evidence-dump failure |
+| `docs/bakeoff_dev/README.md` | **Three-model comparison table** (+ per-model files) |
+| `docs/review_2026-09-20.md`, `…_pass2.md` | Two code reviews with resolutions |
+| `docs/dense_sidecar.md` | Dense index build, CPU embedding server |
 
-When the spec and the reuse plan disagree, stop and ask the user. That rule is from the plan (§10.11)
-and it is not optional.
+### The model decision (2026-09-20)
 
-## 2. Working agreement for this project
+**Granite 4.0 H-Tiny Q4_K_M is the dev model going forward.** Bonsai Q1_0 (binary) cited nothing
+under identical conditions and answers from memory; Ternary Bonsai cites but needs fa-off/f16 KV on
+this GPU, so only 16K context fits and late-lesson first-token p95 was 75 s.
 
-### 2.1 TDD, strictly
+10-minute lesson soak, same code:
 
-Every work package runs red → green → refactor:
+| | Bonsai Q1_0 | Ternary Q2_0_g64 | **Granite H-Tiny** |
+|---|---|---|---|
+| Turns / errors | 18 / 0 | 29 / 0 | **62 / 0** |
+| First token p50 (p95) | 25.1 s (56.9) | 8.5 s (74.8) | **3.0 s (11.2)** |
+| Answers carrying a citation | 0.00 | 0.95 (old metric) | **1.00** |
+| Citations passing the support check | 0.00 | not measured | **0.00** |
+| Context fitting ≤ 5.6 GiB | 32K | 16K | 32K |
 
-1. **Red.** A sub-agent writes failing tests from the acceptance criteria in the plan. No production
-   code in this step. You review the tests before any implementation starts: tests that assert the
-   wrong thing are worse than no tests.
-2. **Green.** A different sub-agent makes them pass, touching only what is needed.
-3. **Refactor / review.** A third sub-agent reviews the diff against the cross-platform rules
-   (plan §5), the license rules (§10.7), and the "no generic RAG framework" rule (§10.9).
+Granite: 5.36 GiB VRAM at 32K, pp 683 t/s (387 at 4k depth), tg 67 t/s, prompt cache works across
+turns despite Mamba layers, tool calls 0/20 malformed and 19/20 correct decisions.
 
-No production code is written without a failing test that demands it. If a work package's acceptance
-criteria are too vague to test, that is a question for the user, not a license to improvise.
+**Granite's defect:** it cites 100% of lesson answers but **0% pass the support check** — it
+staples one `[S1]` to the end of a 4–6 sentence paragraph instead of the claim it backs. Cold
+single-turn questions: cited 0.44, supported 0.11. It does USE the evidence (reproduced the helium
+infobox figures exactly, 3/3). Also: 6/8 calc answers right in one soak; sometimes pitches above a
+10–16 year-old; did not call `calc` for a °C→°F conversion.
 
-### 2.2 Sub-agents: Sonnet only
+## 2. Working agreement (unchanged — the user's hard constraints)
 
-Delegate implementation to sub-agents with `model: "sonnet"` on every `Agent` call. This is a hard
-constraint from the user.
+- **Sub-agents: `model: "sonnet"` on every `Agent` call. Never `subagent_type: "fork"`.**
+- **TDD:** failing test first; the orchestrator verifies by running things, not by trusting reports.
+- **Conserve orchestrator output and context.** Delegate anything a sub-agent can do, including
+  commits and pushes. Ask sub-agents for short final reports.
+- **Pushing is pre-authorised** for this project (user, 2026-09-19). Commit as Keoian's noreply
+  address (already set repo-locally). End commit messages with the attribution lines the session
+  reminder gives you.
+- **Never delete files.** Move junk to `D:\_trash_kiwix-ai-tutor\` and append a line to its
+  `TRASH_LOG.txt` (timestamp | original | new | why). An autoclassifier blocks deletes.
+- `C:\git\bonsai` is read-only. (One agent ran `git lfs pull` inside it to materialise
+  `llama-bench.exe`; `git status` there is clean. Tell agents: no commands inside that directory.)
+- Never hard-kill `llama-server` mid-prompt (suspected AMD driver reset). Stop it only when
+  `/slots` shows idle. The user has given permission to stop/restart it and the app at will.
+- The spec wins on budgets/caps/thresholds; the reuse plan wins on algorithms; if they conflict, ask.
+- Writing for the user: lead with the outcome, measured numbers not adjectives, say what was
+  inferred versus measured, say plainly what was not verified.
 
-- Use `subagent_type: "general-purpose"` with `model: "sonnet"`. For read-only sweeps, `Explore`
-  with `model: "sonnet"` is fine.
-- **Never use `subagent_type: "fork"`.** A fork always inherits the parent's model, which would run
-  Opus and violate the constraint.
-- Sub-agents do not share your context. Every prompt must be self-contained: name the files, quote
-  the acceptance criteria, state the cross-platform rules that apply, and say what "done" means.
-- Independent work packages run in parallel: send multiple `Agent` calls in one message. A0 and B1
-  are explicitly parallel per the plan. Dependent work does not overlap.
-- You (the orchestrator) run the tests yourself and read the diffs. Do not take a sub-agent's word
-  that tests pass. Their report is a claim; the test run is the evidence.
+### Lessons about driving Sonnet sub-agents (learned the hard way)
 
-### 2.3 What stays with you, not sub-agents
+- **Keep tasks small.** Three times an agent handed back a large multi-part task untouched. One
+  concern per agent; split "build" from "measure live".
+- Tell them the unit suite takes **~3 minutes — use a shell timeout ≥ 600000 ms**. One agent
+  reported "295 passed" from a partial run; the true count is 826.
+- **Spawn rule:** the ZIM worker uses multiprocessing `spawn`. Any repro must be a real `.py` file
+  with `if __name__ == "__main__":`. A `python -` / `python -c` script silently returns
+  `status: partial` after ~6 s. Set `PYTHONIOENCODING=utf-8` when printing (text has `−` and `°`).
+- When two agents share the tree: forbid `git stash/checkout/restore/reset/clean` and deleting
+  files in EVERY prompt, and give each agent an explicit list of files it owns. (One agent's
+  `git stash` reverted another's edits; another's `rm -rf` removed a colleague's scratch output.)
+- Scratch files go in `data/` (gitignored), never the repo root.
+- Tell them the real archive EXISTS (give the `ls` line) — one agent wrongly concluded it didn't.
+- Held-out split: never let an agent run it. The 30 original held-out questions have been observed
+  several times and are no longer clean; the 12 `student_phrasing` held-out items were run once.
+- Agents' own completion reports are claims. Twice a "done" report hid an unmet acceptance
+  criterion that a 20-second orchestrator check exposed.
 
-- Deciding a work package is done, and writing the `docs/` note that closes it.
-- Anything touching the user's GitHub, the runtime at `C:\git\bonsai`, or the archives on `D:`.
-- Milestone reports. M0, M2, M3, M4 and M5 go to the user before the next milestone starts.
+## 3. Machine state right now
 
-## 3. Machine state, verified 2026-09-19
-
-### 3.1 This repository
-
-`C:\git\kiwix-ai-tutor`, git initialized, branch `main`, **zero commits**, remote `origin` =
-`https://github.com/Keoian/kiwix-ai-tutor.git`. Only `HANDOFF.md` and `docs/plan/` exist.
-
-The first commit should establish the layout from plan §2 and the dual-OS CI from §5. CI on both a
-Windows and a Linux runner is required "from day one", so it belongs in the first or second commit,
-not later.
-
-### 3.2 The model runtime (read-only)
-
-`C:\git\bonsai` is the working Bonsai 8B installation. **The plan declares it read-only.** If it
-needs changes, copy it to `runtime/bonsai/` via `scripts/runtime_init.ps1` and change the copy.
-
-Measured today, on this machine (i9-9980HK, Radeon Pro 5500M 8 GB, Windows 11, AMD driver
-32.0.12019.1028). These numbers are WP-A0's reference data, already collected:
-
-| Fact | Value |
+| Thing | State |
 |---|---|
-| Model file | `C:\git\bonsai\models\Bonsai-8B-Q1_0.gguf`, 1.16 GB, 8.19B params |
-| SHA-256 | `284a335aa3fb2ced3b1b01fcb40b08aa783e3b70832767f0dd2e3fdfa134bd54` |
-| Server build | `b10716-ee2aeae98` (PrismML fork, Vulkan backend) |
-| Launchers | `start-server-32k.ps1` (32k, q8_0 cache, 3,584 MiB VRAM), `start-server-65k.ps1` (65k, 6,064 MiB) |
-| **Use the 32k launcher** | It is the plan's profile (§0.2) and the one that fits the Dell's 6 GB |
-| Decode, short context | 31.9 tok/s |
-| Prompt, short context | 175 t/s |
-| Sampling defaults | temp 0.5, top-p 0.9, top-k 20 (model card) |
-| Flags already set | `--jinja`, `--slots`, `-np 1`, `--path <webui>` |
-| Thinking | Not a reasoning model; no thinking by default |
+| llama-server :8080 | **Granite**, `config/dev.granite.toml`, healthy |
+| Tutor app :8420 | running against Granite, full registry (`config/archives.dev.toml`, touches `D:`) |
+| Embedding server :8081 | CPU-only bge-small, idle; only needed if `[embedding].enabled = true` |
+| `config/dev.toml` | **still points at Bonsai Q1_0** — see task 1 |
+| Models | `runtime/models/granite-4.0-h-tiny/`; `runtime/models/ternary-bonsai-8b/` (3 variants; only `Q2_0_g64` and `PQ2_0` load on this build); `runtime/models/embedding.gguf` |
+| Archives | `C:\kiwix\` Simple Wikipedia (tier 1) + Wikibooks; `D:\Kiwix\` everything else (external HDD — the user cannot move the laptop while it is spun up; use `config/archives.simplewiki_only.toml` to keep `D:` idle) |
+| Dense index | `runtime/simplewiki_dense/` (281,270 vectors) — **stale**: the extractor is now `zim-bundle-v2`. Rebuild (~3 h; CPU is as fast as GPU) before re-enabling hybrid |
+| Trash | `D:\_trash_kiwix-ai-tutor\` — safe for the user to delete |
 
-The server is an HTTP black box. The app must never link the runtime or branch on model name.
+Run it: `.\scripts\serve_dev.ps1 -Config config\dev.granite.toml`, then
+`python -m tutor.app.main --config config\dev.granite.toml` → http://127.0.0.1:8420.
 
-**The flash-attention trap, and it will bite WP-C1.** Vulkan flash attention has no accelerated path
-on this GPU (upstream llama.cpp issue, not a Bonsai bug). With it on, prompt processing collapses as
-context fills: 21 t/s at 4k depth, 11 t/s at 8k, and a 25,200-token prompt never finished in 40
-minutes. With `-NoFlashAttn` the same prompt was read in 5 minutes at 82.7 t/s, but decode drops.
+## 4. Tasks to implement, in order
 
-Consequences for the app:
-- **Prefill of a large uncached prompt is brutally expensive here.** The plan already calls the
-  append-only prompt layout (WP-C1) important; on this machine it is the difference between usable
-  and not. Any test that rebuilds a long prompt from scratch will look like a hang.
-- Keep integration tests well under 8k tokens of context unless the test is specifically about depth.
-- The Dell's CUDA build will not share this pathology. Do not tune the app around it; just do not let
-  it make your tests look broken.
+Each is sized for one red→green pair of Sonnet agents unless noted. Measure live after 2 and 3.
 
-Two operational cautions from today: a long-running deep-context prompt coincided with an AMD driver
-popup, and killing `llama-server` mid-prompt is a plausible cause of a driver reset. Prefer graceful
-shutdown. Do not run multi-hour GPU jobs unattended without telling the user.
+### Task 1 — Make Granite the default dev config (small)
 
-### 3.3 Archives
+Point `config/dev.toml` at Granite (suggest: `dev.toml` becomes the Granite profile and the Bonsai
+one is kept as `config/dev.bonsai-q1.toml`). `tests/test_settings.py` pins dev.toml to
+`Bonsai-8B-Q1_0.gguf`, a runtime-relative model path and temp 0.5 — update those tests first. The
+source guard (no "bonsai" / `C:\` inside `tutor/settings.py`) stays. Update `docs/dev_runtime.md`
+and `README.md`. No code may branch on model name.
 
-`D:\kiwix` on an external 5 TB HDD, 65 archives, 509 GB. Present and confirmed today: Lumen
-Learning courses (12 GB), `wikipedia_en_all_maxi_2023-10` (103 GB), `math.stackexchange`,
-`matheducators.stackexchange`, `wikiversity`, `wikihow`, `gutenberg`, `khanacademy`, and the rest of
-the Stack Exchange set.
+### Task 2 — Host-side sentence-level attribution (the main one)
 
-**Missing, and both need downloading:** `wikipedia_en_simple_all_maxi` (~2 GB, the tier-1 archive
-that all latency numbers depend on) and `wikibooks_en_all_maxi` (~4 GB). The `wikibooks_af` on the
-drive is Afrikaans and is not a substitute. Tier 1 belongs on the `C:` SSD, which has 129 GB free.
+Problem: models cite sloppily (Granite) or not at all; the product's promise is "check the tutor
+against the book". Stop depending on the model's label placement.
 
-**The user's internet is unreliable right now.** Their ISP is under a DDoS and they were downloading
-over a phone hotspot. Ask before starting multi-GB downloads, use `curl -C -` so interrupted
-transfers resume, and verify checksums after.
+- In `tutor/app/citations.py`: after the answer completes, split it into sentences; for each
+  sentence find the best-supporting passage in the turn's packet plus retained evidence, reusing
+  the existing `is_supported` logic (tokenizer from `tutor.retrieval.hybrid.lexical`; numbers count
+  as terms; require a minimum overlap). Output `attributions: [{sentence_span, passage_id, label,
+  score}]` and `unbacked_spans`.
+- **The host never edits the model's text and never inserts `[S#]` into it.** Attribution is a
+  separate layer: a new SSE event (or fields on `citations`), rendered in the UI as a subtle marker
+  per backed sentence that opens the source viewer on the supporting passage, and a distinct style
+  plus legend for "the tutor's own words — not checked against the library". `textContent` only;
+  keep `tests/test_ui_static.py` green.
+- Numbers deserve special care: a sentence containing a figure that appears in NO passage gets
+  flagged (`unbacked_number`) — this is the wrong-from-memory case. A figure matching a key-fact
+  passage links to it.
+- Keep the model's own `[S#]` chips working; show model-cited versus host-found distinctly.
+- Extend scoring in `eval/run_turn_eval.py` and `eval/run_lesson_soak.py`:
+  `backed_sentence_rate`, `unbacked_number_rate`. Fixtures: the owner's 11-passage dump answer
+  (already in `tests/test_citations.py`) and Granite's trailing-`[S1]` paragraphs (see
+  `data/granite_soak10_v2.turns.json` if still present; else regenerate with a 3-minute soak).
+- Spec check first: read spec §11–§12 on source-backed vs computed vs tutor's-own statements and
+  follow its wording; note any amendment for v0.4.
 
-### 3.4 Tooling present
+### Task 3 — Seed new lessons with one cited example (small, then measure)
 
-Python 3.12.10 (`python` and `py -3`), git 2.x with git-lfs 3.7.1, PowerShell 5.1, Git Bash, MSVC
-2022 Build Tools, CMake, Ninja, Vulkan SDK 1.4.357, headless Edge for UI screenshots.
+Hypothesis (untested): inside a lesson the model keeps citing because its earlier cited answers sit
+in the context as examples; cold questions lack that (Granite cited 0.44 cold vs 1.00 in-lesson).
+Add ONE short synthetic exchange at the start of a new lesson's prompt log showing a two-sentence
+answer with the label attached to the specific sentence it supports, plus one calc use.
+Constraints: fits the 800-token system slot (there is a test); is part of the append-only prefix
+(never changes within a lesson); its evidence passage must never be citable for real questions —
+reserve a label such as `[S0]` that the resolver refuses, and test that. Measure with
+`python -m eval.run_turn_eval … --variants current,<new>` on the same 18 tuning questions; adopt
+only if cited-and-supported improves by ≥ 0.15 without raising `evidence_dump_rate`. Record in
+`docs/citation_experiment.md`.
 
-**Absent:** `uv`, `node`, `npm`, `gh`. No GitHub CLI and no API token, so anything GitHub-side beyond
-`git push` needs the user. `python-libzim` wheel availability for 3.12 on both OSes is unverified and
-is WP-B1's first check; the plan says report it as a blocker rather than work around it.
+### Task 4 — Calculator misses (investigate, then fix)
 
-## 4. House rules
+Granite got 6/8 calc items in its first 10-minute soak and never called `calc` for °C→°F. Find the
+two misses (re-run a short soak; per-turn answers now dump to `data/*.turns.json`): wrong tool
+arguments, no tool call, or a right call followed by wrong final text? Candidate host fixes:
+mention unit conversion in the `calc` tool description (`tutor/tools/schemas.py`); have the host
+flag an answer whose number disagrees with the calc result it was given.
 
-**Git and GitHub.**
-- Commit as `Keoian <65092962+Keoian@users.noreply.github.com>`. Set it repo-locally:
-  `git config user.name Keoian && git config user.email 65092962+Keoian@users.noreply.github.com`.
-  Never commit with the user's personal email address.
-- End commit messages with the attribution lines the session reminder gives you.
-- **Ask before every push.** The user was surprised by a push earlier today even though they had
-  asked for one. Authorization does not carry between pushes.
-- Never commit: ZIM archives, GGUF models, `runtime/`, anything in `D:\kiwix`.
+### Task 5 — Retrieval latency (worker batching)
 
-**Writing for the user.** They read the final message, not the tool calls. Lead with the outcome,
-give measured numbers rather than adjectives, and say plainly when something was not verified. They
-value being told what was inferred versus measured; they have corrected work on exactly that.
+Tuning mean 1.6 s versus the spec's ≤ 1 s warm target: about 20 worker round-trips per request,
+76% of the time in IPC wait (`docs/retrieval_baseline.md`, "Baseline v5"). Add a `multi` op to
+`tutor/retrieval/zim/worker.py` (several searches / estimated-match lookups per round trip) and use
+it in `research.py`. Acceptance: tuning mean ≤ 1.0 s, no recall change, deadlines still enforced.
 
-**Scope.** Build the work package in front of you. Do not build a generic RAG framework, do not add
-ranking flags without the eval table that justifies them, and do not start a downstream work package
-because you are blocked on the current one. Report the block.
+### Smaller follow-ups (any order)
 
-## 5. Start here
+- `docs/bakeoff_dev/README.md` flags a contradiction about Q1_0's tool-call malformed rate (0/20 in
+  `docs/toolcall_verification.md` vs "20/20" in the table in `ternary.md`). Almost certainly a typo
+  in `ternary.md`; verify against `docs/toolcall_results.json` and fix the doc.
+- Reading level: Granite drifts above 10–16 yo (abstract algebra, "hex-3-ene"). The profile's grade
+  level is meant to reach the system prompt; check that it does. Measure before changing prompts.
+- `student_phrasing` held-out recall@5 was 0.50, the weakest category. There is no spelling
+  tolerance for a misspelt KEY term ("heluim"); title-suggestion search may help. Tune on tuning only.
+- Spec v0.4 amendments to write up: two-stage eviction (uncited evidence dropped before whole
+  turns) vs §8's whole-triple wording; evidence budget is a cap with a relevance cutoff; key-fact
+  infobox passages; passage-ID wording (spec line 294 vs the reuse plan); the model section.
+- M6 prep: Granite runs on STOCK llama.cpp, which removes the plan's biggest M6 risk (Prism-fork
+  CUDA kernels on `sm_61`). `config/dell.toml` does not exist yet. If Ternary is ever revisited,
+  its GGUF layout (group-64 vs legacy) must match whatever build lands on the Dell.
 
-Two work packages run in parallel and neither depends on the other.
+## 5. Open questions for the user
 
-### WP-A0 — Wire up the existing dev runtime (½ session)
-
-Most of the measurement is already done in §3.2. What remains: capture the exact launch command,
-port and flags into `config/dev.toml` and `scripts/serve_dev.ps1`, record the fork commit and
-backend from the startup log, and write `docs/dev_runtime.md`. Do not modify `C:\git\bonsai`.
-
-Tests first, even here: `config/dev.toml` gets a loader with a test that asserts the profile is
-32,768 context with a q8_0 cache, and a test that the configured runtime path is read from config
-rather than hard-coded.
-
-### WP-A1 — Tool-call and template verification (1 session) — **gates M0**
-
-20 scripted requests against the dev server with the `research` and `calc` schemas: 10 that should
-produce a tool call, 10 that should not. Count parsed, malformed, and prose-shaped-like-a-call.
-Verify `/tokenize` and `/apply-template`. If malformed exceeds 2%, the grammar-constrained path is
-chosen instead, and that decision gets recorded.
-
-This is measurement, not app code, but the counting harness is code and gets tests. Expect the 1-bit
-model to be the weak link: its published tool-calling score (BFCL 65.7) is well below the ternary
-model's 73.9, and the plan anticipates that Q1_0 may simply be worse at this. Malformed calls here
-are data, not bugs to debug.
-
-### WP-B1 — Donor inventory and vendoring (1–2 sessions)
-
-Check out OpenZIM MCP at its latest real tag (the reuse plan's v3.3.4 does not exist; v2.5.3 is the
-newest as of 2026-07-01). Write `docs/donor_inventory.md` mapping every reuse-plan reference to a
-real path. Vendor the smallest cohesive units into `retrieval/zim/` with upstream MIT headers intact
-and `THIRD_PARTY_NOTICES.md` updated in the same commit.
-
-**Check `python-libzim` wheels on Windows for Python 3.12 before anything else.** If there is no
-wheel, stop and report; do not build from source as a workaround.
-
-Acceptance: `from tutor.retrieval.zim import archive` imports with only `libzim`, an HTML parser and
-stdlib, on Windows.
-
-### Suggested first moves
-
-1. Read `docs/plan/offline_tutor_implementation_plan.md` in full. §5 and §10 are the rules you will
-   be judged against.
-2. Decide the repo skeleton and CI from plan §2 and §5, and get that first commit reviewed by the
-   user before the code lands on top of it.
-3. Launch WP-A0 and WP-B1 sub-agents in parallel, Sonnet, tests first.
-4. Report at M0 before touching workstream C.
-
-## 6. Open questions for the user
-
-Ask these early; they change what gets built.
-
-1. **Tier-1 archive.** Confirm downloading `wikipedia_en_simple_all_maxi` (~2 GB) and
-   `wikibooks_en_all_maxi` (~4 GB), given the unreliable connection. Nothing in workstream B's
-   acceptance criteria can be finished without the Simple Wikipedia archive.
-2. ~~CI on both OSes~~ **Decided 2026-09-19: yes, use GitHub Actions.** The user approved it for this
-   repo specifically, because the workflow is ours rather than inherited and it only runs unit tests.
-   Keep it that way: one small workflow running the suite on `windows-latest` and `ubuntu-latest`,
-   nothing that builds artifacts, publishes packages or pushes images. GitHub's runners have no GPU
-   and no archives, so llama-server tests, real ZIM files and every performance gate stay on the
-   user's machines. If Actions turns out to be disabled on the repo, that needs the user; there is
-   no `gh` CLI here.
-3. **Python version pin.** The plan defers to OpenZIM MCP's `.python-version`, subject to
-   `python-libzim` wheels on both OSes. 3.12.10 is what is installed. Confirm at WP-B1.
+1. Confirm Granite replaces Bonsai in the plan (plan §0.2 and spec §3.1 name Bonsai; M6's bake-off
+   was meant to choose between Q1_0 and Q2_0). Granite is Apache-2.0 — record it in
+   `THIRD_PARTY_NOTICES.md` once confirmed.
+2. M4: enlarge the eval set and build a fresh held-out split before revisiting hybrid retrieval?
+   `docs/M4_report.md` lists the options. Not urgent — lexical plus key facts is working.
+3. There is no curriculum: a "lesson" is one conversation on one subject. A guided path through
+   the Lumen course archive would be new scope, not in the plan.
