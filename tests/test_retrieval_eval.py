@@ -28,7 +28,16 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from eval.run_retrieval_eval import evaluate, load_questions, render_markdown
+import pytest
+
+from eval.run_retrieval_eval import (
+    FlagsError,
+    build_engine,
+    evaluate,
+    load_questions,
+    parse_flags,
+    render_markdown,
+)
 
 
 @dataclass
@@ -244,6 +253,154 @@ def test_end_to_end_fixture_recall_at_5_meets_bar(tmp_path, fixture_zim):
     store.close()
 
     assert report.recall_at_k[5] >= 0.75
+
+
+# ---------------------------------------------------------------------------
+# --flags parsing
+# ---------------------------------------------------------------------------
+
+
+def test_parse_flags_none_returns_all_off():
+    flags = parse_flags(None)
+    assert flags.title_boost is False
+    assert flags.mention_penalty is False
+    assert flags.heading_affinity is False
+    assert flags.lead_augmentation is False
+
+
+def test_parse_flags_single_flag():
+    flags = parse_flags("title_boost")
+    assert flags.title_boost is True
+    assert flags.mention_penalty is False
+
+
+def test_parse_flags_multiple_flags_comma_separated():
+    flags = parse_flags("title_boost, heading_affinity")
+    assert flags.title_boost is True
+    assert flags.heading_affinity is True
+    assert flags.mention_penalty is False
+
+
+def test_parse_flags_unknown_flag_raises():
+    with pytest.raises(FlagsError):
+        parse_flags("not_a_real_flag")
+
+
+# ---------------------------------------------------------------------------
+# dense_used_rate / label / p95
+# ---------------------------------------------------------------------------
+
+
+class _DenseAwareResponse:
+    def __init__(self, passages, dense_used):
+        self.passages = passages
+        self.status = "ok"
+        self.dense_used = dense_used
+
+
+class _DenseAwareEngine:
+    def __init__(self, dense_used_by_query):
+        self._dense_used = dense_used_by_query
+
+    def research(self, query, **kwargs):
+        return _DenseAwareResponse([_FakePassage("a")], self._dense_used[query])
+
+
+def test_evaluate_reports_dense_used_rate():
+    engine = _DenseAwareEngine({"Q1?": True, "Q2?": False})
+    questions = load_questions_from_rows(
+        [_row("q1", "Q1?", ["a"]), _row("q2", "Q2?", ["a"])]
+    )
+    report = evaluate(engine, questions)
+    assert report.dense_used_rate == pytest.approx(0.5)
+
+
+def test_evaluate_label_is_carried_into_report_and_markdown():
+    engine = _FakeEngine({"Q1?": ["a"]})
+    questions = load_questions_from_rows([_row("q1", "Q1?", ["a"])])
+    report = evaluate(engine, questions, label="hybrid+title_boost")
+    assert report.label == "hybrid+title_boost"
+    md = render_markdown(report)
+    assert "hybrid+title_boost" in md
+
+
+def test_render_markdown_includes_dense_used_rate():
+    engine = _FakeEngine({"Q1?": ["a"]})
+    questions = load_questions_from_rows([_row("q1", "Q1?", ["a"])])
+    report = evaluate(engine, questions)
+    md = render_markdown(report)
+    assert "dense_used" in md
+
+
+# ---------------------------------------------------------------------------
+# build_engine: lexical-only when no dense-dir/embed-url given, and skips
+# archives whose sidecar fingerprint doesn't match (never fatal).
+# ---------------------------------------------------------------------------
+
+
+def test_build_engine_without_dense_args_has_no_dense_indexes(tmp_path, fixture_zim):
+    from tutor.retrieval.registry import load_registry
+    from tutor.retrieval.snapshots import SnapshotStore
+
+    toml_path = tmp_path / "registry.toml"
+    toml_path.write_text(
+        "\n".join(
+            [
+                "[[archive]]",
+                'id = "tier1"',
+                f'path = "{fixture_zim.as_posix()}"',
+                "tier = 1",
+                'kind = "encyclopedia"',
+                "subjects = []",
+                'storage = "ssd"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    registry = load_registry(toml_path)
+    store = SnapshotStore(tmp_path / "snapshots.sqlite3")
+    try:
+        engine = build_engine(registry, snapshot_store=store, cache_dir=tmp_path / "cache")
+        assert engine._dense_indexes == {}
+    finally:
+        store.close()
+
+
+def test_build_engine_skips_archive_with_no_sidecar_present(tmp_path, fixture_zim):
+    from tutor.retrieval.registry import load_registry
+    from tutor.retrieval.snapshots import SnapshotStore
+
+    toml_path = tmp_path / "registry.toml"
+    toml_path.write_text(
+        "\n".join(
+            [
+                "[[archive]]",
+                'id = "tier1"',
+                f'path = "{fixture_zim.as_posix()}"',
+                "tier = 1",
+                'kind = "encyclopedia"',
+                "subjects = []",
+                'storage = "ssd"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    registry = load_registry(toml_path)
+    store = SnapshotStore(tmp_path / "snapshots.sqlite3")
+    try:
+        engine = build_engine(
+            registry,
+            snapshot_store=store,
+            cache_dir=tmp_path / "cache",
+            dense_dir=tmp_path / "no_such_sidecar",
+            embed_url="http://127.0.0.1:1",
+        )
+        assert engine._dense_indexes == {}
+        assert engine._embed_query is None
+    finally:
+        store.close()
 
 
 def _row(qid, question, expected_paths, category="direct", split="tuning"):

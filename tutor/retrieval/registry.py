@@ -9,7 +9,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from tutor.retrieval.zim.archive import ArchiveStatus, validate_archive
+from tutor.retrieval.zim.archive import ArchiveStatus, fingerprint, validate_archive
 
 _VALID_TIERS = {1, 2, 3}
 _VALID_KINDS = {"encyclopedia", "textbook", "qa", "howto", "viewer_only"}
@@ -62,6 +62,16 @@ class Registry:
 
     def validate_all(self) -> dict[str, ArchiveStatus]:
         return {entry.id: validate_archive(entry.path) for entry in self.archives}
+
+    def fingerprint_digest(self, archive_id: str) -> str:
+        """The current on-disk fingerprint digest of ``archive_id``'s archive.
+
+        Lets callers outside ``tutor.retrieval`` (e.g. ``tutor.app.compose``,
+        which never imports ``tutor.retrieval.zim`` directly) check a dense
+        sidecar's manifest against the archive's *current* fingerprint
+        without reaching into the ZIM layer themselves.
+        """
+        return fingerprint(self.get(archive_id).path).digest
 
 
 def _require(table: dict, key: str, toml_path: Path) -> object:

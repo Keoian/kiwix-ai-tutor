@@ -36,6 +36,8 @@ from tutor.app.prompt import Budget
 from tutor.app.resources import ResourceMonitor
 from tutor.app.session import Session
 from tutor.app.turn_log import TurnLogger
+from tutor.retrieval.hybrid.dense import DenseIndex, DenseIndexError
+from tutor.retrieval.index.embedding_client import EmbeddingClient
 from tutor.retrieval.registry import Registry, RegistryError, load_registry
 from tutor.retrieval.research import ResearchEngine
 from tutor.retrieval.snapshots import SnapshotStore
@@ -46,6 +48,20 @@ _STUDENT_SAFE_ERROR = (
 )
 
 _TOKEN_CACHE_SIZE = 4096
+
+# Short timeout for the per-query embedding call: research()'s own
+# ``embed_query`` bound (see tutor.retrieval.research) is 1s, so a longer
+# client-level timeout here would never actually be reached -- but it
+# still matters that a hung TCP connection to a dead embedding server
+# cannot block a request past that budget.
+_EMBED_CLIENT_TIMEOUT_S = 2.0
+
+_DENSE_UNAVAILABLE_STATUS = {
+    "available": False,
+    "reason": "not configured",
+    "rows": None,
+    "model": None,
+}
 
 
 def _make_count_tokens(llm: Any):
@@ -81,6 +97,71 @@ def _valid_registry(registry: Registry) -> Registry:
         entry for entry in registry.archives if statuses[entry.id].state.value == "valid"
     )
     return Registry(archives=valid)
+
+
+def _open_dense(cfg: Any, engine_registry: Registry) -> tuple[dict[str, DenseIndex], Any, dict]:
+    """Best-effort dense sidecar wiring for ``build_deps``.
+
+    Never raises: any problem (no ``[embedding]`` config, archive not in
+    the *valid* registry, sidecar directory missing manifest.json or
+    paths.txt, stale fingerprint, corrupt sidecar) is reported as a
+    ``dense`` status dict with ``available: False`` and a human-readable
+    ``reason``, and the caller falls back to lexical-only retrieval. This
+    never talks to the embedding server: reachability is checked lazily,
+    per query, by ``ResearchEngine`` itself (see ``embed_query`` there),
+    which is also what keeps this function safe to call with no network
+    access in unit tests.
+    """
+    emb = getattr(cfg, "embedding", None)
+    if emb is None:
+        return {}, None, dict(_DENSE_UNAVAILABLE_STATUS)
+
+    try:
+        entry = engine_registry.get(emb.archive_id)
+    except RegistryError:
+        return {}, None, {
+            "available": False,
+            "reason": f"archive {emb.archive_id!r} is not a valid registered archive",
+            "rows": None,
+            "model": None,
+        }
+
+    manifest_path = emb.sidecar_dir / "manifest.json"
+    paths_path = emb.sidecar_dir / "paths.txt"
+    if not manifest_path.exists() or not paths_path.exists():
+        return {}, None, {
+            "available": False,
+            "reason": f"no dense sidecar at {emb.sidecar_dir} (missing manifest.json/paths.txt)",
+            "rows": None,
+            "model": None,
+        }
+
+    try:
+        digest = engine_registry.fingerprint_digest(entry.id)
+        index = DenseIndex.open(emb.sidecar_dir, archive_digest=digest)
+    except DenseIndexError as exc:
+        return {}, None, {"available": False, "reason": str(exc), "rows": None, "model": None}
+
+    if index.paths is None:
+        return {}, None, {
+            "available": False,
+            "reason": f"dense sidecar at {emb.sidecar_dir} has no paths.txt",
+            "rows": None,
+            "model": None,
+        }
+
+    client = EmbeddingClient(emb.base_url, timeout=_EMBED_CLIENT_TIMEOUT_S)
+
+    def embed_query(text: str) -> list[float]:
+        return client.embed([text])[0]
+
+    status = {
+        "available": True,
+        "reason": None,
+        "rows": len(index.ids),
+        "model": index.manifest.embedding_model_name,
+    }
+    return {entry.id: index}, embed_query, status
 
 
 class _CalcTool:
@@ -206,7 +287,12 @@ def _make_status_provider(
     budget: Budget,
     model_name: str,
     resource_monitor: ResourceMonitor | None = None,
+    dense_status: dict | None = None,
 ):
+    dense_status = dict(dense_status) if dense_status is not None else dict(
+        _DENSE_UNAVAILABLE_STATUS
+    )
+
     def status_provider(session_id: str | None = None) -> dict:
         healthy = llm.health()
         statuses = registry.validate_all()
@@ -228,6 +314,7 @@ def _make_status_provider(
             "tokens_used": None,
             "headroom": None,
             "last_eviction": None,
+            "dense": dense_status,
         }
 
         if resource_monitor is not None:
@@ -265,12 +352,16 @@ def build_deps(cfg: Any, *, llm: Any = None, research_engine: Any = None) -> App
 
     snapshot_store = SnapshotStore(data_dir / "snapshots.sqlite")
 
+    dense_status = dict(_DENSE_UNAVAILABLE_STATUS)
     if research_engine is None:
         engine_registry = _valid_registry(full_registry)
+        dense_indexes, embed_query, dense_status = _open_dense(cfg, engine_registry)
         research_engine = ResearchEngine(
             engine_registry,
             snapshot_store=snapshot_store,
             cache_dir=data_dir / "research_cache",
+            dense_indexes=dense_indexes,
+            embed_query=embed_query,
         )
 
     count_tokens = _make_count_tokens(llm)
@@ -297,6 +388,7 @@ def build_deps(cfg: Any, *, llm: Any = None, research_engine: Any = None) -> App
         budget=budget,
         model_name=cfg.runtime.model_path.name,
         resource_monitor=resource_monitor,
+        dense_status=dense_status,
     )
 
     return AppDeps(

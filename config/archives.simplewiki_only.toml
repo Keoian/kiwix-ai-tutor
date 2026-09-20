@@ -1,0 +1,19 @@
+# Registry with ONLY the simplewiki tier-1 archive.
+#
+# Purpose-built for eval.tools.hybrid_matrix: the real dense sidecar
+# (runtime/simplewiki_dense) is built only against simplewiki, and the
+# tier-2 HDD archives (enwiki, lumen) in config/archives.dev.toml are
+# always-searched (Registry.for_subject includes every tier-1/2 archive
+# unconditionally), so comparing lexical-vs-hybrid using the full dev
+# registry would let those un-embedded HDD archives' lexical-only hits
+# dilute the comparison and pull HDD I/O into every run. This registry
+# keeps the M4 gate comparison to the one archive the sidecar actually
+# covers.
+
+[[archive]]
+id = "simplewiki"
+path = 'C:\kiwix\wikipedia_en_simple_all_maxi_2026-05.zim'
+tier = 1
+kind = "encyclopedia"
+subjects = []
+storage = "ssd"
