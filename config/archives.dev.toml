@@ -1,0 +1,145 @@
+# Dev archive registry (Windows desktop). Paths are absolute Windows paths
+# and are NOT required to exist for the registry to load (WP-B2): validation
+# is a separate, explicit step (``Registry.validate_all``).
+#
+# tier: 1 = always-searched fast/small (SSD), 2 = always-searched large
+# (HDD ok), 3 = subject-gated, consulted only when its ``subjects`` match the
+# current question (plan §0.4).
+
+[[archive]]
+id = "simplewiki"
+path = 'C:\kiwix\wikipedia_en_simple_all_maxi_2026-05.zim'
+tier = 1
+kind = "encyclopedia"
+subjects = []
+storage = "ssd"
+
+[[archive]]
+id = "enwiki"
+path = 'D:\Kiwix\wikipedia_en_all_maxi_2023-10.zim'
+tier = 2
+kind = "encyclopedia"
+subjects = []
+storage = "hdd"
+
+[[archive]]
+id = "lumen"
+path = 'D:\Kiwix\courses.lumenlearning.com_en_all_2021-03.zim'
+tier = 2
+kind = "textbook"
+subjects = []
+storage = "hdd"
+
+[[archive]]
+id = "math_se"
+path = 'D:\Kiwix\math.stackexchange.com_en_all_2023-08.zim'
+tier = 3
+kind = "qa"
+subjects = ["math"]
+storage = "hdd"
+
+[[archive]]
+id = "wikibooks"
+path = 'C:\kiwix\wikibooks_en_all_maxi_2026-04.zim'
+tier = 3
+kind = "textbook"
+subjects = []
+storage = "ssd"
+
+[[archive]]
+id = "wikiversity"
+path = 'D:\Kiwix\wikiversity_en_all_maxi_2021-03.zim'
+tier = 3
+kind = "textbook"
+subjects = []
+storage = "hdd"
+
+[[archive]]
+id = "matheducators_se"
+path = 'D:\Kiwix\matheducators.stackexchange.com_en_all_2023-10.zim'
+tier = 3
+kind = "qa"
+subjects = ["math"]
+storage = "hdd"
+
+[[archive]]
+id = "physics_se"
+path = 'D:\Kiwix\physics.stackexchange.com_en_all_2023-11.zim'
+tier = 3
+kind = "qa"
+subjects = ["physics"]
+storage = "hdd"
+
+[[archive]]
+id = "chemistry_se"
+path = 'D:\Kiwix\chemistry.stackexchange.com_en_all_2023-11.zim'
+tier = 3
+kind = "qa"
+subjects = ["chemistry"]
+storage = "hdd"
+
+[[archive]]
+id = "biology_se"
+path = 'D:\Kiwix\biology.stackexchange.com_en_all_2023-05.zim'
+tier = 3
+kind = "qa"
+subjects = ["biology"]
+storage = "hdd"
+
+[[archive]]
+id = "history_se"
+path = 'D:\Kiwix\history.stackexchange.com_en_all_2023-11.zim'
+tier = 3
+kind = "qa"
+subjects = ["history"]
+storage = "hdd"
+
+[[archive]]
+id = "english_se"
+path = 'D:\Kiwix\english.stackexchange.com_en_all_2023-10.zim'
+tier = 3
+kind = "qa"
+subjects = ["english"]
+storage = "hdd"
+
+[[archive]]
+id = "linguistics_se"
+path = 'D:\Kiwix\linguistics.stackexchange.com_en_all_2023-11.zim'
+tier = 3
+kind = "qa"
+subjects = ["linguistics"]
+storage = "hdd"
+
+[[archive]]
+id = "literature_se"
+path = 'D:\Kiwix\literature.stackexchange.com_en_all_2023-10.zim'
+tier = 3
+kind = "qa"
+subjects = ["literature"]
+storage = "hdd"
+
+[[archive]]
+id = "puzzling_se"
+path = 'D:\Kiwix\puzzling.stackexchange.com_en_all_2023-11.zim'
+tier = 3
+kind = "qa"
+subjects = ["puzzling"]
+storage = "hdd"
+
+[[archive]]
+id = "wikihow"
+path = 'D:\Kiwix\wikihow_en_maxi_2023-03.zim'
+tier = 3
+kind = "howto"
+subjects = []
+storage = "hdd"
+weight = 0.5
+
+[[archive]]
+id = "gutenberg"
+path = 'D:\Kiwix\gutenberg_en_all_2023-12.zim'
+tier = 3
+kind = "viewer_only"
+subjects = []
+storage = "hdd"
+searchable = false

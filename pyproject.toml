@@ -10,8 +10,14 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = { text = "MIT" }
 dependencies = [
-    # Deliberately empty at the skeleton commit. Dependencies are added by the work
-    # package that first needs them, pinned, per plan §7.
+    # WP-B1: ZIM reading/writing (libzim) and HTML parsing (bs4), matching the
+    # OpenZIM MCP donor's own pins per docs/donor_inventory.md (b).
+    "libzim>=3.9,<4",
+    "beautifulsoup4>=4.12",
+    # WP-B3: cross-platform process introspection for the libzim worker's
+    # "exactly one live child" assertions (used in tests and, if needed,
+    # by the worker's own supervision logic).
+    "psutil>=5.9",
 ]
 
 [project.optional-dependencies]
@@ -43,6 +49,10 @@ preview = true
 # PTH bans os.path in favour of pathlib; PLW1514 bans open() without an explicit encoding;
 # flake8-tidy-imports bans the POSIX-only modules outright.
 select = ["E", "F", "W", "I", "UP", "B", "PTH", "PLW1514", "TID251"]
+
+[tool.ruff.lint.isort]
+# Explicit, so import sorting does not depend on the checkout directory's name.
+known-first-party = ["tutor", "eval", "tests"]
 
 [tool.ruff.lint.per-file-ignores]
 # Vendored OpenZIM MCP code keeps upstream formatting; we still enforce the portability rules.

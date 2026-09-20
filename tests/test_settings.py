@@ -10,6 +10,7 @@ import dataclasses
 from pathlib import Path
 
 import pytest
+
 from tutor.settings import Config, ConfigError, load_config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
