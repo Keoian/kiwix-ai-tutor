@@ -82,6 +82,12 @@ class BuildCheckpoint:
     count: int
     vectors_bytes: int
     ids_bytes: int
+    # Backward compatible: a checkpoint written before paths.txt existed
+    # has no ``paths_bytes`` key. Defaults to 0 so an old in-progress
+    # build directory can still be resumed by old *or* new code -- the
+    # new builder will simply (re)create paths.txt from entry id 0 of
+    # whatever it processes going forward. See simplewiki_build.py.
+    paths_bytes: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -101,6 +107,7 @@ class BuildCheckpoint:
                 count=int(data["count"]),
                 vectors_bytes=int(data["vectors_bytes"]),
                 ids_bytes=int(data["ids_bytes"]),
+                paths_bytes=int(data.get("paths_bytes", 0)),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ManifestError(f"malformed checkpoint: {exc}") from exc

@@ -31,7 +31,7 @@ import numpy as np
 
 from tutor.retrieval.hybrid.dense import DenseIndex
 from tutor.retrieval.index.embedding_client import EmbeddingClient
-from tutor.retrieval.index.simplewiki_build import build_index
+from tutor.retrieval.index.simplewiki_build import backfill_paths, build_index
 from tutor.retrieval.zim.archive import fingerprint as fingerprint_archive
 
 
@@ -112,6 +112,16 @@ def _run_synthetic(args: argparse.Namespace) -> None:
           f"p50={p50:.2f}ms p95={p95:.2f}ms max={max(latencies):.2f}ms")
 
 
+def _run_backfill_paths(args: argparse.Namespace) -> None:
+    n = backfill_paths(
+        Path(args.archive),
+        Path(args.dir),
+        archive_id=args.archive_id,
+        force=args.force,
+    )
+    print(f"backfill-paths: wrote {n} paths to {Path(args.dir) / 'paths.txt'}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -135,6 +145,16 @@ def main(argv: list[str] | None = None) -> int:
     synthetic.add_argument("--count", type=int, default=1_000_000)
     synthetic.add_argument("--dim", type=int, default=384)
     synthetic.set_defaults(func=_run_synthetic)
+
+    backfill = sub.add_parser(
+        "backfill-paths",
+        help="recompute paths.txt for a sidecar built before paths.txt existed",
+    )
+    backfill.add_argument("--archive", required=True)
+    backfill.add_argument("--dir", required=True)
+    backfill.add_argument("--archive-id", default="simplewiki")
+    backfill.add_argument("--force", action="store_true")
+    backfill.set_defaults(func=_run_backfill_paths)
 
     args = parser.parse_args(argv)
     args.func(args)

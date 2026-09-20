@@ -30,6 +30,7 @@ from pathlib import Path
 
 VECTORS_FILENAME = "vectors.fp16"
 IDS_FILENAME = "ids.txt"
+PATHS_FILENAME = "paths.txt"
 MANIFEST_FILENAME = "manifest.json"
 CHECKPOINT_FILENAME = "checkpoint.json"
 

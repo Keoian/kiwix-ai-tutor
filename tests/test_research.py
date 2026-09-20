@@ -442,3 +442,161 @@ def test_tier2_consulted_when_tier1_coverage_weak(
     resp = engine.research("What is the flibbertigibbetopolis effect?")
     consulted_ids = {a["id"] for a in resp.archives_consulted}
     assert "tier2" in consulted_ids
+
+
+# ---------------------------------------------------------------------------
+# Dense retrieval wiring (WP-B7 sidecar consumed by research()).
+# ---------------------------------------------------------------------------
+
+
+def _make_dense_index(fixture_zim, *, paths, archive_digest=None, dim=2):
+    import numpy as np
+
+    from tutor.retrieval.hybrid.dense import DenseIndex
+    from tutor.retrieval.index.manifest import DenseManifest
+    from tutor.retrieval.zim.archive import fingerprint as fingerprint_archive
+
+    if archive_digest is None:
+        archive_digest = fingerprint_archive(fixture_zim).digest
+    n = len(paths)
+    vectors = np.eye(n, dim, dtype=np.float32) if dim >= n else np.eye(n, dtype=np.float32)[:, :dim]
+    manifest = DenseManifest(
+        version=1,
+        archive_digest=archive_digest,
+        extractor_version="zim-bundle-v1",
+        embedding_model_name="fake",
+        embedding_model_sha256="a" * 64,
+        dim=dim,
+        count=n,
+        normalisation="l2",
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    ids = tuple(f"fakeid{i}" for i in range(n))
+    return DenseIndex(ids=ids, vectors=vectors, manifest=manifest, paths=tuple(paths))
+
+
+def test_dense_candidates_fused_and_sourced(registry_toml, snapshot_store, tmp_path):
+    import tomllib
+
+    zim_path = Path(tomllib.loads(registry_toml.read_text())["archive"][0]["path"])
+    index = _make_dense_index(zim_path, paths=["pythagorean_theorem", "redirect_a"])
+
+    engine = _engine(
+        registry_toml,
+        snapshot_store,
+        tmp_path,
+        dense_indexes={"tier1": index},
+        embed_query=lambda q: [1.0, 0.0],
+    )
+    resp = engine.research("Pythagorean theorem", budget_tokens=2000)
+    assert resp.dense_used is True
+    matching = [p for p in resp.passages if p.path == "pythagorean_theorem"]
+    assert matching
+    assert "dense" in matching[0].sources
+
+
+def test_dense_hits_do_not_defeat_abstention(registry_toml, snapshot_store, tmp_path):
+    import tomllib
+
+    zim_path = Path(tomllib.loads(registry_toml.read_text())["archive"][0]["path"])
+    index = _make_dense_index(zim_path, paths=["pythagorean_theorem", "redirect_a"])
+
+    engine = _engine(
+        registry_toml,
+        snapshot_store,
+        tmp_path,
+        dense_indexes={"tier1": index},
+        embed_query=lambda q: [1.0, 0.0],
+    )
+    resp = engine.research("zzqxw fnorble asdkjqwe blorptastic")
+    assert resp.status == "empty"
+    assert resp.passages == []
+    assert resp.coverage["weak"] is True
+
+
+def test_stale_dense_sidecar_ignored_with_note(registry_toml, snapshot_store, tmp_path):
+    index = _make_dense_index(
+        Path("does-not-matter"),
+        paths=["pythagorean_theorem"],
+        archive_digest="deliberately-wrong-digest",
+    )
+    engine = _engine(
+        registry_toml,
+        snapshot_store,
+        tmp_path,
+        dense_indexes={"tier1": index},
+        embed_query=lambda q: [1.0, 0.0],
+    )
+    resp = engine.research("Pythagorean theorem")
+    assert resp.dense_used is False
+    assert resp.dense_note is not None
+    assert "stale" in resp.dense_note
+
+
+def test_embed_query_failure_degrades_to_lexical_only(registry_toml, snapshot_store, tmp_path):
+    import tomllib
+
+    zim_path = Path(tomllib.loads(registry_toml.read_text())["archive"][0]["path"])
+    index = _make_dense_index(zim_path, paths=["pythagorean_theorem"])
+
+    def _broken_embed(q):
+        raise RuntimeError("embedder is down")
+
+    engine = _engine(
+        registry_toml,
+        snapshot_store,
+        tmp_path,
+        dense_indexes={"tier1": index},
+        embed_query=_broken_embed,
+    )
+    resp = engine.research("Pythagorean theorem")
+    assert resp.dense_used is False
+    assert resp.dense_note is not None
+    assert resp.status in ("ok", "partial")
+    assert resp.passages
+
+
+def test_passage_sources_default_to_lexical_without_dense(registry_toml, snapshot_store, tmp_path):
+    engine = _engine(registry_toml, snapshot_store, tmp_path)
+    resp = engine.research("Pythagorean theorem")
+    assert resp.passages
+    for p in resp.passages:
+        assert p.sources == ("lexical",)
+
+
+def test_response_to_dict_includes_dense_fields(registry_toml, snapshot_store, tmp_path):
+    engine = _engine(registry_toml, snapshot_store, tmp_path)
+    resp = engine.research("Pythagorean theorem")
+    d = resp.to_dict()
+    assert "dense_used" in d
+    assert "dense_note" in d
+    assert d["dense_used"] is False
+
+
+# ---------------------------------------------------------------------------
+# WP-B8 ranking flags applied in the pipeline, default-off identity.
+# ---------------------------------------------------------------------------
+
+
+def test_ranking_flags_none_vs_default_object_identical_response(
+    registry_toml, snapshot_store, tmp_path
+):
+    from tutor.retrieval.research import RankingFlags as RF
+
+    engine_none = _engine(registry_toml, snapshot_store, tmp_path, ranking_flags=None)
+    resp_none = engine_none.research("Pythagorean theorem")
+
+    engine_default = _engine(
+        registry_toml,
+        snapshot_store,
+        tmp_path,
+        cache_dir=tmp_path / "cache2",
+        ranking_flags=RF(),
+    )
+    resp_default = engine_default.research("Pythagorean theorem")
+
+    d1 = resp_none.to_dict()
+    d2 = resp_default.to_dict()
+    d1.pop("timings", None)
+    d2.pop("timings", None)
+    assert d1 == d2

@@ -24,14 +24,23 @@ import queue
 import re
 import threading
 import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from tutor.retrieval.hybrid.dense import DenseIndex
 from tutor.retrieval.hybrid.diversity import cap_per_article
 from tutor.retrieval.hybrid.lexical import BM25, tokenize
 from tutor.retrieval.hybrid.packer import estimate_tokens, pack
 from tutor.retrieval.hybrid.passages import split_passages
+from tutor.retrieval.hybrid.ranking import (
+    RankingFlags,
+    apply_heading_affinity,
+    apply_lead_augmentation,
+    apply_mention_penalty,
+    apply_title_boost,
+)
 from tutor.retrieval.hybrid.rrf import rrf_fuse
 from tutor.retrieval.registry import ArchiveEntry, Registry
 from tutor.retrieval.snapshots import SnapshotStore
@@ -55,6 +64,12 @@ _PER_OP_DEADLINE_CAP_S = 3.0
 _MIN_OP_DEADLINE_S = 0.05
 _QUEUE_SLACK_S = 0.05
 _THREAD_JOIN_TIMEOUT_S = 0.5
+
+# Reuse plan §7.2 "Dense article top 16": the dense sidecar's own
+# candidate list, fused at article level with the lexical/title rankings
+# below (not blended with raw cosine/BM25 scores directly).
+_DENSE_ARTICLE_TOP = 16
+_EMBED_QUERY_TIMEOUT_S = 1.0
 
 _PROCEDURAL_RE = re.compile(r"\bhow (do|would|can|should) (i|you|we)\b", re.IGNORECASE)
 
@@ -142,16 +157,6 @@ def compute_coverage(
 
 
 @dataclass(frozen=True)
-class RankingFlags:
-    """Optional ranking signal toggles. All default OFF (see hybrid.ranking)."""
-
-    title_boost: bool = False
-    mention_penalty: bool = False
-    heading_affinity: bool = False
-    lead_augmentation: bool = False
-
-
-@dataclass(frozen=True)
 class ResearchPassage:
     """One packed, citable passage returned by :meth:`ResearchEngine.research`."""
 
@@ -167,6 +172,11 @@ class ResearchPassage:
     score: float
     kind: str
     estimated_tokens: int
+    # Subset of ("lexical", "dense"): which candidate-generation path(s)
+    # surfaced this passage's article. Defaults to ("lexical",) so the
+    # field is always present in to_dict() output even when dense
+    # retrieval was never configured.
+    sources: tuple[str, ...] = ("lexical",)
 
 
 @dataclass
@@ -179,6 +189,8 @@ class ResearchResponse:
     coverage: dict[str, Any]
     archives_consulted: list[dict[str, Any]]
     timings: dict[str, Any] = field(default_factory=dict)
+    dense_used: bool = False
+    dense_note: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -188,6 +200,8 @@ class ResearchResponse:
             "coverage": self.coverage,
             "archives_consulted": self.archives_consulted,
             "timings": self.timings,
+            "dense_used": self.dense_used,
+            "dense_note": self.dense_note,
         }
 
 
@@ -232,6 +246,36 @@ def _call_worker(worker: Any, op: str, *, deadline_s: float, **kwargs: Any) -> W
         return None
 
 
+def _call_bounded(
+    fn: Callable[[], Any], *, timeout_s: float
+) -> tuple[Any, str | None]:
+    """Call ``fn`` off-thread, bounded by ``timeout_s``.
+
+    Returns ``(value, None)`` on success or ``(None, note)`` on timeout or
+    exception. Used for ``embed_query``, which -- unlike the ZIM worker --
+    has no ``interrupt()`` hook, so a timed-out call's thread is simply
+    abandoned (daemon thread; it cannot outlive the process and its result
+    is discarded).
+    """
+    result_box: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+    def _target() -> None:
+        try:
+            result_box.put(("ok", fn()))
+        except Exception as exc:  # noqa: BLE001 - reported as a note
+            result_box.put(("error", str(exc)))
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    try:
+        status, value = result_box.get(timeout=max(timeout_s, _MIN_OP_DEADLINE_S))
+    except queue.Empty:
+        return None, "embed_query timed out"
+    if status == "error":
+        return None, f"embed_query failed: {value}"
+    return value, None
+
+
 class ResearchEngine:
     """The single research() entry point over a :class:`Registry` of archives."""
 
@@ -247,6 +291,8 @@ class ResearchEngine:
         soft_deadline_s: float = _DEFAULT_SOFT_DEADLINE_S,
         default_budget_tokens: int = _DEFAULT_BUDGET_TOKENS,
         top_n_articles: int = _TOP_N_ARTICLES,
+        dense_indexes: Mapping[str, DenseIndex] | None = None,
+        embed_query: Callable[[str], Sequence[float]] | None = None,
     ) -> None:
         self._registry = registry
         self._snapshot_store = snapshot_store
@@ -254,6 +300,12 @@ class ResearchEngine:
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         self._worker_factory = worker_factory or (lambda path: ZimWorker(path))
         self._ranking_flags = ranking_flags or RankingFlags()
+        # Keyed by archive id (Registry.ArchiveEntry.id). A dense index for
+        # an archive not in the registry, or whose manifest fingerprint no
+        # longer matches that archive's current fingerprint, is ignored
+        # with a note -- never fatal (see ``_dense_hits_for``).
+        self._dense_indexes: dict[str, DenseIndex] = dict(dense_indexes or {})
+        self._embed_query = embed_query
         self._hard_deadline_s = hard_deadline_s
         self._soft_deadline_s = soft_deadline_s
         self._default_budget_tokens = default_budget_tokens
@@ -292,6 +344,39 @@ class ResearchEngine:
             entries = [e for e in entries if e.tier != 3]
         return entries
 
+    def _dense_hits_for(
+        self, entry: ArchiveEntry, query_vec: Sequence[float] | None
+    ) -> tuple[list[str], str | None]:
+        """Dense top-K article paths for ``entry``, or ``([], note)``.
+
+        Never raises: a missing dense index, a stale (fingerprint
+        mismatch) sidecar, a sidecar with no ``paths.txt`` (pre-backfill),
+        or a search-time error are all reported as a note and treated as
+        "no dense candidates for this archive" rather than a fatal error.
+        """
+        if query_vec is None:
+            return [], None
+        index = self._dense_indexes.get(entry.id)
+        if index is None:
+            return [], None
+        try:
+            archive_digest = self._fingerprint_digest(entry)
+            if index.manifest.archive_digest != archive_digest:
+                return [], (
+                    f"dense sidecar for {entry.id!r} is stale (fingerprint mismatch); ignored"
+                )
+            if index.paths is None:
+                return [], f"dense sidecar for {entry.id!r} has no paths.txt; ignored"
+            hits = index.search(list(query_vec), k=_DENSE_ARTICLE_TOP)
+        except Exception as exc:  # noqa: BLE001 - dense is best-effort
+            return [], f"dense search failed for {entry.id!r}: {exc}"
+        paths: list[str] = []
+        for hit in hits:
+            path = hit[1] if len(hit) == 3 else None
+            if path is not None and path not in paths:
+                paths.append(path)
+        return paths, None
+
     def _process_archive(
         self,
         entry: ArchiveEntry,
@@ -299,7 +384,8 @@ class ResearchEngine:
         remaining: Any,
         keywords: list[str] | None = None,
         topic_hint: str | None = None,
-    ) -> tuple[list[dict[str, Any]], bool]:
+        query_vec: Sequence[float] | None = None,
+    ) -> tuple[list[dict[str, Any]], bool, str | None]:
         worker = self._get_worker(entry)
         timed_out = False
 
@@ -387,11 +473,20 @@ class ResearchEngine:
             }
         )
 
-        if not fulltext_hits and not title_hits:
-            return [], timed_out
+        dense_paths, dense_note = self._dense_hits_for(entry, query_vec)
 
-        fused_articles = rrf_fuse([[h.path for h in fulltext_hits], [h.path for h in title_hits]])
+        if not fulltext_hits and not title_hits and not dense_paths:
+            return [], timed_out, dense_note
+
+        # Reuse plan §7.2: three independent rankings (dense semantic
+        # search, title, body/full-text) fused via RRF at the article
+        # level, not blended as raw scores.
+        fused_articles = rrf_fuse(
+            [[h.path for h in fulltext_hits], [h.path for h in title_hits], dense_paths]
+        )
         top_paths = [path for path, _ in fused_articles[: self._top_n_articles]]
+        lexical_paths = {h.path for h in fulltext_hits} | {h.path for h in title_hits}
+        dense_paths_set = set(dense_paths)
 
         # Spec §5 step 3: topic_hint is "the current subject" -- i.e. an
         # entity the lesson is already about, not merely a keyword to
@@ -405,6 +500,7 @@ class ResearchEngine:
             timed_out = timed_out or hint_failed
             if hint_hits:
                 hint_path = hint_hits[0].path
+                lexical_paths.add(hint_path)
                 if hint_path in top_paths:
                     top_paths.remove(hint_path)
                 top_paths = [hint_path, *top_paths][: self._top_n_articles + 1]
@@ -430,7 +526,7 @@ class ResearchEngine:
             )
 
         if not candidate_passages:
-            return [], timed_out
+            return [], timed_out, dense_note
 
         tokenized_query = tokenize(query) + topic_hint_tokens
         bm25 = BM25([tokenize(p.text) for p in candidate_passages])
@@ -452,6 +548,13 @@ class ResearchEngine:
         results: list[dict[str, Any]] = []
         for passage_id, score in fused:
             p = passages_by_id[passage_id]
+            sources: list[str] = []
+            if p.path in lexical_paths:
+                sources.append("lexical")
+            if p.path in dense_paths_set:
+                sources.append("dense")
+            if not sources:
+                sources.append("lexical")
             results.append(
                 {
                     "passage_id": p.passage_id,
@@ -465,9 +568,10 @@ class ResearchEngine:
                     "score": score,
                     "kind": entry.kind,
                     "used_fallback": used_fallback,
+                    "sources": tuple(sorted(sources)),
                 }
             )
-        return results, timed_out
+        return results, timed_out, dense_note
 
     def research(
         self,
@@ -510,8 +614,31 @@ class ResearchEngine:
         query_terms = _query_terms(query, topic_hint)
         topic_hint_terms = frozenset(tokenize(topic_hint)) if topic_hint else frozenset()
 
+        # Embed the query at most once per request, bounded by whatever
+        # time remains before the soft deadline (never longer than
+        # ``_EMBED_QUERY_TIMEOUT_S``). Any failure -- no embedder
+        # configured, timeout, or the embedder raising -- degrades to
+        # lexical-only retrieval; it never fails the whole request.
+        query_vec: Sequence[float] | None = None
+        dense_used = False
+        dense_notes: list[str] = []
+        if self._dense_indexes and self._embed_query is not None:
+            soft_remaining = max(0.0, soft_deadline - (time.monotonic() - started))
+            budget = min(_EMBED_QUERY_TIMEOUT_S, soft_remaining)
+            if budget <= 0:
+                dense_notes.append(
+                    "dense skipped: soft deadline already elapsed before embed_query"
+                )
+            else:
+                query_vec, note = _call_bounded(
+                    lambda: self._embed_query(query), timeout_s=budget
+                )
+                if note is not None:
+                    dense_notes.append(note)
+                    query_vec = None
+
         def _consult(entries: list[ArchiveEntry]) -> None:
-            nonlocal any_timeout
+            nonlocal any_timeout, dense_used
             for entry in entries:
                 if remaining() <= 0:
                     any_timeout = True
@@ -524,10 +651,19 @@ class ResearchEngine:
                     any_timeout = True
                     break
                 consulted.append({"id": entry.id, "storage": entry.storage, "tier": entry.tier})
-                cands, timed_out = self._process_archive(
-                    entry, query, remaining, keywords=keywords, topic_hint=topic_hint
+                cands, timed_out, dense_note = self._process_archive(
+                    entry,
+                    query,
+                    remaining,
+                    keywords=keywords,
+                    topic_hint=topic_hint,
+                    query_vec=query_vec,
                 )
                 any_timeout = any_timeout or timed_out
+                if dense_note is not None:
+                    dense_notes.append(dense_note)
+                if any(c.get("sources") and "dense" in c["sources"] for c in cands):
+                    dense_used = True
                 candidates.extend(cands)
 
         _consult(primary_archives)
@@ -538,6 +674,26 @@ class ResearchEngine:
                 _consult(fallback_archives)
 
         candidates.sort(key=lambda c: -c["score"])
+        # WP-B8 ranking refinements (reuse plan §7.5-7.6): documented
+        # no-ops unless their flag is enabled, applied here -- after the
+        # per-archive RRF fusion and the global score sort, before the
+        # diversity cap and packing so a promoted passage can still win a
+        # per-article slot. With every flag off (the default) each
+        # ``apply_*`` call returns its input unchanged, so this is
+        # byte-identical to the pre-WP-B8 pipeline.
+        query_terms_list = list(query_terms)
+        candidates = apply_title_boost(
+            candidates, query_terms_list, enabled=self._ranking_flags.title_boost
+        )
+        candidates = apply_mention_penalty(
+            candidates, query_terms_list, enabled=self._ranking_flags.mention_penalty
+        )
+        candidates = apply_heading_affinity(
+            candidates, query_terms_list, enabled=self._ranking_flags.heading_affinity
+        )
+        candidates = apply_lead_augmentation(
+            candidates, enabled=self._ranking_flags.lead_augmentation
+        )
         capped = cap_per_article(
             candidates, key=lambda c: c["path"], max_per_article=_DIVERSITY_CAP
         )
@@ -562,6 +718,7 @@ class ResearchEngine:
                     score=entry_dict["score"],
                     kind=entry_dict["kind"],
                     estimated_tokens=estimate_tokens(entry_dict["text"]),
+                    sources=tuple(entry_dict.get("sources", ("lexical",))),
                 )
                 passages.append(rp)
                 self._snapshot_store.put(
@@ -581,6 +738,8 @@ class ResearchEngine:
             coverage=coverage,
             archives_consulted=consulted,
             timings={"elapsed_s": elapsed, "cache_hit": False},
+            dense_used=dense_used,
+            dense_note="; ".join(dense_notes) if dense_notes else None,
         )
         self._response_cache[cache_key] = response
         return response

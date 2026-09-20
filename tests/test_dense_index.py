@@ -118,3 +118,35 @@ def test_search_empty_index_returns_empty(tmp_path):
     out_dir = _write_index(tmp_path, ids=[], vectors=[])
     index = DenseIndex.open(out_dir, archive_digest="digest-a")
     assert index.search(_unit([1, 0, 0, 0]), k=5) == []
+
+
+def test_open_with_paths_search_returns_triples(tmp_path):
+    from tutor.retrieval.index.simplewiki_store import PATHS_FILENAME
+    from tutor.retrieval.index.simplewiki_store import append_ids as _append
+
+    out_dir = _write_index(tmp_path)
+    _append(out_dir / PATHS_FILENAME, ["Article/A", "Article/B", "Article/C"])
+    index = DenseIndex.open(out_dir, archive_digest="digest-a")
+    results = index.search(_unit([1, 0, 0, 0]), k=2)
+    assert len(results) == 2
+    assert len(results[0]) == 3
+    assert results[0][0] == "id0"
+    assert results[0][1] == "Article/A"
+
+
+def test_open_without_paths_search_returns_pairs(tmp_path):
+    out_dir = _write_index(tmp_path)
+    index = DenseIndex.open(out_dir, archive_digest="digest-a")
+    assert index.paths is None
+    results = index.search(_unit([1, 0, 0, 0]), k=2)
+    assert len(results[0]) == 2
+
+
+def test_open_with_mismatched_paths_count_raises(tmp_path):
+    from tutor.retrieval.index.simplewiki_store import PATHS_FILENAME
+    from tutor.retrieval.index.simplewiki_store import append_ids as _append
+
+    out_dir = _write_index(tmp_path)
+    _append(out_dir / PATHS_FILENAME, ["Article/A"])  # too few
+    with pytest.raises(DenseIndexError):
+        DenseIndex.open(out_dir, archive_digest="digest-a")

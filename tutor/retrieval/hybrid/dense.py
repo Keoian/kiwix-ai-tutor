@@ -32,6 +32,7 @@ from tutor.retrieval.index.manifest import DenseManifest, ManifestError, read_ma
 from tutor.retrieval.index.simplewiki_store import (
     IDS_FILENAME,
     MANIFEST_FILENAME,
+    PATHS_FILENAME,
     VECTORS_FILENAME,
     read_ids,
 )
@@ -48,6 +49,11 @@ class DenseIndex:
     ids: tuple[str, ...]
     vectors: np.ndarray  # shape (count, dim), float32, L2-normalised rows
     manifest: DenseManifest
+    # Row-aligned article paths (see index/simplewiki_build.py's paths.txt),
+    # or None for an older sidecar built before paths.txt existed --
+    # ``search`` falls back to its original 2-tuple (id, score) shape in
+    # that case so existing callers keep working unchanged.
+    paths: tuple[str, ...] | None = None
 
     @classmethod
     def open(cls, directory: Path, *, archive_digest: str) -> DenseIndex:
@@ -93,9 +99,23 @@ class DenseIndex:
 
         raw = np.fromfile(vectors_path, dtype="<f2", count=manifest.count * manifest.dim)
         vectors = raw.astype(np.float32).reshape(manifest.count, manifest.dim)
-        return cls(ids=tuple(ids), vectors=vectors, manifest=manifest)
 
-    def search(self, query_vec: list[float], k: int) -> list[tuple[str, float]]:
+        paths_path = directory / PATHS_FILENAME
+        paths: tuple[str, ...] | None = None
+        if paths_path.exists():
+            path_rows = read_ids(paths_path)
+            if len(path_rows) != manifest.count:
+                raise DenseIndexError(
+                    f"corrupt dense sidecar: manifest says {manifest.count} rows, "
+                    f"{PATHS_FILENAME} has {len(path_rows)} paths"
+                )
+            paths = tuple(path_rows)
+
+        return cls(ids=tuple(ids), vectors=vectors, manifest=manifest, paths=paths)
+
+    def search(
+        self, query_vec: list[float], k: int
+    ) -> list[tuple[str, float]] | list[tuple[str, str, float]]:
         """Brute-force cosine top-``k`` over the whole index.
 
         ``query_vec`` is L2-normalised here regardless of the manifest's
@@ -120,4 +140,6 @@ class DenseIndex:
         # argpartition for the top-k unordered, then sort just those k.
         top_idx = np.argpartition(-scores, k - 1)[:k]
         top_idx = top_idx[np.argsort(-scores[top_idx])]
+        if self.paths is not None:
+            return [(self.ids[i], self.paths[i], float(scores[i])) for i in top_idx]
         return [(self.ids[i], float(scores[i])) for i in top_idx]

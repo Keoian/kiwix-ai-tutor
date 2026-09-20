@@ -96,6 +96,11 @@ class EmbeddingConfig:
     port: int
     model_path: Path
     dim: int
+    n_gpu_layers: int
+    threads: int
+    ctx_size: int
+    sidecar_dir: Path
+    archive_id: str
 
     @property
     def base_url(self) -> str:
@@ -274,8 +279,35 @@ def load_config(path: Path) -> Config:
             emb_model_path = runtime_dir / emb_model_path
         if emb_dim <= 0:
             raise ConfigError("'dim' in [embedding] must be a positive integer")
+
+        def _emb_int(key: str, default: int) -> int:
+            value = embedding_table.get(key, default)
+            return _require_type(value, int, "embedding", key)
+
+        def _emb_str(key: str, default: str) -> str:
+            value = embedding_table.get(key, default)
+            return _require_type(value, str, "embedding", key)
+
+        emb_n_gpu_layers = _emb_int("n_gpu_layers", 0)
+        emb_threads = _emb_int("threads", 4)
+        emb_ctx_size = _emb_int("ctx_size", 512)
+        emb_archive_id = _emb_str("archive_id", "simplewiki")
+        emb_sidecar_dir_str = _emb_str("sidecar_dir", "runtime/simplewiki_dense")
+        emb_sidecar_dir = Path(emb_sidecar_dir_str)
+        if not emb_sidecar_dir.is_absolute():
+            emb_sidecar_dir = repo_root / emb_sidecar_dir
+        emb_sidecar_dir = emb_sidecar_dir.resolve()
+
         embedding = EmbeddingConfig(
-            host=emb_host, port=emb_port, model_path=emb_model_path, dim=emb_dim
+            host=emb_host,
+            port=emb_port,
+            model_path=emb_model_path,
+            dim=emb_dim,
+            n_gpu_layers=emb_n_gpu_layers,
+            threads=emb_threads,
+            ctx_size=emb_ctx_size,
+            sidecar_dir=emb_sidecar_dir,
+            archive_id=emb_archive_id,
         )
 
     return Config(runtime=runtime, server=server, sampling=sampling, app=app, embedding=embedding)
@@ -320,7 +352,9 @@ def _main(argv: list[str]) -> int:
         "--host", cfg.embedding.host,
         "--port", str(cfg.embedding.port),
         "--embedding",
-        "-ngl", str(cfg.server.n_gpu_layers),
+        "-ngl", str(cfg.embedding.n_gpu_layers),
+        "-t", str(cfg.embedding.threads),
+        "-c", str(cfg.embedding.ctx_size),
     ]:
         print(item)
     return 0

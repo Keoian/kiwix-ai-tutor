@@ -14,11 +14,13 @@ from pathlib import Path
 import pytest
 
 from tutor.retrieval.index.manifest import read_manifest
-from tutor.retrieval.index.simplewiki_build import BuildConfigError, build_index
+from tutor.retrieval.index.simplewiki_build import BuildConfigError, backfill_paths, build_index
 from tutor.retrieval.index.simplewiki_store import (
     IDS_FILENAME,
+    PATHS_FILENAME,
     VECTORS_FILENAME,
     file_size,
+    read_ids,
 )
 
 DIM = 8
@@ -158,3 +160,89 @@ def test_resume_with_different_model_config_raises(fixture_zim, tmp_path):
 
     with pytest.raises(BuildConfigError):
         build_index(fixture_zim, **_build_kwargs(out_dir, embedding_model_name="other-model"))
+
+
+def test_build_writes_paths_aligned_with_ids(fixture_zim, tmp_path):
+    out_dir = tmp_path / "sidecar"
+    build_index(fixture_zim, **_build_kwargs(out_dir))
+    ids = read_ids(out_dir / IDS_FILENAME)
+    paths = read_ids(out_dir / PATHS_FILENAME)
+    assert len(paths) == len(ids)
+    assert all(paths)
+
+
+def test_resume_after_interruption_paths_byte_identical(fixture_zim, tmp_path):
+    out_dir_uninterrupted = tmp_path / "uninterrupted"
+    build_index(fixture_zim, **_build_kwargs(out_dir_uninterrupted))
+
+    out_dir_resumed = tmp_path / "resumed"
+    calls = {"n": 0}
+
+    def flaky_embed(texts: list[str]) -> list[list[float]]:
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise RuntimeError("simulated crash mid-build")
+        return fake_embed(texts)
+
+    with pytest.raises(RuntimeError):
+        build_index(fixture_zim, **_build_kwargs(out_dir_resumed, embed=flaky_embed))
+    build_index(fixture_zim, **_build_kwargs(out_dir_resumed))
+
+    a_paths = (out_dir_uninterrupted / PATHS_FILENAME).read_text(encoding="utf-8")
+    b_paths = (out_dir_resumed / PATHS_FILENAME).read_text(encoding="utf-8")
+    assert a_paths == b_paths
+
+
+def test_backfill_paths_matches_fresh_build(fixture_zim, tmp_path):
+    fresh_dir = tmp_path / "fresh"
+    build_index(fixture_zim, **_build_kwargs(fresh_dir))
+    fresh_paths = (fresh_dir / PATHS_FILENAME).read_text(encoding="utf-8")
+
+    old_dir = tmp_path / "old_format"
+    build_index(fixture_zim, **_build_kwargs(old_dir))
+    # Simulate an old-format sidecar (built before paths.txt existed) by
+    # removing its paths.txt.
+    (old_dir / PATHS_FILENAME).unlink()
+
+    n = backfill_paths(fixture_zim, old_dir, archive_id="fixture")
+    assert n == len(read_ids(old_dir / IDS_FILENAME))
+    backfilled_paths = (old_dir / PATHS_FILENAME).read_text(encoding="utf-8")
+    assert backfilled_paths == fresh_paths
+
+
+def test_backfill_paths_refuses_while_build_in_progress(fixture_zim, tmp_path):
+    out_dir = tmp_path / "sidecar"
+    calls = {"n": 0}
+
+    def flaky_embed(texts: list[str]) -> list[list[float]]:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("simulated crash")
+        return fake_embed(texts)
+
+    with pytest.raises(RuntimeError):
+        build_index(fixture_zim, **_build_kwargs(out_dir, embed=flaky_embed, checkpoint_every=1))
+
+    assert (out_dir / "checkpoint.json").exists()
+    assert not (out_dir / "manifest.json").exists()
+
+    with pytest.raises(BuildConfigError):
+        backfill_paths(fixture_zim, out_dir, archive_id="fixture")
+
+    # --force bypasses the guard (still succeeds since ids/paths recorded
+    # so far are consistent with what has actually been embedded).
+    backfill_paths(fixture_zim, out_dir, archive_id="fixture", force=True)
+
+
+def test_backfill_paths_aborts_on_mismatch(fixture_zim, tmp_path):
+    out_dir = tmp_path / "sidecar"
+    build_index(fixture_zim, **_build_kwargs(out_dir))
+    ids_path = out_dir / IDS_FILENAME
+    (out_dir / PATHS_FILENAME).unlink()
+    # Corrupt the first id so it can never match the recomputed one.
+    lines = ids_path.read_text(encoding="utf-8").splitlines()
+    lines[0] = "0" * 32
+    ids_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(BuildConfigError):
+        backfill_paths(fixture_zim, out_dir, archive_id="fixture")

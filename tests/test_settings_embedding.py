@@ -69,6 +69,61 @@ dim = 384
     # relative model_path resolves against [runtime].runtime_dir
     assert cfg.embedding.model_path.parent.name == "models"
     assert cfg.embedding.base_url == "http://127.0.0.1:8081"
+    # CPU-by-default fields (measured 2026-09-20: CPU is as fast as GPU here
+    # and frees VRAM for the chat model), with defaults when omitted.
+    assert cfg.embedding.n_gpu_layers == 0
+    assert cfg.embedding.threads == 4
+    assert cfg.embedding.ctx_size == 512
+    assert cfg.embedding.sidecar_dir.name == "simplewiki_dense"
+    assert cfg.embedding.sidecar_dir.parent.name == "runtime"
+    assert cfg.embedding.archive_id == "simplewiki"
+
+
+def test_embedding_table_explicit_cpu_fields(tmp_path: Path):
+    extra = """
+[embedding]
+host = "127.0.0.1"
+port = 8081
+model_path = "models/embedding.gguf"
+dim = 384
+n_gpu_layers = 5
+threads = 8
+ctx_size = 1024
+sidecar_dir = "runtime/other_dense"
+archive_id = "otherwiki"
+"""
+    cfg = load_config(_write(tmp_path, extra))
+    assert cfg.embedding.n_gpu_layers == 5
+    assert cfg.embedding.threads == 8
+    assert cfg.embedding.ctx_size == 1024
+    assert cfg.embedding.sidecar_dir.name == "other_dense"
+    assert cfg.embedding.archive_id == "otherwiki"
+
+
+def test_embedding_table_rejects_bad_threads(tmp_path: Path):
+    extra = """
+[embedding]
+host = "127.0.0.1"
+port = 8081
+model_path = "models/embedding.gguf"
+dim = 384
+threads = "four"
+"""
+    with pytest.raises(ConfigError, match="threads"):
+        load_config(_write(tmp_path, extra))
+
+
+def test_embedding_table_rejects_bad_n_gpu_layers(tmp_path: Path):
+    extra = """
+[embedding]
+host = "127.0.0.1"
+port = 8081
+model_path = "models/embedding.gguf"
+dim = 384
+n_gpu_layers = "zero"
+"""
+    with pytest.raises(ConfigError, match="n_gpu_layers"):
+        load_config(_write(tmp_path, extra))
 
 
 def test_embedding_table_requires_dim(tmp_path: Path):
@@ -119,6 +174,13 @@ dim = 384
     assert out[0].endswith("server.bin")
     assert "--embedding" in out
     assert "8081" in out
+    # CPU-by-default flags (see docs/dense_sidecar.md, "runs on the CPU").
+    assert "-ngl" in out
+    assert out[out.index("-ngl") + 1] == "0"
+    assert "-t" in out
+    assert out[out.index("-t") + 1] == "4"
+    assert "-c" in out
+    assert out[out.index("-c") + 1] == "512"
 
 
 def test_cli_argv_embedding_without_table_errors(tmp_path: Path, capsys):

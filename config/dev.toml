@@ -45,3 +45,15 @@ port = 8081
 # wrong directory. bge-small-en-v1.5 Q8_0 GGUF, 384-dim, ~37 MB.
 model_path = 'C:\git\kiwix-ai-tutor\runtime\models\embedding.gguf'
 dim = 384
+# CPU by default: measured 2026-09-20 on this machine, bge-small-en-v1.5
+# Q8_0 (37 MB, 384-dim), CPU, 4 threads, while a GPU build ran concurrently
+# -- single query p50 6.2ms (max 17.2ms/10), bulk 31.7 lead passages/s, vs.
+# 31.4 articles/s measured on the Vulkan GPU over the 2,000-article sample.
+# CPU is as fast, frees all VRAM for the chat model (matters on the 6 GB
+# delivery machine), and avoids a second Vulkan context. See
+# docs/dense_sidecar.md, "Embedding server runs on the CPU".
+n_gpu_layers = 0
+threads = 4
+ctx_size = 512
+sidecar_dir = "runtime/simplewiki_dense"
+archive_id = "simplewiki"

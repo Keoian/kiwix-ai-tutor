@@ -55,11 +55,13 @@ from tutor.retrieval.index.simplewiki_store import (
     CHECKPOINT_FILENAME,
     IDS_FILENAME,
     MANIFEST_FILENAME,
+    PATHS_FILENAME,
     VECTORS_FILENAME,
     append_bytes,
     append_ids,
     file_size,
     pack_vectors,
+    read_ids,
     truncate_to,
 )
 from tutor.retrieval.zim.archive import fingerprint as fingerprint_archive
@@ -139,6 +141,7 @@ def build_index(
     checkpoint_path = out_dir / CHECKPOINT_FILENAME
     vectors_path = out_dir / VECTORS_FILENAME
     ids_path = out_dir / IDS_FILENAME
+    paths_path = out_dir / PATHS_FILENAME
 
     checkpoint = read_checkpoint(checkpoint_path)
     if checkpoint is not None:
@@ -159,13 +162,18 @@ def build_index(
         # before resuming so no row is ever counted twice.
         truncate_to(vectors_path, checkpoint.vectors_bytes)
         truncate_to(ids_path, checkpoint.ids_bytes)
+        # paths.txt is row-aligned with ids.txt/vectors.fp16. An old
+        # checkpoint from before paths.txt existed has ``paths_bytes==0``
+        # (see BuildCheckpoint's default) and no paths.txt on disk;
+        # truncate_to tolerates a missing file at target size 0.
+        truncate_to(paths_path, checkpoint.paths_bytes)
         start_entry_id = checkpoint.next_entry_id
         count = checkpoint.count
         articles_processed = checkpoint.articles_processed
     else:
         # Fresh build: start the flat files from empty regardless of any
         # stray bytes left by an unrelated prior run in this directory.
-        for path in (vectors_path, ids_path):
+        for path in (vectors_path, ids_path, paths_path):
             if path.exists():
                 truncate_to(path, 0)
             else:
@@ -191,6 +199,7 @@ def build_index(
                 count=count,
                 vectors_bytes=file_size(vectors_path),
                 ids_bytes=file_size(ids_path),
+                paths_bytes=file_size(paths_path),
             ).to_dict(),
         )
 
@@ -218,6 +227,7 @@ def build_index(
         vectors = [_normalise(v) for v in vectors]
         append_bytes(vectors_path, pack_vectors(vectors, dim))
         append_ids(ids_path, [p.passage_id for _, p in pending])
+        append_ids(paths_path, [p.path for _, p in pending])
         count += len(pending)
         next_entry_id = pending[-1][0]
         pending.clear()
@@ -265,3 +275,77 @@ def build_index(
     )
     write_json_atomic(out_dir / MANIFEST_FILENAME, manifest.to_dict())
     return manifest
+
+
+def backfill_paths(
+    archive_path: Path,
+    out_dir: Path,
+    *,
+    archive_id: str,
+    force: bool = False,
+) -> int:
+    """Recompute ``paths.txt`` for a sidecar built before paths.txt existed.
+
+    Re-walks ``archive_path`` in exactly the builder's deterministic
+    order (see ``_iter_articles``), without calling any embedder,
+    recomputing each qualifying article's lead-passage id and asserting
+    it equals the corresponding row of the existing ``ids.txt`` --
+    row-by-row, aborting loudly on the first mismatch (a mismatch means
+    either the archive or the extractor has changed since the sidecar was
+    built, and the recomputed paths would silently mislabel rows).
+
+    ``archive_id`` must be the same value used to build the sidecar (it
+    feeds the passage-id hash, see ``passages._passage_id``); the id
+    comparison will fail loudly if a wrong value is supplied.
+
+    Refuses to run while a build looks to be in progress -- a checkpoint
+    present with no completed manifest -- unless ``force`` is set,
+    matching the safety rule the builder itself applies to its own
+    resume path.
+
+    Returns the number of paths written.
+    """
+    archive_path = Path(archive_path)
+    out_dir = Path(out_dir)
+    checkpoint_path = out_dir / CHECKPOINT_FILENAME
+    manifest_path = out_dir / MANIFEST_FILENAME
+    if checkpoint_path.exists() and not manifest_path.exists() and not force:
+        raise BuildConfigError(
+            f"a build appears to be in progress at {out_dir} (checkpoint present, "
+            "no manifest present); refusing to backfill paths.txt without force=True"
+        )
+
+    digest = fingerprint_archive(archive_path).digest
+    existing_ids = read_ids(out_dir / IDS_FILENAME)
+
+    archive = Archive(str(archive_path))
+    paths: list[str] = []
+    for article in _iter_articles(archive, start_entry_id=0):
+        bundle = build_bundle(article.html, path=article.path, title=article.title)
+        article_passages = split_passages(bundle, fingerprint_digest=digest, archive_id=archive_id)
+        if not article_passages:
+            continue
+        lead = article_passages[0]
+        row = len(paths)
+        if row >= len(existing_ids):
+            break
+        if lead.passage_id != existing_ids[row]:
+            raise BuildConfigError(
+                f"backfill mismatch at row {row}: ids.txt has {existing_ids[row]!r}, "
+                f"recomputed id for article {article.path!r} is {lead.passage_id!r} "
+                "-- refusing to write a possibly misaligned paths.txt "
+                "(archive, extractor version, or archive_id may have changed)"
+            )
+        paths.append(lead.path)
+
+    if len(paths) != len(existing_ids):
+        raise BuildConfigError(
+            f"backfill produced {len(paths)} paths but ids.txt has {len(existing_ids)} rows "
+            "-- refusing to write a misaligned paths.txt"
+        )
+
+    tmp_path = out_dir / (PATHS_FILENAME + ".tmp")
+    data = ("".join(f"{p}\n" for p in paths)).encode("utf-8")
+    tmp_path.write_bytes(data)
+    tmp_path.replace(out_dir / PATHS_FILENAME)
+    return len(paths)

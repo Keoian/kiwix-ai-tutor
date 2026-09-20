@@ -210,6 +210,40 @@ top-N candidate set) before the exact brute-force pass, rather than
 introducing an ANN index the reuse plan explicitly says to avoid at this
 size.
 
+## Embedding server runs on the CPU
+
+**Measured** on this machine, 2026-09-20, `bge-small-en-v1.5` Q8_0 (37 MB,
+384-dim), CPU, 4 threads, while a GPU build was running concurrently:
+
+- Single query embedding: p50 6.2 ms (max 17.2 ms over 10 queries).
+- Bulk: 31.7 lead passages/s.
+
+Versus **31.4 articles/s** measured on the Vulkan GPU over the
+2,000-article sample above. CPU is as fast as the GPU here, so
+`[embedding]` now defaults to `n_gpu_layers = 0` (CPU), `threads = 4`,
+`ctx_size = 512` (`tutor/settings.py`, `config/dev.toml`). Running the
+embedding server on CPU:
+
+- Frees all VRAM for the chat model — matters on the 6 GB delivery
+  machine, where the chat model and an embedding model both wanting GPU
+  memory would compete.
+- Avoids opening a second Vulkan context alongside the chat server's.
+- Makes the embedding server backend-independent on both Windows and
+  Linux, since it no longer depends on a working Vulkan/CUDA setup at all.
+
+`scripts/serve_embed.ps1` / `.sh` take the `-ngl`/`-t`/`-c` flags (and
+everything else) from `python -m tutor.settings --argv-embedding`, so
+this default lives in one place.
+
+**Assumption, not measured**: the full `runtime/simplewiki_dense` index
+build that was started on the GPU before this change switched the
+default to CPU is treated as numerically equivalent to a CPU-built index
+for retrieval purposes — same model file, same fp16 on-disk vector
+storage, so the vectors themselves don't depend on which backend produced
+them. That equivalence has not been independently verified by re-running
+the build on CPU and diffing outputs; it follows from the model and
+storage format being identical, not from a measurement.
+
 ## Running the full build
 
 The full Simple Wikipedia build (~394,566 entries, ~250k qualifying
