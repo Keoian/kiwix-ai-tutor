@@ -10,9 +10,111 @@
   const sourceViewerBody = document.getElementById("source-viewer-body");
   const statusPanelBody = document.getElementById("status-panel-body");
   const actionButtons = document.querySelectorAll("#action-bar button[data-action]");
+  const studentSelect = document.getElementById("student-select");
+  const newStudentBtn = document.getElementById("new-student-btn");
+  const newStudentForm = document.getElementById("new-student-form");
+  const newStudentName = document.getElementById("new-student-name");
+  const newStudentGrade = document.getElementById("new-student-grade");
+  const newLessonBtn = document.getElementById("new-lesson-btn");
+  const lessonResumeList = document.getElementById("lesson-resume-list");
 
   let sessionId = null;
   let currentAbortController = null;
+  let currentStudentId = null;
+  let lastTurnMeta = null;
+
+  // ---------------------------------------------------------------------
+  // Students / lessons (WP-C4: profile selector, new lesson, resume list)
+  // ---------------------------------------------------------------------
+
+  async function refreshStudents() {
+    try {
+      const resp = await fetch("/api/profiles");
+      if (!resp.ok) return;
+      const body = await resp.json();
+      studentSelect.textContent = "";
+      (body.profiles || []).forEach(function (profile) {
+        const opt = el("option", { text: profile.display_name });
+        opt.value = profile.id;
+        studentSelect.appendChild(opt);
+      });
+      if (body.profiles && body.profiles.length && !currentStudentId) {
+        currentStudentId = body.profiles[0].id;
+        studentSelect.value = currentStudentId;
+        refreshLessons();
+      }
+    } catch (err) {
+      // Offline/profiles-not-configured is non-fatal for the chat itself.
+    }
+  }
+
+  async function refreshLessons() {
+    if (!currentStudentId) return;
+    try {
+      const resp = await fetch("/api/profiles/" + encodeURIComponent(currentStudentId) + "/lessons");
+      if (!resp.ok) return;
+      const body = await resp.json();
+      lessonResumeList.textContent = "";
+      (body.lessons || []).forEach(function (lesson) {
+        const opt = el("option", {
+          text: lesson.subject + (lesson.ended ? " (ended)" : ""),
+        });
+        opt.value = lesson.id;
+        lessonResumeList.appendChild(opt);
+      });
+    } catch (err) {
+      // non-fatal
+    }
+  }
+
+  studentSelect.addEventListener("change", function () {
+    currentStudentId = studentSelect.value;
+    refreshLessons();
+  });
+
+  newStudentBtn.addEventListener("click", function () {
+    newStudentForm.hidden = !newStudentForm.hidden;
+  });
+
+  newStudentForm.addEventListener("submit", async function (evt) {
+    evt.preventDefault();
+    const name = newStudentName.value.trim();
+    if (!name) return;
+    try {
+      const resp = await fetch("/api/profiles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          display_name: name,
+          grade_level: parseInt(newStudentGrade.value, 10) || 0,
+          subjects: [subjectSelect.value],
+          reading_level: "grade" + (parseInt(newStudentGrade.value, 10) || 0),
+        }),
+      });
+      if (resp.ok) {
+        newStudentName.value = "";
+        newStudentGrade.value = "";
+        newStudentForm.hidden = true;
+        await refreshStudents();
+      }
+    } catch (err) {
+      // non-fatal
+    }
+  });
+
+  newLessonBtn.addEventListener("click", async function () {
+    if (!currentStudentId) return;
+    try {
+      await fetch("/api/profiles/" + encodeURIComponent(currentStudentId) + "/lessons", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subject: subjectSelect.value }),
+      });
+      await refreshLessons();
+    } catch (err) {
+      // non-fatal
+    }
+  });
 
   // ---------------------------------------------------------------------
   // DOM helpers (never assign markup as a page fragment: build nodes explicitly)
@@ -203,7 +305,8 @@
     } else if (eventName === "error") {
       appendError(data.message || "An error occurred.");
     } else if (eventName === "done") {
-      // stream complete; nothing further to render here.
+      lastTurnMeta = data;
+      refreshStatus();
     }
   }
 
@@ -317,6 +420,17 @@
     if (body.headroom != null) {
       rows.push(["Headroom", String(body.headroom)]);
     }
+    if (body.resources && body.resources.rss_mb != null) {
+      rows.push(["RSS (MB)", String(Math.round(body.resources.rss_mb))]);
+    }
+    if (body.last_turn) {
+      if (body.last_turn.route) rows.push(["Last route", String(body.last_turn.route)]);
+      if (body.last_turn.cached_tokens != null) {
+        rows.push(["Cached tokens", String(body.last_turn.cached_tokens)]);
+      }
+    } else if (lastTurnMeta && lastTurnMeta.route) {
+      rows.push(["Last route", String(lastTurnMeta.route)]);
+    }
     rows.forEach(function (pair) {
       statusPanelBody.appendChild(el("dt", { text: pair[0] }));
       statusPanelBody.appendChild(el("dd", { text: pair[1] }));
@@ -324,5 +438,6 @@
   }
 
   ensureSession().then(refreshStatus);
+  refreshStudents();
   setInterval(refreshStatus, 15000);
 })();

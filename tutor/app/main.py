@@ -37,6 +37,13 @@ class AppDeps:
     status_provider: Callable[..., dict]
     sessions: Any
     subjects: list[str]
+    # Optional (WP-C4): profiles / lessons / resource monitoring. Left as
+    # None by any deps built before this work package; routes guard on
+    # their presence rather than requiring them.
+    profiles: Any = None
+    lessons: Any = None
+    turn_logger: Any = None
+    resource_monitor: Any = None
 
 
 class _CSPMiddleware(BaseHTTPMiddleware):

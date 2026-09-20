@@ -28,10 +28,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from tutor.app.citations import resolve_citations
+from tutor.app.lesson_state import LessonStore
 from tutor.app.llm_client import LlamaClient, LlamaError, StreamEvent
 from tutor.app.main import AppDeps
+from tutor.app.profiles import ProfileStore
 from tutor.app.prompt import Budget
+from tutor.app.resources import ResourceMonitor
 from tutor.app.session import Session
+from tutor.app.turn_log import TurnLogger
 from tutor.retrieval.registry import Registry, RegistryError, load_registry
 from tutor.retrieval.research import ResearchEngine
 from tutor.retrieval.snapshots import SnapshotStore
@@ -181,6 +185,8 @@ def _make_turn_runner(*, sessions: _SessionStore, llm, research_engine, calc, bu
                     "route": result.route,
                     "research_calls": result.research_calls,
                     "calc_calls": result.calc_calls,
+                    "cached_tokens": result.cached_tokens or 0,
+                    "tokens_used": session.log.tokens_used(),
                 },
             )
         elif result.status == "cancelled":
@@ -198,6 +204,7 @@ def _make_status_provider(
     sessions: _SessionStore,
     budget: Budget,
     model_name: str,
+    resource_monitor: ResourceMonitor | None = None,
 ):
     def status_provider(session_id: str | None = None) -> dict:
         healthy = llm.health()
@@ -221,6 +228,15 @@ def _make_status_provider(
             "headroom": None,
             "last_eviction": None,
         }
+
+        if resource_monitor is not None:
+            sample = resource_monitor.sample()
+            result["resources"] = {
+                "rss_mb": sample.rss_mb,
+                "open_files": sample.open_files,
+                "thread_count": sample.thread_count,
+                "child_process_count": sample.child_process_count,
+            }
 
         if session_id is not None:
             session = sessions.get(session_id)
@@ -261,6 +277,11 @@ def build_deps(cfg: Any, *, llm: Any = None, research_engine: Any = None) -> App
     calc = _CalcTool()
     budget = Budget.for_ceiling(cfg.server.ctx_size)
 
+    profiles = ProfileStore(data_dir / "profiles.sqlite")
+    lessons = LessonStore(data_dir / "lessons.sqlite")
+    turn_logger = TurnLogger(data_dir / "logs" / "turns.jsonl")
+    resource_monitor = ResourceMonitor()
+
     turn_runner = _make_turn_runner(
         sessions=sessions,
         llm=llm,
@@ -274,6 +295,7 @@ def build_deps(cfg: Any, *, llm: Any = None, research_engine: Any = None) -> App
         sessions=sessions,
         budget=budget,
         model_name=cfg.runtime.model_path.name,
+        resource_monitor=resource_monitor,
     )
 
     return AppDeps(
@@ -282,4 +304,8 @@ def build_deps(cfg: Any, *, llm: Any = None, research_engine: Any = None) -> App
         status_provider=status_provider,
         sessions=sessions,
         subjects=["general", "math", "history"],
+        profiles=profiles,
+        lessons=lessons,
+        turn_logger=turn_logger,
+        resource_monitor=resource_monitor,
     )

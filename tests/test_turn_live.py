@@ -272,6 +272,64 @@ def test_action_never_triggers_research(live_app):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# (e) M5: append-only PromptLog reaches the server's prompt cache across turns
+# ---------------------------------------------------------------------------
+
+
+def test_second_turn_hits_prompt_cache_and_can_refer_to_first_turn(live_app):
+    """Two consecutive turns in one session: the second turn's rendered
+    messages must literally include the first turn's user text (the
+    plumbing proof that run_turn now reads/writes the session's
+    append-only PromptLog rather than a throwaway local list), and the
+    server-reported cached_tokens for turn 2 must be a large fraction of
+    turn 1's prompt tokens (the prompt-cache-hit proof of the byte-prefix
+    property in production)."""
+    client = live_app
+    sid = _sid(client)
+
+    first_question = "What is a right triangle?"
+    frames1 = _stream_turn(client, sid, {"text": first_question})
+    done1 = [d for n, d, _t in frames1 if n == "done"][0]
+    assert done1["status"] == "ok"
+
+    second_question = "Say briefly why that matters."
+    frames2 = _stream_turn(client, sid, {"text": second_question})
+    done2 = [d for n, d, _t in frames2 if n == "done"][0]
+    assert done2["status"] == "ok"
+
+    # Plumbing assertion: the session object's PromptLog (read directly,
+    # since this is the same in-process TestClient/app) must contain the
+    # first turn's user text -- proof that turn 2's messages were built
+    # from the same append-only log turn 1 wrote to.
+    rendered_text = json.dumps(_get_session_log(client, sid))
+    assert first_question in rendered_text
+
+    # Cache-hit assertion via the server's own reported usage: turn 2's
+    # cached_tokens should cover most of what was already sent in turn 1.
+    prompt_tokens_1 = done1.get("tokens_used")
+    cached_tokens_2 = done2.get("cached_tokens")
+    if not prompt_tokens_1 or cached_tokens_2 is None:
+        pytest.skip(
+            "turn 'done' events do not currently surface tokens_used/"
+            "cached_tokens over the wire; see docs/M5_notes.md"
+        )
+    assert cached_tokens_2 >= 0.7 * prompt_tokens_1
+
+
+def _get_session_log(client, sid):
+    """Best-effort access to the live app's in-process Session for
+    plumbing assertions; returns [] if the app doesn't expose it."""
+    app = client.app
+    deps = getattr(app.state, "deps", None)
+    if deps is None:
+        return []
+    session = deps.sessions.get(sid)
+    if session is None:
+        return []
+    return session.log.render()
+
+
 def test_status_reports_llm_healthy_and_archive_valid_ssd(live_app):
     client = live_app
     resp = client.get("/api/status")

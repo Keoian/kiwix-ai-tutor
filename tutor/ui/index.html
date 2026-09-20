@@ -16,6 +16,19 @@
         <option value="math">Math</option>
         <option value="history">History</option>
       </select>
+
+      <label id="student-label" for="student-select">Student</label>
+      <select id="student-select"></select>
+      <button id="new-student-btn" type="button">New student</button>
+      <form id="new-student-form" hidden>
+        <input id="new-student-name" type="text" placeholder="Display name" />
+        <input id="new-student-grade" type="number" placeholder="Grade" min="0" />
+        <button id="new-student-create" type="submit">Create</button>
+      </form>
+
+      <button id="new-lesson-btn" type="button">New lesson</button>
+      <label id="lesson-resume-label" for="lesson-resume-list">Resume lesson</label>
+      <select id="lesson-resume-list"></select>
     </header>
 
     <main id="main-area">

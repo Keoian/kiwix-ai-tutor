@@ -180,6 +180,34 @@ class PromptLog:
             {"role": "assistant", "content": text, "cited_labels": list(cited_labels)}
         )
 
+    def append_assistant_tool_calls(self, tool_calls: Iterable[dict]) -> None:
+        """Append an assistant message carrying tool calls, in the OpenAI
+        wire shape (``{"id","type":"function","function":{"name",
+        "arguments"}}``). Used to replay a tool-calling turn verbatim on
+        the next model call, per docs/M3_report.md's tool_calls replay
+        shape fix."""
+        if not self._turns:
+            raise RuntimeError(
+                "append_assistant_tool_calls requires an open turn (append_user first)"
+            )
+        self._turns[-1].append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [dict(tc) for tc in tool_calls],
+            }
+        )
+
+    def append_tool_result(self, *, tool_call_id: str, content: str) -> None:
+        """Append a tool-result message for a specific tool call id (role
+        "tool", ``tool_call_id`` set) -- distinct from ``append_evidence``'s
+        passages-shaped tool message."""
+        if not self._turns:
+            raise RuntimeError("append_tool_result requires an open turn (append_user first)")
+        self._turns[-1].append(
+            {"role": "tool", "tool_call_id": tool_call_id, "content": content}
+        )
+
     # -- render / accounting -------------------------------------------
 
     def render(self) -> list[dict]:
@@ -199,6 +227,8 @@ class PromptLog:
             return "\n".join(
                 f"[{p['label']}] {p['text']}" for p in message["passages"]
             )
+        if message.get("tool_calls"):
+            return json.dumps(message["tool_calls"], sort_keys=True)
         return message.get("content", "") or ""
 
     def tokens_used(self) -> int:

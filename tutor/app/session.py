@@ -18,9 +18,16 @@ class Session:
     """Mutable state for one tutoring lesson (one PromptLog's worth of
     conversation)."""
 
-    def __init__(self, count_tokens: Callable[[str], int], *, subject_hint: str | None = None):
+    def __init__(
+        self,
+        count_tokens: Callable[[str], int],
+        *,
+        subject_hint: str | None = None,
+        profile_summary: str | None = None,
+    ):
         self.log = PromptLog(count_tokens)
         self.subject_hint = subject_hint
+        self.profile_summary = profile_summary
         self.history: list[dict] = []
         self.retained_passages: dict[str, dict] = {}
         self._next_label_num = 1

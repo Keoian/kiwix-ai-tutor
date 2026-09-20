@@ -129,4 +129,54 @@ def build_router(deps: Any) -> APIRouter:
     def status(session_id: str | None = None):
         return deps.status_provider(session_id=session_id)
 
+    @router.get("/api/profiles")
+    def list_profiles():
+        if deps.profiles is None:
+            raise HTTPException(status_code=404, detail="profiles not configured")
+        return {
+            "profiles": [
+                {
+                    "id": p.id,
+                    "display_name": p.display_name,
+                    "grade_level": p.grade_level,
+                    "subjects": p.subjects,
+                    "reading_level": p.reading_level,
+                }
+                for p in deps.profiles.list()
+            ]
+        }
+
+    @router.post("/api/profiles")
+    def create_profile(body: dict):
+        if deps.profiles is None:
+            raise HTTPException(status_code=404, detail="profiles not configured")
+        profile_id = deps.profiles.create(
+            display_name=body.get("display_name", ""),
+            grade_level=body.get("grade_level", 0),
+            subjects=body.get("subjects", []),
+            reading_level=body.get("reading_level", ""),
+            preferences=body.get("preferences"),
+        )
+        return {"id": profile_id}
+
+    @router.get("/api/profiles/{profile_id}/lessons")
+    def list_lessons(profile_id: str):
+        if deps.lessons is None:
+            raise HTTPException(status_code=404, detail="lessons not configured")
+        return {
+            "lessons": [
+                {"id": lesson.id, "subject": lesson.subject, "ended": lesson.ended}
+                for lesson in deps.lessons.list_lessons(profile_id=profile_id)
+            ]
+        }
+
+    @router.post("/api/profiles/{profile_id}/lessons")
+    def start_lesson(profile_id: str, body: dict):
+        if deps.lessons is None:
+            raise HTTPException(status_code=404, detail="lessons not configured")
+        lesson_id = deps.lessons.start_lesson(
+            profile_id=profile_id, subject=body.get("subject", "")
+        )
+        return {"id": lesson_id}
+
     return router

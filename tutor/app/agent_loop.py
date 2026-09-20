@@ -33,7 +33,8 @@ import json
 import threading
 from dataclasses import dataclass, field
 
-from tutor.app.citations import render_evidence
+from tutor.app.citations import extract_labels, render_evidence
+from tutor.app.prompt import PromptOverflow
 from tutor.tools.schemas import TOOLS, validate_tool_call
 
 RESEARCH_CAP = 2
@@ -85,6 +86,41 @@ def _packet_from_response(response) -> dict:
     return {"passages": [_passage_to_dict(p) for p in (passages or [])]}
 
 
+def _to_wire_messages(rendered: list[dict]) -> list[dict]:
+    """Translate ``PromptLog.render()``'s internal message shapes into the
+    OpenAI-compatible wire shapes llama-server's ``/v1/chat/completions``
+    accepts: evidence's ``{"role": "tool", "passages": [...]}`` becomes a
+    plain ``{"role": "tool", "content": <rendered evidence text>}``, and
+    an assistant entry's internal ``cited_labels`` bookkeeping field
+    (never part of the wire schema) is dropped."""
+    wire: list[dict] = []
+    for message in rendered:
+        if message.get("passages") is not None:
+            wire.append(
+                {"role": message["role"], "content": render_evidence(message)}
+            )
+        elif message.get("role") == "assistant" and "cited_labels" in message:
+            wire.append({"role": "assistant", "content": message.get("content")})
+        else:
+            wire.append(message)
+    return wire
+
+
+def _trim_and_append_evidence(log, passages: list[dict], budget) -> None:
+    """Append ``passages`` as an evidence packet, trimming the
+    lowest-ranked (last) passages first if the full packet does not fit
+    ``budget.newest`` -- never crashing the turn on PromptOverflow."""
+    remaining = list(passages)
+    while True:
+        try:
+            log.append_evidence(remaining, budget=budget)
+            return
+        except PromptOverflow:
+            if not remaining:
+                raise
+            remaining = remaining[:-1]
+
+
 def run_turn(
     session,
     user_input,
@@ -96,33 +132,54 @@ def run_turn(
     emit,
     cancel: threading.Event | None = None,
 ) -> TurnResult:
-    del budget  # reserved for prompt-log integration; not needed by these unit tests
-
     research_calls = 0
     calc_calls = 0
     followup_research_used = False
+    events: list = []
+
+    log = getattr(session, "log", None)
+    use_log = log is not None and hasattr(log, "append_user")
 
     system_text = (
         "You are an offline tutor. Teach rather than answer outright, cite "
         "[S#] for source-backed statements, and use the calc tool before "
         "asserting arithmetic beyond single-digit numbers."
     )
-    messages: list[dict] = [{"role": "system", "content": system_text}]
+    profile_summary = getattr(session, "profile_summary", None)
+    if profile_summary:
+        system_text = f"{system_text} {profile_summary}"
+
+    if use_log:
+        try:
+            log.append_system(system_text)
+        except ValueError:
+            pass  # already appended on a prior turn of this session
+    else:
+        messages: list[dict] = [{"role": "system", "content": system_text}]
 
     if user_input.kind == "action":
         route = "action"
-        messages.append({"role": "user", "content": f"[action:{user_input.action}]"})
+        if use_log:
+            log.append_user(f"[action:{user_input.action}]")
+        else:
+            messages.append({"role": "user", "content": f"[action:{user_input.action}]"})
     else:
         route = "preretrieve"
-        messages.append({"role": "user", "content": user_input.text})
+        if use_log:
+            log.append_user(user_input.text)
+        else:
+            messages.append({"role": "user", "content": user_input.text})
         response = research_engine.research(
             user_input.text, topic_hint=getattr(session, "subject_hint", None)
         )
         research_calls += 1
         packet = _packet_from_response(response)
         _retain_passages(session, packet)
-        evidence_text = render_evidence(packet)
-        messages.append({"role": "tool", "content": f"[research results]\n{evidence_text}"})
+        if use_log:
+            _trim_and_append_evidence(log, packet["passages"], budget)
+        else:
+            evidence_text = render_evidence(packet)
+            messages.append({"role": "tool", "content": f"[research results]\n{evidence_text}"})
         emit({"kind": "tool_result", "name": "research"})
 
     while True:
@@ -133,7 +190,22 @@ def run_turn(
                 route=route,
                 research_calls=research_calls,
                 calc_calls=calc_calls,
+                events=events,
             )
+
+        if use_log:
+            eviction_event = log.evict(budget)
+            if eviction_event is not None:
+                events.append(eviction_event)
+                emit(
+                    {
+                        "kind": "eviction_reprefill",
+                        "evicted_turns": eviction_event.evicted_turns,
+                        "tokens_before": eviction_event.tokens_before,
+                        "tokens_after": eviction_event.tokens_after,
+                    }
+                )
+            messages = _to_wire_messages(log.render())
 
         answer_text_parts: list[str] = []
         tool_calls: list = []
@@ -163,6 +235,7 @@ def run_turn(
                 route=route,
                 research_calls=research_calls,
                 calc_calls=calc_calls,
+                events=events,
             )
 
         if finish_reason == "cancelled":
@@ -172,10 +245,13 @@ def run_turn(
                 route=route,
                 research_calls=research_calls,
                 calc_calls=calc_calls,
+                events=events,
             )
 
         if not tool_calls:
             answer_text = "".join(answer_text_parts)
+            if use_log:
+                log.append_assistant(answer_text, cited_labels=extract_labels(answer_text))
             return TurnResult(
                 status="ok",
                 answer_text=answer_text,
@@ -183,52 +259,50 @@ def run_turn(
                 research_calls=research_calls,
                 calc_calls=calc_calls,
                 cached_tokens=usage.get("cached_tokens", 0),
+                events=events,
             )
 
         # Record the assistant's tool-call turn, then dispatch each call.
-        messages.append(
+        wire_tool_calls = [
             {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": tc.arguments_json,
-                        },
-                    }
-                    for tc in tool_calls
-                ],
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.name,
+                    "arguments": tc.arguments_json,
+                },
             }
-        )
+            for tc in tool_calls
+        ]
+        if use_log:
+            log.append_assistant_tool_calls(wire_tool_calls)
+        else:
+            messages.append(
+                {"role": "assistant", "content": None, "tool_calls": wire_tool_calls}
+            )
+
+        def _append_tool_message(tool_call_id: str, content: str, _messages=messages) -> None:
+            if use_log:
+                log.append_tool_result(tool_call_id=tool_call_id, content=content)
+            else:
+                _messages.append(
+                    {"role": "tool", "tool_call_id": tool_call_id, "content": content}
+                )
 
         for tc in tool_calls:
             validation = validate_tool_call(tc.name, tc.arguments_json or "{}")
             if not validation.ok:
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": f"error: invalid tool call: {validation.error}",
-                    }
-                )
+                _append_tool_message(tc.id, f"error: invalid tool call: {validation.error}")
                 emit({"kind": "tool_result", "name": tc.name, "ok": False})
                 continue
 
             if tc.name == "research":
                 if research_calls >= RESEARCH_CAP:
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": (
-                                f"research cap of {RESEARCH_CAP} calls reached for this "
-                                "turn; answer with the supported portion or ask for "
-                                "clarification."
-                            ),
-                        }
+                    _append_tool_message(
+                        tc.id,
+                        f"research cap of {RESEARCH_CAP} calls reached for this "
+                        "turn; answer with the supported portion or ask for "
+                        "clarification.",
                     )
                 else:
                     response = research_engine.research(
@@ -240,48 +314,33 @@ def run_turn(
                     followup_research_used = True
                     packet = _packet_from_response(response)
                     _retain_passages(session, packet)
-                    evidence_text = render_evidence(packet)
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": f"[research results]\n{evidence_text}",
-                        }
-                    )
+                    if use_log:
+                        _trim_and_append_evidence(log, packet["passages"], budget)
+                    else:
+                        evidence_text = render_evidence(packet)
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc.id,
+                                "content": f"[research results]\n{evidence_text}",
+                            }
+                        )
                 emit({"kind": "tool_result", "name": "research"})
             elif tc.name == "calc":
                 if calc_calls >= CALC_CAP:
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": (
-                                f"calc cap of {CALC_CAP} calls reached for this turn."
-                            ),
-                        }
+                    _append_tool_message(
+                        tc.id, f"calc cap of {CALC_CAP} calls reached for this turn."
                     )
                 else:
                     calc_result = calc.evaluate(validation.arguments["expression"])
                     calc_calls += 1
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": json.dumps(calc_result),
-                        }
-                    )
+                    _append_tool_message(tc.id, json.dumps(calc_result))
                 emit({"kind": "tool_result", "name": "calc"})
             else:
                 # Unreachable: validate_tool_call already rejects unknown
                 # tool names, but keep the loop total in case of future
                 # tool additions with no dispatch branch yet.
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": f"error: no dispatcher for tool {tc.name}",
-                    }
-                )
+                _append_tool_message(tc.id, f"error: no dispatcher for tool {tc.name}")
 
         if followup_research_used and route == "preretrieve":
             route = "preretrieve+followup"
