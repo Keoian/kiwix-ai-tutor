@@ -46,6 +46,7 @@ class ServerConfig:
     flash_attn: bool
     jinja: bool
     slots: bool
+    extra_args: tuple[str, ...] = ()
 
     @property
     def base_url(self) -> str:
@@ -70,6 +71,7 @@ class ServerConfig:
             argv.append("--jinja")
         if self.slots:
             argv.append("--slots")
+        argv.extend(self.extra_args)
         return argv
 
 
@@ -201,6 +203,13 @@ def load_config(path: Path) -> Config:
     jinja = _get(server_table, "server", "jinja", bool)
     slots = _get(server_table, "server", "slots", bool)
 
+    extra_args_value = server_table.get("extra_args", [])
+    if not isinstance(extra_args_value, list) or not all(
+        isinstance(item, str) for item in extra_args_value
+    ):
+        raise ConfigError("'extra_args' in [server] must be a list of strings")
+    extra_args = tuple(extra_args_value)
+
     if ctx_size <= 0:
         raise ConfigError("ctx_size must be a positive integer")
     if cache_type_k not in _VALID_CACHE_TYPES:
@@ -223,6 +232,7 @@ def load_config(path: Path) -> Config:
         flash_attn=flash_attn,
         jinja=jinja,
         slots=slots,
+        extra_args=extra_args,
     )
 
     temperature = _get(sampling_table, "sampling", "temperature", float)
