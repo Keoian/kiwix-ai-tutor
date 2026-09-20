@@ -34,6 +34,11 @@ _CONTEXT = mp.get_context("spawn")
 # tests to exercise the deadline/crash/restart machinery in isolation.
 _TEST_ONLY_OPS = {"sleep", "crash"}
 
+# docs/worker_batching_design.md: cap a batch at 16 sub-ops (above the ~10
+# worst case per archive today), so one caller mistake can't turn a single
+# ``multi`` call into an unbounded amount of child-side work.
+_MULTI_BATCH_CAP = 16
+
 
 class WorkerClosed(Exception):
     """Raised by :meth:`ZimWorker.request` after :meth:`ZimWorker.close`."""
@@ -95,22 +100,66 @@ def _child_main(archive_path_str: str, conn: Connection) -> None:
             conn.send(("ok", None, None))
             continue
 
-        try:
-            if op == "search_fulltext":
-                value = search_fulltext(
-                    archive, kwargs["query"], limit=kwargs.get("limit", 20)
+        def _run_single_op(sub_op: str, sub_kwargs: dict) -> Any:
+            """Execute one non-``multi`` op; raises on failure/unknown op."""
+            if sub_op == "ping":
+                return None
+            if sub_op == "sleep":
+                time.sleep(float(sub_kwargs.get("seconds", 0.0)))
+                return None
+            if archive is None:
+                raise RuntimeError(archive_error or "archive not available")
+            if sub_op == "search_fulltext":
+                return search_fulltext(
+                    archive, sub_kwargs["query"], limit=sub_kwargs.get("limit", 20)
                 )
-            elif op == "search_titles":
-                value = search_titles(
-                    archive, kwargs["query"], limit=kwargs.get("limit", 10)
+            if sub_op == "search_titles":
+                return search_titles(
+                    archive, sub_kwargs["query"], limit=sub_kwargs.get("limit", 10)
                 )
-            elif op == "fetch_entry":
-                value = fetch_entry(archive, kwargs["path"])
-            elif op == "estimated_matches":
-                value = estimated_matches(archive, kwargs["term"])
-            else:
-                conn.send(("error", None, f"unknown op: {op}"))
+            if sub_op == "fetch_entry":
+                return fetch_entry(archive, sub_kwargs["path"])
+            if sub_op == "estimated_matches":
+                return estimated_matches(archive, sub_kwargs["term"])
+            raise ValueError(f"unknown op: {sub_op}")
+
+        if op == "multi":
+            ops = kwargs.get("ops") or []
+            if not isinstance(ops, list) or len(ops) > _MULTI_BATCH_CAP:
+                conn.send(
+                    (
+                        "error",
+                        None,
+                        f"multi batch of {len(ops)} exceeds cap of {_MULTI_BATCH_CAP}",
+                    )
+                )
                 continue
+            deadline_s = kwargs.get("deadline_s")
+            batch_started = time.monotonic()
+            results: list[dict[str, Any]] = []
+            batch_status = "ok"
+            for sub_op, sub_kwargs in ops:
+                if deadline_s is not None and (time.monotonic() - batch_started) > deadline_s:
+                    results.append(
+                        {
+                            "status": "error",
+                            "value": None,
+                            "error": "deadline exceeded before this sub-op",
+                        }
+                    )
+                    batch_status = "partial"
+                    continue
+                try:
+                    value = _run_single_op(sub_op, sub_kwargs)
+                except Exception as exc:  # noqa: BLE001 - reported in this entry only
+                    results.append({"status": "error", "value": None, "error": str(exc)})
+                    continue
+                results.append({"status": "ok", "value": value, "error": None})
+            conn.send((batch_status, results, None))
+            continue
+
+        try:
+            value = _run_single_op(op, kwargs)
         except Exception as exc:  # noqa: BLE001 - reported to parent, not raised
             conn.send(("error", None, str(exc)))
             continue
@@ -199,8 +248,13 @@ class ZimWorker:
             self._start_locked()
             assert self._conn is not None
             started = time.monotonic()
+            # ``multi``'s child-side handler needs the batch deadline itself
+            # (to budget-check between sub-ops, see
+            # docs/worker_batching_design.md), not just the parent's own
+            # poll timeout below, so it rides along in the wire kwargs too.
+            wire_kwargs = {**kwargs, "deadline_s": deadline_s} if op == "multi" else kwargs
             try:
-                self._conn.send((op, kwargs))
+                self._conn.send((op, wire_kwargs))
             except (OSError, EOFError, BrokenPipeError) as exc:
                 self._terminate_child_locked()
                 return WorkerResult(
@@ -234,6 +288,21 @@ class ZimWorker:
             return WorkerResult(
                 status=status, value=value, error=error, elapsed_s=time.monotonic() - started
             )
+
+    def multi(
+        self, ops: list[tuple[str, dict[str, Any]]], *, deadline_s: float
+    ) -> WorkerResult:
+        """Batch several sub-ops into a single round-trip (see
+        ``docs/worker_batching_design.md``). A thin wrapper over
+        :meth:`request`: sends ``ops`` (and ``deadline_s`` again, so the
+        child can budget-check between sub-ops) as the ``"multi"`` op's
+        kwargs, no client-side logic beyond the batch-size cap.
+        """
+        if len(ops) > _MULTI_BATCH_CAP:
+            raise ValueError(
+                f"multi() batch of {len(ops)} exceeds cap of {_MULTI_BATCH_CAP}"
+            )
+        return self.request("multi", deadline_s=deadline_s, ops=ops)
 
     def interrupt(self) -> None:
         """Kill the current child (if any) without closing the worker.

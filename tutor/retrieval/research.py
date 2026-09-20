@@ -552,16 +552,21 @@ class ResearchResponse:
         }
 
 
-def _call_worker(worker: Any, op: str, *, deadline_s: float, **kwargs: Any) -> WorkerResult | None:
-    """Call ``worker.request`` off-thread so a misbehaving worker can never
-    block the caller past ``deadline_s`` (+ small slack), regardless of what
-    the worker implementation itself does with its own ``deadline_s``.
+def _call_worker_dispatch(
+    worker: Any, deadline_s: float, call: Callable[[], WorkerResult]
+) -> WorkerResult | None:
+    """Run ``call`` (a closure invoking ``worker.request``) off-thread so a
+    misbehaving worker can never block the caller past ``deadline_s`` (+
+    small slack), regardless of what the worker implementation itself does
+    with its own ``deadline_s``. Shared by :func:`_call_worker` (single op)
+    and :func:`_call_worker_multi` (batched ``multi`` op, see
+    ``docs/worker_batching_design.md``).
     """
     result_box: queue.Queue[WorkerResult] = queue.Queue(maxsize=1)
 
     def _target() -> None:
         try:
-            result_box.put(worker.request(op, deadline_s=deadline_s, **kwargs))
+            result_box.put(call())
         except Exception as exc:  # noqa: BLE001 - reported as a worker error
             result_box.put(
                 WorkerResult(status="error", value=None, error=str(exc), elapsed_s=0.0)
@@ -575,8 +580,8 @@ def _call_worker(worker: Any, op: str, *, deadline_s: float, **kwargs: Any) -> W
         # The worker call outlived its deadline. Kill the child so the
         # in-flight request unblocks (its `conn.poll`/`conn.recv` inside
         # `worker.request` returns instead of being abandoned mid-call),
-        # then join the thread briefly so the next `_call_worker` on this
-        # worker cannot overlap with a still-running previous request.
+        # then join the thread briefly so the next dispatch on this worker
+        # cannot overlap with a still-running previous request.
         interrupt = getattr(worker, "interrupt", None)
         interrupted = False
         if callable(interrupt):
@@ -591,6 +596,28 @@ def _call_worker(worker: Any, op: str, *, deadline_s: float, **kwargs: Any) -> W
             # to this worker with a request thread that is still finishing.
             thread.join(timeout=_THREAD_JOIN_TIMEOUT_S)
         return None
+
+
+def _call_worker(worker: Any, op: str, *, deadline_s: float, **kwargs: Any) -> WorkerResult | None:
+    """Call ``worker.request`` off-thread; see :func:`_call_worker_dispatch`."""
+    return _call_worker_dispatch(
+        worker, deadline_s, lambda: worker.request(op, deadline_s=deadline_s, **kwargs)
+    )
+
+
+def _call_worker_multi(
+    worker: Any, ops: list[tuple[str, dict[str, Any]]], *, deadline_s: float
+) -> WorkerResult | None:
+    """Batch ``ops`` into a single ``multi`` round-trip (see
+    ``docs/worker_batching_design.md``); off-thread the same way as
+    :func:`_call_worker`. ``result.value`` (when not ``None``) is a list,
+    same order/length as ``ops``, of ``{"status", "value", "error"}`` dicts.
+    """
+    if not ops:
+        return WorkerResult(status="ok", value=[], error=None, elapsed_s=0.0)
+    return _call_worker_dispatch(
+        worker, deadline_s, lambda: worker.request("multi", deadline_s=deadline_s, ops=ops)
+    )
 
 
 def _call_bounded(
@@ -808,7 +835,9 @@ class ResearchEngine:
                 return [], True
             return (res.value or []), False
 
-        def _search_with_fallback(op: str, limit: int) -> tuple[list[Any], bool, bool]:
+        def _search_with_fallback(
+            op: str, limit: int, initial_hits: list[Any], initial_failed: bool
+        ) -> tuple[list[Any], bool, bool]:
             # Xapian's query parser ANDs bare terms together, so a natural-
             # language question with a stray non-corpus/misspelt word (e.g.
             # "farenheit") can zero out an otherwise-good query. When the
@@ -826,7 +855,7 @@ class ResearchEngine:
             # "used_fallback" key below) purely for observability --
             # coverage itself is judged by term/title overlap (see
             # ``compute_coverage``), not by which search path found it.
-            hits, failed = _search(op, search_query, limit)
+            hits, failed = initial_hits, initial_failed
             if hits or failed or not tokens:
                 return hits, failed, False
             nonlocal fallback_searches_used
@@ -864,11 +893,34 @@ class ResearchEngine:
             merged = [first_hit[p] for p in ordered_paths]
             return merged[:limit], any_failed, True
 
+        # Call site 1 (docs/worker_batching_design.md): the initial
+        # fulltext+titles searches over the same joined ``search_query``
+        # are independent of each other, so they go out as one ``multi``
+        # round-trip instead of two. Only this first attempt is batched --
+        # the conditional per-token/fallback searches below still depend on
+        # these results, so they stay separate calls.
+        initial_ops = [
+            ("search_fulltext", {"query": search_query, "limit": _FULLTEXT_LIMIT}),
+            ("search_titles", {"query": search_query, "limit": _TITLE_LIMIT}),
+        ]
+        initial_res = _call_worker_multi(worker, initial_ops, deadline_s=_op_deadline())
+
+        def _unpack_initial(index: int) -> tuple[list[Any], bool]:
+            if initial_res is None or initial_res.status not in ("ok", "partial"):
+                return [], True
+            sub_result = initial_res.value[index]
+            if sub_result["status"] != "ok":
+                return [], True
+            return (sub_result["value"] or []), False
+
+        fulltext_initial_hits, fulltext_initial_failed = _unpack_initial(0)
+        title_initial_hits, title_initial_failed = _unpack_initial(1)
+
         fulltext_hits, fulltext_failed, fulltext_fallback = _search_with_fallback(
-            "search_fulltext", _FULLTEXT_LIMIT
+            "search_fulltext", _FULLTEXT_LIMIT, fulltext_initial_hits, fulltext_initial_failed
         )
         title_hits, title_failed, title_fallback = _search_with_fallback(
-            "search_titles", _TITLE_LIMIT
+            "search_titles", _TITLE_LIMIT, title_initial_hits, title_initial_failed
         )
         timed_out = timed_out or fulltext_failed or title_failed
 
@@ -904,12 +956,57 @@ class ResearchEngine:
             # words; letting one occupy a scarce IDF-lookup slot can crowd
             # out a genuinely rare term the scorer needs.
             unique_tokens = [t for t in dict.fromkeys(tokens) if len(t) > 1]
-            for i, term in enumerate(unique_tokens):
-                if i >= _MAX_ENTITY_TERM_SEARCHES or remaining() <= 0:
-                    break
-                term_matches[term] = self._term_matches(
-                    entry, worker, term, deadline_s=_op_deadline()
+            # Call site 2 (docs/worker_batching_design.md): up to
+            # ``_MAX_ENTITY_TERM_SEARCHES`` independent ``estimated_matches``
+            # lookups, cache-checked first (same as the unbatched
+            # ``_term_matches`` path), batched into one ``multi`` round-trip
+            # for whichever terms are not already cached.
+            candidate_terms = (
+                unique_tokens[:_MAX_ENTITY_TERM_SEARCHES] if remaining() > 0 else []
+            )
+            uncached_terms: list[str] = []
+            for term in candidate_terms:
+                cache_key = (self._fingerprint_digest(entry), term)
+                cached = self._idf_cache.get(cache_key)
+                if cached is not None:
+                    self._idf_cache.move_to_end(cache_key)
+                    term_matches[term] = cached
+                else:
+                    uncached_terms.append(term)
+            if uncached_terms and remaining() > 0:
+                matches_res = _call_worker_multi(
+                    worker,
+                    [("estimated_matches", {"term": t}) for t in uncached_terms],
+                    deadline_s=_op_deadline(),
                 )
+                for i, term in enumerate(uncached_terms):
+                    sub_result = (
+                        matches_res.value[i]
+                        if matches_res is not None
+                        and matches_res.status in ("ok", "partial")
+                        else None
+                    )
+                    if (
+                        sub_result is not None
+                        and sub_result["status"] == "ok"
+                        and sub_result["value"] is not None
+                    ):
+                        matches = int(sub_result["value"])
+                        term_matches[term] = matches
+                        cache_key = (self._fingerprint_digest(entry), term)
+                        self._idf_cache[cache_key] = matches
+                        self._idf_cache.move_to_end(cache_key)
+                        while len(self._idf_cache) > _IDF_CACHE_MAXSIZE:
+                            self._idf_cache.popitem(last=False)
+                    else:
+                        # Degrade to "no rarity signal" (same as
+                        # ``_term_matches`` on a single-op failure); never
+                        # cached, so a transient failure can't poison the
+                        # cache for the process lifetime.
+                        term_matches[term] = 0
+            else:
+                for term in uncached_terms:
+                    term_matches[term] = 0
             # Rarest (fewest corpus-wide matches) first; a term with zero
             # matches anywhere in the archive (a misspelling) carries no
             # rarity signal and is dropped, same rationale as
@@ -920,23 +1017,42 @@ class ResearchEngine:
             )
             entity_title_hits: list[Any] = []
             entity_snippet_hits: list[Any] = []
-            for term in rarity_order[:_ENTITY_TITLE_LIMIT]:
-                hits, failed = _search("search_titles", term, _ENTITY_TITLE_RESULTS)
-                timed_out = timed_out or failed
-                entity_title_hits.extend(hits)
-                # `search_titles` never returns a snippet (real worker,
-                # confirmed against the live archive -- only the FakeWorker
-                # test fixture happened to synthesize one), so the scorer
-                # below would see title-only coordination for these
-                # candidates and fall back to raw corpus-IDF magnitude
-                # alone -- exactly the Baseline v5 case A bug ("Celsius"
-                # has fewer real corpus hits than "Helium", so it would win
-                # on IDF alone with no lead-text tiebreaker). One extra
-                # single-term full-text search per rarest term gets a real
-                # snippet (lead-text proxy) for the same top article.
-                snip_hits, snip_failed = _search("search_fulltext", term, 1)
-                timed_out = timed_out or snip_failed
-                entity_snippet_hits.extend(snip_hits)
+            # Call site 3 (docs/worker_batching_design.md): title+snippet
+            # for each of the top rarest terms are independent, so all of
+            # them (up to ``_ENTITY_TITLE_LIMIT`` terms x 2 ops) go out as
+            # one ``multi`` round-trip. `search_titles` never returns a
+            # snippet (real worker, confirmed against the live archive --
+            # only the FakeWorker test fixture happened to synthesize one),
+            # so the scorer below would see title-only coordination for
+            # these candidates and fall back to raw corpus-IDF magnitude
+            # alone -- exactly the Baseline v5 case A bug ("Celsius" has
+            # fewer real corpus hits than "Helium", so it would win on IDF
+            # alone with no lead-text tiebreaker). One extra single-term
+            # full-text search per rarest term gets a real snippet
+            # (lead-text proxy) for the same top article.
+            entity_terms = rarity_order[:_ENTITY_TITLE_LIMIT]
+            if entity_terms:
+                entity_ops: list[tuple[str, dict[str, Any]]] = []
+                for term in entity_terms:
+                    entity_ops.append(
+                        ("search_titles", {"query": term, "limit": _ENTITY_TITLE_RESULTS})
+                    )
+                    entity_ops.append(("search_fulltext", {"query": term, "limit": 1}))
+                entity_res = _call_worker_multi(worker, entity_ops, deadline_s=_op_deadline())
+                for i in range(len(entity_terms)):
+                    if entity_res is None or entity_res.status not in ("ok", "partial"):
+                        timed_out = True
+                        continue
+                    title_sub = entity_res.value[2 * i]
+                    snip_sub = entity_res.value[2 * i + 1]
+                    if title_sub["status"] == "ok":
+                        entity_title_hits.extend(title_sub["value"] or [])
+                    else:
+                        timed_out = True
+                    if snip_sub["status"] == "ok":
+                        entity_snippet_hits.extend(snip_sub["value"] or [])
+                    else:
+                        timed_out = True
             # Rarity picks WHICH terms to search directly (a good discovery
             # signal: a rare term is likely to be the entity itself), but
             # is not itself the right signal to rank the resulting entity
@@ -1112,23 +1228,38 @@ class ResearchEngine:
         key_fact_top_paths = top_paths[:2]
         key_fact_bundles: dict[str, Any] = {}
 
+        # Call site 4 (docs/worker_batching_design.md): fetching every top
+        # article is independent, so all of ``top_paths`` (up to
+        # ``_top_n_articles + 1``) go out as one ``multi`` round-trip
+        # instead of one ``fetch_entry`` per path.
         candidate_passages: list[Any] = []
-        for path in top_paths:
-            if remaining() <= 0:
-                timed_out = True
-                break
+        if top_paths and remaining() > 0:
             fetch_deadline = max(_MIN_OP_DEADLINE_S, min(_PER_OP_DEADLINE_CAP_S, remaining()))
-            fetch_res = _call_worker(worker, "fetch_entry", deadline_s=fetch_deadline, path=path)
-            if fetch_res is None or fetch_res.status != "ok":
-                timed_out = True
-                continue
-            fetched = fetch_res.value
-            bundle = build_bundle(fetched.html, path=fetched.path, title=fetched.title)
-            if path in key_fact_top_paths:
-                key_fact_bundles[path] = bundle
-            candidate_passages.extend(
-                split_passages(bundle, fingerprint_digest=fingerprint_digest, archive_id=entry.id)
+            fetch_res = _call_worker_multi(
+                worker,
+                [("fetch_entry", {"path": path}) for path in top_paths],
+                deadline_s=fetch_deadline,
             )
+            if fetch_res is None or fetch_res.status not in ("ok", "partial"):
+                timed_out = True
+            else:
+                if fetch_res.status == "partial":
+                    timed_out = True
+                for path, sub_result in zip(top_paths, fetch_res.value, strict=True):
+                    if sub_result["status"] != "ok":
+                        timed_out = True
+                        continue
+                    fetched = sub_result["value"]
+                    bundle = build_bundle(fetched.html, path=fetched.path, title=fetched.title)
+                    if path in key_fact_top_paths:
+                        key_fact_bundles[path] = bundle
+                    candidate_passages.extend(
+                        split_passages(
+                            bundle, fingerprint_digest=fingerprint_digest, archive_id=entry.id
+                        )
+                    )
+        elif top_paths:
+            timed_out = True
 
         own_terms_for_key_facts = frozenset(tokenize(strip_instruction_words(query)))
         key_fact_results: list[dict[str, Any]] = []

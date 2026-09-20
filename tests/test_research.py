@@ -750,6 +750,14 @@ class _EntityFakeWorker:
         ]
 
     def request(self, op: str, *, deadline_s: float, **kwargs) -> WorkerResult:
+        if op == "multi":
+            results = []
+            for sub_op, sub_kwargs in kwargs.get("ops", []):
+                sub_res = self.request(sub_op, deadline_s=deadline_s, **sub_kwargs)
+                results.append(
+                    {"status": sub_res.status, "value": sub_res.value, "error": sub_res.error}
+                )
+            return WorkerResult(status="ok", value=results, error=None, elapsed_s=0.0)
         if op == "estimated_matches":
             term = kwargs["term"]
             return WorkerResult(
