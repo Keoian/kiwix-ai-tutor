@@ -208,6 +208,9 @@ _ALLOWED_NON_STDLIB_IMPORTS = {"libzim", "bs4", "soupsieve", "tutor", "typing_ex
 def test_archive_module_import_hygiene() -> None:
     script = (
         "import sys\n"
+        # libzim is one compiled extension that registers helper modules of its own on
+        # import, so the baseline is taken after the permitted third-party imports.
+        "import libzim.reader, libzim.search, libzim.suggestion, libzim.writer, bs4\n"
         "before = set(sys.modules)\n"
         "import tutor.retrieval.zim.archive\n"
         "after = set(sys.modules)\n"
