@@ -876,3 +876,219 @@ All new/changed unit tests pass (`tests/test_research.py`,
 `expected_paths` were all verified to resolve to real, correctly-titled
 articles in the real archive (see the task's verification script); no
 corrections were needed.
+
+## Baseline v5: article scoring, elliptical anaphora, relevance-cutoff
+packing (2026-09-20)
+
+Baseline v4 fixed the "AND succeeds but wrong" candidate-generation gap
+(Helium now surfaces at all) by **force-inserting** the rarest-term title
+hit ahead of the RRF-fused order ("guaranteed slot"). That traded rank-1
+accuracy broadly for a narrow fix: it can only ever *promote* one path, it
+never actually re-ranks candidates against each other, so on real
+archive/tuning data it regressed recall@1 (0.500→0.357) and MRR
+(0.520→0.487) while pushing recall@5 up (0.548→0.714), on top of an
+independent elliptical-coverage regression (n=2 → 0) and mean latency
+already above the ≤1 s warm target (0.934→1.327 s).
+
+### Tuning split (warm, n=42) -- v2 / v4 / v5
+
+| metric (overall) | v2-era* | v4 | v5 |
+|---|---|---|---|
+| recall@1 | 0.500 | 0.357 | **0.571** |
+| recall@5 | n/a | 0.714 | **0.762** |
+| MRR | n/a | 0.487 | **0.622** |
+| mean latency (s) | n/a | 1.327 | 1.613 |
+| p95 latency (s) | n/a | 2.890 | 3.437 |
+
+\* v2-era recall@1 (0.500) is the pre-v4 n=30 tuning number quoted in the
+task brief as the floor to reclaim; v2/v3 did not report recall@1/MRR/p95
+on the current n=42 question set, so only the single comparable number is
+carried forward as a column heading rather than fabricating the rest.
+
+| category | recall@1 v4 → v5 | recall@5 v4 → v5 | MRR v4 → v5 |
+|---|---|---|---|
+| absent | 0.500 → 0.500 | 0.500 → 0.500 | 0.500 → 0.500 |
+| comparison | 0.600 → 0.400 | 1.000 → 1.000 | 0.717 → 0.573 |
+| direct | 0.800 → **1.000** | 1.000 → 1.000 | 0.867 → 1.000 |
+| elliptical | 0.000 → **0.500** | 0.000 → **1.000** | 0.000 → 0.667 |
+| false_premise | 0.000 → 0.333 | 0.667 → 0.667 | 0.306 → 0.400 |
+| student_phrasing | 0.083 → 0.500 | 0.583 → 0.500 | 0.285 → 0.500 |
+| tables_formulas | 0.333 → 0.333 | 1.000 → 1.000 | 0.511 → 0.467 |
+| why_how | 0.200 → 0.400 | 0.400 → 0.600 | 0.267 → 0.467 |
+
+Full before/after reports: `data/tuning_v5_before.md` (identical to v4's
+numbers -- run first, before any code change) and
+`data/tuning_v5_after.md`.
+
+### Item 1: article SCORING replaces slot-forcing
+
+`_score_articles` (`tutor/retrieval/research.py`) scores every candidate
+article path by IDF-weighted coordination of the question's own terms
+over (title, lead-text-or-search-snippet), plus a title bonus
+proportional to the IDF of the title-matched term(s) *and* to how much of
+the title those terms cover (`title_coverage_frac`). This is fused via
+the existing `rrf_fuse` alongside the reuse plan's three lexical/dense
+rankings (fulltext, title, dense) -- not used to force a slot. Two
+refinements were needed to make this work on the **real** archive (a
+FakeWorker-only fixture is not enough, since it does not reproduce the
+real worker's behavior faithfully -- see below):
+
+1. **`search_titles` never returns a snippet on the real worker** (only
+   `search_fulltext` does) -- confirmed against
+   `C:\kiwix\wikipedia_en_simple_all_maxi_2026-05.zim` directly. Without a
+   real lead-text signal, entity-title candidates found via
+   `search_titles` (e.g. "Celsius", "Helium") can only be scored on
+   title-term IDF, and raw corpus-IDF alone is not always the right
+   signal: "Celsius" (222 real corpus hits) is numerically *rarer* than
+   "Helium" (332 hits) in the real simplewiki archive, so a pure
+   IDF-coordination scorer ranks Celsius first for "the boiling point of
+   helium in celsius" -- reproducing the exact "Celsius above Helium"
+   case A bug from a different mechanism than v4's. Fix: one extra
+   single-term `search_fulltext` call per rarest term (bounded, same
+   budget as the existing entity-candidate searches) fetches a real
+   snippet for the same top article, feeding real lead-text coordination
+   into the scorer.
+2. **Syntactic role re-weighting** (`_term_role_weights`): even with real
+   lead text, "the boiling point of helium in celsius" genuinely
+   coordinates well with *both* Celsius's and Helium's real lead
+   paragraphs (Celsius's own lead literally says "100°C is the boiling
+   point of water"), so pure bag-of-words coordination still cannot
+   reliably separate "the entity being asked about" from "the unit it's
+   expressed in" on real text. A cheap, defensible heuristic re-weights
+   own terms by their preposition role: a term following "of" or in
+   possessive form ("X's Y") is entity-marked (2.5x); a bare noun
+   following "in" is unit/modifier-marked (0.3x) -- this is not a special
+   case for helium/celsius, it is a general English pattern ("capital of
+   France", "in fahrenheit", "author of the book").
+3. The per-token-fallback's own generic "matched term count, then local
+   rarity" merge order for `fulltext_hits`/`title_hits` was replaced with
+   a re-sort by the same scorer before fusion (not just adding one more
+   equal-weight ranking), because several generic co-occurring articles
+   (every "Boiling ..." title matching both "boiling" and "point") voted
+   for by 3 of 3 fused rankings can otherwise still out-count the one
+   true entity article the scorer ranks far higher but which is missing
+   from one of the input rankings.
+
+**Verification (spawn-safe, real archive):** `data/helium_repro_v5.py`
+runs cases A/B/C from the task brief against
+`config/archives.simplewiki_only.toml` and confirms Helium ranks
+**first** (not merely top-2) in all three:
+
+```
+case_a: status=ok top=Helium rank1_helium=True
+case_b: status=ok top=Helium rank1_helium=True
+case_c: status=ok top=Helium rank1_helium=True
+ALL_RANK1_HELIUM
+```
+
+Unit tests (deterministic FakeWorker, `tests/test_research.py`):
+`test_helium_article_scoring_ranks_helium_first` (parametrized
+case_a/b/c) and `test_direct_style_question_keeps_correct_article_first`.
+
+### Item 2: elliptical fix (anaphora, not a raised term-count threshold)
+
+The v4-era `_ELLIPTICAL_TERM_COUNT` threshold (fold the topic_hint's
+terms into the coverage gate only when the query has ≤1 own content term)
+missed both tuning elliptical items: "What made it explode like that?"
+(own terms `{made, explode, like}`, count 3) and "Who wrote that play
+about the two lovers who die?" (count 5). Simply raising the count
+threshold to cover these would also incorrectly fold an unrelated
+topic_hint into an ordinary question of similar length -- "What is the
+capital of France?" is also 3 own terms, and
+`test_coverage_terms_off_topic_query_not_rescued_by_topic_hint` (review
+pass 2) requires it to stay un-rescued. The actual distinguishing signal
+is **anaphora**: an elliptical follow-up refers back to something ("it",
+"its", "this", "that", "again", ...) instead of naming its own subject.
+`_has_anaphora` (a small regex) is now an alternative fold-in condition
+alongside the existing term-count check. Both tuning elliptical items
+contain "it" or "that"; "capital of France" and
+"flibbertigibbetopolis effect" contain neither, so the off-topic+hint
+tests in `tests/test_review_pass2_fixes.py` stay green (verified: full
+file green, see test run below). Both tuning elliptical items now pass
+(recall@5 0.000→1.000, n=2); recall@1 is 0.500 (1/2) because one item's
+correct article, while now covered/returned, is not always rank 1 among
+its own passages -- a residual ranking (not coverage) gap.
+
+### Item 3: relevance-cutoff packing
+
+`_apply_relevance_cutoff` (new `ResearchEngine` parameters
+`packing_relevance_fraction` default `0.25` and `packing_max_passages`
+default `6`) runs after diversity capping and before `pack()`: a passage
+is kept only if its score is ≥ `packing_relevance_fraction` of the top
+passage's score **and** it covers ≥1 of the question's own content terms,
+except an infobox passage of one of the top-2 scored articles, which is
+exempt from the term-coverage requirement when the question asks for a
+quantity/unit (`_asks_for_quantity`, e.g. "how many/much/...", "degrees",
+"%"). At least one passage is always kept when the pool is non-empty; hard
+cap 6 passages regardless.
+
+Tuned on tuning only (`data/measure_packing_v5.py`, spawn-safe, real
+archive, n=42):
+
+| | before (no cutoff) | after (fraction 0.25, cap 6) |
+|---|---|---|
+| mean passages/response | 9.95 | **5.40** |
+| mean packed tokens/response | 978 | **541** |
+| recall@5 on packed passages | 0.762 | 0.762 |
+
+Recall@5 is byte-identical before/after -- the cutoff removes roughly
+half the packed evidence with **zero** measured recall@5 loss on tuning
+(well within the "no more than one question" tolerance), while cutting
+mean packed tokens per response by ~45%, which directly reduces the
+downstream prompt-building/LLM cost per turn.
+
+### Item 4: latency (partial; target NOT met -- reported honestly)
+
+Two latency levers were implemented: (a) the relaxed-AND full-text query
+over the rarest terms is skipped when the all-terms query's own top-3
+hits already contain a term-matched entity article (no benefit, since the
+scorer alone now decides the outcome); (b) single-character tokenizer
+artifacts (e.g. `"helium's"` → `"helium", "s"`) no longer occupy a scarce
+IDF-lookup budget slot. Both are real, if modest, savings.
+
+However, **item 1's real-archive fix (the extra single-term
+`search_fulltext` snippet call per rarest term, needed for correctness --
+see item 1 above) added worker round-trips back**, and latency moved the
+wrong way overall: mean tuning latency rose from v4's 1.327 s to 1.613 s
+(target: ≤1.0 s), and a `cProfile` of one warm helium-style query
+(`data/profile_one_query_v5.py`, spawn-safe) shows **20 worker calls**
+and 1.97 s wall time, of which 1.50 s (76%) is `_winapi.WaitForMultiple
+Objects` -- i.e. genuinely waiting on sequential out-of-process worker
+round-trips, not Python-level overhead. **Target missed, and by a wider
+margin than v4.** This is a real, acknowledged trade-off: correctness
+(Helium rank-1) was prioritized over the latency target within this
+task's time box, per the acceptance criteria's explicit priority
+(recall/rank correctness first, "report honestly if missed" on latency).
+
+What would close the gap (not done here, out of the remaining time box):
+a worker-protocol "multi" op letting several independent searches
+(fulltext AND-query, title search, N single-term IDF/snippet lookups)
+travel over one round-trip instead of N sequential ones -- the profile
+above shows the win is almost entirely available there, not in any
+Python-side computation. This is the single highest-leverage next step
+for latency and was deliberately not attempted here rather than shipped
+half-tested against the worker's IPC protocol.
+
+### Acceptance criteria -- status
+
+- recall@5 ≥ v4 (0.714): **met**, 0.762.
+- recall@1 ≥ v2-era (0.500): **met**, 0.571.
+- Elliptical restored: **met** (recall@5 0→1.000, both tuning items);
+  recall@1 is 0.500 (residual ranking gap, not a coverage/abstention gap).
+- Helium rank 1 on cases A/B/C, real archive: **met**, see
+  `data/helium_repro_v5.py` output above.
+- Latency ≤1.0 s tuning mean / ≤1.2 s helium queries warm: **NOT met**
+  (1.613 s tuning mean; the profiled helium query itself took 1.97 s).
+  Reported honestly per the brief rather than loosening any test; see
+  item 4 above for the specific cause (worker round-trip count) and the
+  concrete next step.
+
+### Full suite / lint
+
+`python -m pytest -m "not integration" -p no:warnings` is green (full
+run, no failures; the handful of `tests/test_prompt_builder.py` /
+`tests/test_agent_loop*.py` / `tests/test_lesson_state.py` /
+`tests/test_compose.py` failures mentioned as pre-existing/owned by the
+concurrent `tutor/app/**` agent were not present in this run either).
+`python -m ruff check .` is clean for every file this task touched
+(`tutor/retrieval/research.py`, `tests/test_research.py`).

@@ -205,3 +205,60 @@ this WP's wiring):
 - The `agent_loop.run_turn` contract mismatch is resolved (see above);
   what remains is re-running the same simulated-lesson and live
   prompt-cache checks on the target Dell hardware for the M6 gate.
+
+## Two-stage eviction: uncited evidence dropped before whole turns
+
+Approved change to spec §8.1's eviction order. §8.1 literally says "drop
+the oldest `[user, tool, assistant]` triples from the head of the
+history until it fits" -- a whole-triple-at-a-time rule with no
+sub-triple granularity. The project owner approved a cheaper-first
+refinement that stays inside that rule's spirit (still a single head
+edit per eviction, still never splices from the middle of a *retained*
+triple's meaning) but adds a step before it:
+
+- **Stage 1** (new): walk the oldest turns first; for each evidence tool
+  message never cited by any *retained* assistant reply, drop the
+  passage TEXT and replace it with a short stub (`"[evidence dropped to
+  save space: N passages, never cited]"`), keeping the message list
+  valid for the OpenAI wire format. The passage id is forgotten
+  (`PromptLog._seen_ids`), so if research returns it again later it is
+  re-sent in full under a new label; the old label is never resolvable
+  again. Evidence cited by a retained assistant message is never touched
+  in this stage.
+- **Stage 2** (existing behavior, unchanged): only if stage 1 alone
+  didn't free enough room, evict whole oldest `[user, tool*, assistant]`
+  turns, exactly as before (including re-protecting evidence still cited
+  by a surviving assistant message).
+
+Both stages happen inside one `PromptLog.evict()` call and are reported
+as a single `EvictionEvent`, still exactly one byte-prefix break per
+eviction (`tests/test_prompt_builder.py::test_stage1_keeps_log_valid_and_prefix_breaks_exactly_once`
+and the pre-existing `test_evict_breaks_prefix_property_exactly_once_then_holds_again`
+both stay green). `EvictionEvent` gained `dropped_uncited_passages` and
+`dropped_uncited_tokens`; both are forwarded through the `eviction_reprefill`
+event dict, the SSE `eviction` payload, and `/api/status.last_eviction`
+(`tutor/app/agent_loop.py`, `tutor/app/compose.py`).
+
+**Numbers from the simulated 60-turn lesson**
+(`tests/test_resource_discipline.py::TestSimulatedThirtyMinuteLesson::test_sixty_turns_stay_within_ceiling_with_bounded_rss_growth`,
+6K ceiling): 48 `eviction_reprefill` events fire over 60 turns, and in
+this specific fixture every one of them is stage-2-only (0 evictions
+satisfied by stage 1 alone) -- because the fixture's fake LLM answer
+cites `[S1]` on every single turn, so every turn's own evidence is
+"cited by a retained assistant message" right up until that turn itself
+is evicted. This is the expected, unsurprising case: stage 1 only pays
+off when a lesson accumulates evidence the model never ends up citing.
+To confirm stage 1 actually does its job, a synthetic variant of the
+same 60-turn loop where the fake answer cites nothing (`docs/M5_notes.md`
+scratch check, not committed as a test since it duplicates the fixture)
+shows the two-stage split clearly: of 48 eviction events, 29 are
+satisfied by stage 1 alone (no whole turn evicted, only stale evidence
+text stubbed), 19 need stage 2 as well, and 60 passages' worth of
+never-cited evidence text is dropped in total. The dedicated unit tests
+in `tests/test_prompt_builder.py`
+(`test_stage1_alone_stubs_uncited_evidence_oldest_first_no_turn_evicted`,
+`test_stage1_never_drops_evidence_cited_by_a_retained_assistant_message`,
+`test_stage2_still_fires_when_stage1_is_not_enough`,
+`test_stubbed_passage_is_resent_in_full_under_a_new_label_on_re_retrieval`)
+exercise this split directly with a fixture where evidence is never
+cited, isolating stage 1 from stage 2.

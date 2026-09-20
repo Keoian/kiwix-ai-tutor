@@ -224,6 +224,8 @@ def run_turn(
                         "evicted_turns": eviction_event.evicted_turns,
                         "tokens_before": eviction_event.tokens_before,
                         "tokens_after": eviction_event.tokens_after,
+                        "dropped_uncited_passages": eviction_event.dropped_uncited_passages,
+                        "dropped_uncited_tokens": eviction_event.dropped_uncited_tokens,
                     }
                 )
             messages = _to_wire_messages(log.render())

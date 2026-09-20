@@ -731,11 +731,21 @@ class _EntityFakeWorker:
     def __init__(self, archive_path: Path) -> None:
         self._archive_path = archive_path
 
+    def _lead(self, path: str) -> str:
+        # Real Xapian snippets are drawn from the article's own indexed
+        # text -- stand in with each fake article's lead paragraph so the
+        # scorer's lead-text coordination term has something realistic to
+        # work with (see ``_score_articles``).
+        html = self._HTML_BY_PATH.get(path, "")
+        if "<p>" in html:
+            return html.split("<p>", 1)[1].split("</p>", 1)[0]
+        return ""
+
     def _hits(self, pairs, source: str):
         from tutor.retrieval.zim.search import SearchHit
 
         return [
-            SearchHit(path=p, title=t, rank=i, snippet="", source=source)
+            SearchHit(path=p, title=t, rank=i, snippet=self._lead(p), source=source)
             for i, (p, t) in enumerate(pairs)
         ]
 
@@ -792,8 +802,35 @@ class _EntityFakeWorker:
         pass
 
 
-def test_entity_candidate_guaranteed_slot_wins_over_generic_and_matches(
-    registry_toml, snapshot_store, tmp_path
+def _titles_by_rank(candidates: list[dict]) -> list[str]:
+    titles: list[str] = []
+    seen: set[str] = set()
+    for c in sorted(candidates, key=lambda c: -c["score"]):
+        if c["title"] not in seen:
+            seen.add(c["title"])
+            titles.append(c["title"])
+    return titles
+
+
+# Baseline v5: article SCORING (not slot-forcing) must put Helium first --
+# not merely top-2 -- for each of the owner's three phrasings of the same
+# question (cases A/B/C). Case A is the exact real-archive failure quoted
+# in docs/retrieval_baseline.md ("boiling point of helium" ranked "Boiling"
+# above "Helium", and "Celsius" above "Helium").
+@pytest.mark.parametrize(
+    "query",
+    [
+        # Case A: instruction-word wrapped, both units named.
+        "Output the boiling point of helium in celsius and farenheit.",
+        # Case B: plain question form.
+        "What is the boiling point of helium in celsius?",
+        # Case C: unit-first phrasing.
+        "In celsius, what is helium's boiling point?",
+    ],
+    ids=["case_a", "case_b", "case_c"],
+)
+def test_helium_article_scoring_ranks_helium_first(
+    registry_toml, snapshot_store, tmp_path, query
 ):
     from tutor.retrieval.registry import load_registry
 
@@ -805,18 +842,20 @@ def test_entity_candidate_guaranteed_slot_wins_over_generic_and_matches(
         worker_factory=lambda path: _EntityFakeWorker(path),
     )
     entry = registry.for_subject(None)[0]
-    candidates, _timed_out, _note = engine._process_archive(
-        entry,
-        "Output the boiling point of helium in celsius and farenheit.",
-        lambda: 5.0,
-    )
-    titles = []
-    seen = set()
-    for c in sorted(candidates, key=lambda c: -c["score"]):
-        if c["title"] not in seen:
-            seen.add(c["title"])
-            titles.append(c["title"])
-    assert "Helium" in titles[:2], titles
+    candidates, _timed_out, _note = engine._process_archive(entry, query, lambda: 5.0)
+    titles = _titles_by_rank(candidates)
+    assert titles[0] == "Helium", titles
+
+
+def test_direct_style_question_keeps_correct_article_first(
+    registry_toml, snapshot_store, tmp_path
+):
+    """Article scoring must not perturb the common case: a "direct" style
+    question whose correct article is already unambiguous stays first."""
+    engine = _engine(registry_toml, snapshot_store, tmp_path)
+    resp = engine.research("What is the Pythagorean theorem?")
+    assert resp.passages
+    assert resp.passages[0].path == "pythagorean_theorem"
 
 
 def test_idf_lookup_is_cached_per_archive_and_term(registry_toml, snapshot_store, tmp_path):

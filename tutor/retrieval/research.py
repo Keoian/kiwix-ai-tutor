@@ -90,7 +90,6 @@ _MAX_ENTITY_TERM_SEARCHES = 4
 _ENTITY_TITLE_LIMIT = 3
 _ENTITY_TITLE_RESULTS = 3
 _ENTITY_RELAXED_AND_SIZES = (2, 3)
-_ENTITY_GUARANTEED_SLOTS = 2
 _IDF_CACHE_MAXSIZE = 4096
 
 # Reuse plan §7.2 "Dense article top 16": the dense sidecar's own
@@ -160,6 +159,28 @@ def _elliptical_term_count(query: str) -> int:
     return len(frozenset(tokenize(strip_instruction_words(query))) - _CONTINUATION_FILLERS)
 
 
+# Baseline v5 elliptical fix: the plain term-count threshold above (<=1)
+# missed real elliptical phrasings that still carry several of their own
+# content words -- "What made it explode like that?" (own terms {"made",
+# "explode", "like"}, count 3) and "Who wrote that play about the two
+# lovers who die?" (count 5). Raising the bare count threshold to cover
+# these would also wrongly fold the topic_hint into an ordinary,
+# unrelated question of similar length (e.g. "What is the capital of
+# France?", also 3 own terms -- see
+# ``test_coverage_terms_off_topic_query_not_rescued_by_topic_hint``,
+# which must stay green). The actual signal distinguishing a real
+# follow-up from an ordinary question is anaphora: an elliptical query
+# refers back to something ("it", "that", "this", "again", ...) rather
+# than naming its own subject outright. None of "capital of France" /
+# "flibbertigibbetopolis effect" contain such a word; every tuning/
+# held-out elliptical item does.
+_ANAPHORA_RE = re.compile(r"\b(it|its|this|that|those|them|again)\b", re.IGNORECASE)
+
+
+def _has_anaphora(query: str) -> bool:
+    return bool(_ANAPHORA_RE.search(query))
+
+
 def _own_term_count(query: str) -> int:
     """Number of the question's OWN content terms (instruction words
     stripped, ``topic_hint`` excluded) -- used only to gate the coverage
@@ -179,7 +200,9 @@ def _coverage_terms(query: str, topic_hint: str | None = None) -> frozenset[str]
     manufacture coverage for it (that was the bug: a subject hint alone
     making an off-topic candidate look "covered")."""
     own = frozenset(tokenize(strip_instruction_words(query)))
-    if topic_hint and _elliptical_term_count(query) <= _ELLIPTICAL_TERM_COUNT:
+    if topic_hint and (
+        _elliptical_term_count(query) <= _ELLIPTICAL_TERM_COUNT or _has_anaphora(query)
+    ):
         return own | frozenset(tokenize(topic_hint))
     return own
 
@@ -204,6 +227,186 @@ _COVERAGE_CANDIDATES_CHECKED = 3
 # docs/retrieval_baseline.md "Baseline v3".
 _OWN_TERM_COVERAGE_FLOOR = 0.34
 _OWN_TERM_FLOOR_MIN_COUNT = 3
+
+
+_QUANTITY_RE = re.compile(
+    r"\bhow (many|much|long|far|fast|old|tall|hot|cold|high|deep)\b"
+    r"|\bdegrees?\b|\bpercent\b|%|\bnumber of\b",
+    re.IGNORECASE,
+)
+
+# Baseline v5 item 3 (relevance-cutoff packing) defaults, tuned on the
+# tuning split only -- see docs/retrieval_baseline.md "Baseline v5" for the
+# before/after packets-per-response and recall@5-on-packed numbers.
+_PACKING_RELEVANCE_FRACTION_DEFAULT = 0.25
+_PACKING_MAX_PASSAGES_DEFAULT = 6
+
+
+def _asks_for_quantity(query: str) -> bool:
+    """Whether ``query`` reads as asking for a quantity/unit (spec-approved
+    infobox exemption for the relevance cutoff below)."""
+    return bool(_QUANTITY_RE.search(query))
+
+
+def _apply_relevance_cutoff(
+    passages: list[dict[str, Any]],
+    own_terms: frozenset[str],
+    top2_paths: frozenset[str],
+    *,
+    fraction: float,
+    max_passages: int,
+    quantity_query: bool,
+) -> list[dict[str, Any]]:
+    """Stop packing when relevance falls off (Baseline v5 item 3): the
+    2,000-token evidence budget (``pack``'s ``budget_tokens``) is a CAP, not
+    a target. ``passages`` must already be sorted best-first (as
+    ``cap_per_article``'s output is). A passage is kept only if (a) its
+    score is at least ``fraction`` of the top passage's score, AND (b) it
+    covers at least one of the question's own content terms -- EXCEPT an
+    infobox passage of one of the top-2 scored articles, which is exempt
+    from (b) when the question asks for a quantity/unit (an infobox's
+    label/value rows rarely echo the question's own wording verbatim, e.g.
+    "Boiling point: -269 C" for "what is helium's boiling point in
+    celsius?"). At least one passage is always kept when ``passages`` is
+    non-empty (an "ok" response must return SOME evidence), and packing is
+    hard-capped at ``max_passages`` regardless of how many would otherwise
+    clear the bar.
+    """
+    if not passages:
+        return []
+    top_score = passages[0]["score"]
+    norm_own = {singularize(t) for t in own_terms}
+    kept: list[dict[str, Any]] = []
+    for p in passages:
+        if len(kept) >= max_passages:
+            break
+        text_terms = {singularize(t) for t in tokenize(p["text"])}
+        covers_own_term = bool(norm_own & text_terms)
+        is_exempt_infobox = (
+            quantity_query
+            and p["path"] in top2_paths
+            and "Infobox" in tuple(p.get("heading_path", ()))
+        )
+        score_ok = p["score"] >= fraction * top_score if top_score > 0 else True
+        if score_ok and (covers_own_term or is_exempt_infobox):
+            kept.append(p)
+    if not kept:
+        kept = [passages[0]]
+    return kept
+
+
+_OF_ENTITY_RE = re.compile(r"\bof\s+([a-z]+)", re.IGNORECASE)
+_POSSESSIVE_ENTITY_RE = re.compile(r"\b([a-z]+)'s\b", re.IGNORECASE)
+_UNIT_PREP_RE = re.compile(r"\bin\s+([a-z]+)\b", re.IGNORECASE)
+
+_ENTITY_ROLE_WEIGHT = 2.5
+_UNIT_ROLE_WEIGHT = 0.3
+
+
+def _term_role_weights(query: str) -> dict[str, float]:
+    """Cheap syntactic role heuristic (Baseline v5): English marks "the
+    boiling point OF X" as naming X the entity being asked about, and "in
+    Y" (a bare noun following "in") as naming Y a unit/modifier, not the
+    entity -- e.g. "the boiling point of helium in celsius" is a question
+    about helium, expressed in celsius, not the reverse. A possessive
+    ("helium's boiling point") is the same "X is the entity" marker in a
+    different word order. This does not replace corpus-IDF (a term can be
+    both rare AND syntactically marked as the entity, which is the common
+    case), it re-weights it: an entity-marked term's contribution to the
+    scorer is boosted, a unit-marked term's is discounted, everything else
+    stays neutral (weight 1.0).
+    """
+    weights: dict[str, float] = {}
+    for m in _OF_ENTITY_RE.finditer(query):
+        weights[singularize(m.group(1).lower())] = _ENTITY_ROLE_WEIGHT
+    for m in _POSSESSIVE_ENTITY_RE.finditer(query):
+        weights[singularize(m.group(1).lower())] = _ENTITY_ROLE_WEIGHT
+    for m in _UNIT_PREP_RE.finditer(query):
+        term = singularize(m.group(1).lower())
+        if term not in weights:  # "of"/possessive entity marking always wins
+            weights[term] = _UNIT_ROLE_WEIGHT
+    return weights
+
+
+def _idf_weight(term: str, matches: dict[str, int]) -> float:
+    """Cheap, monotonic IDF-shaped weight from a corpus-wide hit count:
+    rarer terms (fewer ``matches``) score higher. Terms this request never
+    looked up a real count for (outside the small IDF-lookup budget) get a
+    fixed "moderately common" default rather than 0 -- an unknown-rarity
+    term still contributes to coordination, just without a rarity bonus.
+    """
+    count = matches.get(term)
+    if count is None:
+        # Unknown rarity (outside the small per-request IDF-lookup budget,
+        # see ``_MAX_ENTITY_TERM_SEARCHES``): treat as moderately common
+        # rather than as a strong (and unearned) rarity signal -- this
+        # must stay well below any real looked-up weight for a genuinely
+        # rare term, or an un-looked-up common term (e.g. a stray token
+        # that crowded a rare one out of the lookup budget) can wrongly
+        # outscore it.
+        return 0.0005
+    if count <= 0:
+        return 0.0
+    return 1.0 / count
+
+
+def _score_articles(
+    hit_meta: dict[str, tuple[str, str]],
+    own_terms: set[str],
+    idf_matches: dict[str, int],
+    role_weights: dict[str, float] | None = None,
+) -> list[str]:
+    """Score every candidate article in ``hit_meta`` (path -> (title,
+    lead-text-or-snippet)) by IDF-weighted coordination of the question's
+    OWN terms over (title, lead) plus a title bonus, and return paths best
+    first.
+
+    This replaces Baseline v4's "guarantee a front slot for the rarest-
+    term title hit" mechanic (docs/retrieval_baseline.md "Baseline v4"),
+    which fixed the Helium regression by force-inserting one hit ahead of
+    the RRF-fused order -- correct for that one case, but wrong in
+    general: it can only ever promote, never actually rank candidates
+    against each other, so it also demoted rank-1 accuracy elsewhere
+    (Baseline v5 recall@1 regression). Scoring instead lets every article
+    compete on the same signal: a rare term fully covering a short title
+    (e.g. "Helium") outscores a common term merely appearing in a longer
+    title (e.g. "Boiling point"), and a half-covered longer title (e.g.
+    "Celsius Holdings") scores lower still -- see
+    ``docs/retrieval_baseline.md`` "Baseline v5" for worked examples.
+
+    ``role_weights`` (see :func:`_term_role_weights`) re-weights specific
+    own terms by their syntactic role in the question ("of X" / "X's"
+    marks X as the entity; "in Y" marks Y as a unit/modifier) -- without
+    it, pure corpus-IDF coordination alone cannot separate "the boiling
+    point of helium in celsius" (about helium) from a corpus where
+    "celsius" happens to have fewer raw hits than "helium" (Baseline v5
+    case A).
+    """
+    role_weights = role_weights or {}
+    norm_own = {singularize(t) for t in own_terms}
+    # ``idf_matches`` is keyed by the raw (un-singularized) term the caller
+    # looked up (e.g. "celsius"); title/lead matching below works in
+    # singularized space (so "moon"/"moons" match), so the IDF lookup must
+    # too, or a term whose singular form differs from its raw form (e.g.
+    # "celsius" -> "celsiu") silently misses its real weight and falls back
+    # to the generic default for every such term.
+    idf_matches = {singularize(t): v for t, v in idf_matches.items()}
+
+    def _weight(term: str) -> float:
+        return _idf_weight(term, idf_matches) * role_weights.get(term, 1.0)
+
+    scored: list[tuple[str, float]] = []
+    for path, (title, lead) in hit_meta.items():
+        title_terms = {singularize(t) for t in tokenize(title)}
+        lead_terms = {singularize(t) for t in tokenize(lead)} if lead else set()
+        matched_title = norm_own & title_terms
+        matched_lead = norm_own & (lead_terms - title_terms)
+        coordination = sum(_weight(t) for t in matched_title | matched_lead)
+        title_coverage_frac = (len(matched_title) / len(title_terms)) if title_terms else 0.0
+        title_bonus = title_coverage_frac * sum(_weight(t) for t in matched_title)
+        scored.append((path, coordination + title_bonus))
+    scored.sort(key=lambda ps: -ps[1])
+    return [path for path, _ in scored]
 
 
 def _best_coverage(
@@ -437,6 +640,8 @@ class ResearchEngine:
         top_n_articles: int = _TOP_N_ARTICLES,
         dense_indexes: Mapping[str, DenseIndex] | None = None,
         embed_query: Callable[[str], Sequence[float]] | None = None,
+        packing_relevance_fraction: float = _PACKING_RELEVANCE_FRACTION_DEFAULT,
+        packing_max_passages: int = _PACKING_MAX_PASSAGES_DEFAULT,
     ) -> None:
         self._registry = registry
         self._snapshot_store = snapshot_store
@@ -456,6 +661,8 @@ class ResearchEngine:
         # Spec §7.2 step 4: "Top 6 articles (cap 10)" -- the spec's cap wins
         # over any caller-supplied config value.
         self._top_n_articles = min(max(top_n_articles, 1), _TOP_N_ARTICLES_CAP)
+        self._packing_relevance_fraction = packing_relevance_fraction
+        self._packing_max_passages = packing_max_passages
         self._workers: dict[str, Any] = {}
         self._fingerprints: dict[str, str] = {}
         self._response_cache: OrderedDict[tuple[Any, ...], ResearchResponse] = OrderedDict()
@@ -683,10 +890,20 @@ class ResearchEngine:
         # true entity article lacks one word the question used (a
         # misspelling, or a symbol like degC where the question spelled out
         # "celsius"). Bounded to a few extra worker calls total.
-        guaranteed_entity_paths: list[str] = []
+        # Baseline v5 (docs/retrieval_baseline.md "Baseline v5"): these
+        # entity-term lookups now feed the ARTICLE SCORER (``_score_articles``)
+        # below instead of force-inserting a "guaranteed slot" ahead of the
+        # RRF-fused order -- see that function's docstring for why
+        # slot-forcing regressed recall@1.
+        term_matches: dict[str, int] = {}
+        rarity_order: list[str] = []
+        role_weights = _term_role_weights(query)
         if tokens and remaining() > 0:
-            unique_tokens = list(dict.fromkeys(tokens))
-            term_matches: dict[str, int] = {}
+            # Single-character tokens are almost always tokenizer artifacts
+            # (e.g. "helium's" -> "helium", "s") rather than real content
+            # words; letting one occupy a scarce IDF-lookup slot can crowd
+            # out a genuinely rare term the scorer needs.
+            unique_tokens = [t for t in dict.fromkeys(tokens) if len(t) > 1]
             for i, term in enumerate(unique_tokens):
                 if i >= _MAX_ENTITY_TERM_SEARCHES or remaining() <= 0:
                     break
@@ -702,22 +919,91 @@ class ResearchEngine:
                 key=lambda t: (term_matches[t], unique_tokens.index(t)),
             )
             entity_title_hits: list[Any] = []
+            entity_snippet_hits: list[Any] = []
             for term in rarity_order[:_ENTITY_TITLE_LIMIT]:
                 hits, failed = _search("search_titles", term, _ENTITY_TITLE_RESULTS)
                 timed_out = timed_out or failed
-                if hits and term in rarity_order[:_ENTITY_GUARANTEED_SLOTS]:
-                    guaranteed_entity_paths.append(hits[0].path)
                 entity_title_hits.extend(hits)
-            entity_fulltext_hits: list[Any] = []
-            for k in _ENTITY_RELAXED_AND_SIZES:
-                if len(rarity_order) >= k:
-                    joined = " ".join(rarity_order[:k])
-                    hits, failed = _search("search_fulltext", joined, _FULLTEXT_LIMIT)
-                    timed_out = timed_out or failed
-                    entity_fulltext_hits.extend(hits)
-            # Entity hits are prepended: they are the strongest, most
-            # specific signal (rare/entity terms only), so they should win
-            # ties in the RRF fusion below over generic fallback hits.
+                # `search_titles` never returns a snippet (real worker,
+                # confirmed against the live archive -- only the FakeWorker
+                # test fixture happened to synthesize one), so the scorer
+                # below would see title-only coordination for these
+                # candidates and fall back to raw corpus-IDF magnitude
+                # alone -- exactly the Baseline v5 case A bug ("Celsius"
+                # has fewer real corpus hits than "Helium", so it would win
+                # on IDF alone with no lead-text tiebreaker). One extra
+                # single-term full-text search per rarest term gets a real
+                # snippet (lead-text proxy) for the same top article.
+                snip_hits, snip_failed = _search("search_fulltext", term, 1)
+                timed_out = timed_out or snip_failed
+                entity_snippet_hits.extend(snip_hits)
+            # Rarity picks WHICH terms to search directly (a good discovery
+            # signal: a rare term is likely to be the entity itself), but
+            # is not itself the right signal to rank the resulting entity
+            # hits against each other -- e.g. a unit word like "celsius"
+            # can have fewer corpus-wide hits than the actual answer entity
+            # "helium" while still being the wrong article (see Baseline
+            # v5's case A). Reorder these specific candidates by the same
+            # article scorer used for final fusion so the entity list itself
+            # already reflects title+lead coordination, not raw rarity.
+            if entity_title_hits:
+                own_terms_for_entities = frozenset(
+                    tokenize(strip_instruction_words(query))
+                )
+                snippet_by_path = {h.path: h.snippet for h in entity_snippet_hits if h.snippet}
+                entity_hit_meta = {
+                    h.path: (
+                        h.title,
+                        snippet_by_path.get(h.path) or getattr(h, "snippet", "") or "",
+                    )
+                    for h in entity_title_hits
+                }
+                entity_score_order = _score_articles(
+                    entity_hit_meta, own_terms_for_entities, term_matches, role_weights
+                )
+                rank_of = {p: i for i, p in enumerate(entity_score_order)}
+                entity_title_hits = sorted(
+                    entity_title_hits, key=lambda h: rank_of.get(h.path, len(rank_of))
+                )
+            # Prefer the snippet-bearing full-text hit for a path present in
+            # both lists (it's the same article; the full-text hit is the
+            # one with real lead text) while keeping the score-based order
+            # just established above.
+            order_index = {h.path: i for i, h in enumerate(entity_title_hits)}
+            entity_title_hits = _dedupe_by_path([*entity_snippet_hits, *entity_title_hits])
+            entity_title_hits.sort(key=lambda h: order_index.get(h.path, len(order_index)))
+            # Latency (Baseline v5, item 4): the relaxed-AND query over the
+            # rarest terms is only useful when the all-terms query's own
+            # top-3 hits are missing the rarest term's title-matched
+            # article outright -- if it is already there, the extra
+            # worker round-trip(s) below cannot change the outcome (the
+            # scorer will rank it on its own merits) and are skipped.
+            top3_fulltext_paths = {h.path for h in fulltext_hits[:3]}
+            already_present = any(
+                h.path in top3_fulltext_paths
+                for term in rarity_order[:_ENTITY_TITLE_LIMIT]
+                for h in entity_title_hits
+                if h.title  # any hit found by this term search
+            )
+            # ``entity_snippet_hits`` are themselves real full-text hits
+            # (the single-term ``search_fulltext`` call above), so they
+            # belong in the full-text ranking too -- not only used as a
+            # snippet source for scoring the title hits -- or the entity's
+            # article can end up voted for by only 2 of the 3 fused
+            # rankings (title, scored) while several generic co-occurring
+            # articles are voted for by all 3, letting count-of-lists beat
+            # the scorer's actual judgment (Baseline v5 case A).
+            entity_fulltext_hits: list[Any] = [*entity_snippet_hits]
+            if not already_present:
+                for k in _ENTITY_RELAXED_AND_SIZES:
+                    if len(rarity_order) >= k:
+                        joined = " ".join(rarity_order[:k])
+                        hits, failed = _search("search_fulltext", joined, _FULLTEXT_LIMIT)
+                        timed_out = timed_out or failed
+                        entity_fulltext_hits.extend(hits)
+            # Entity hits are prepended so they contribute to (and, via the
+            # scorer, can win) the RRF fusion below alongside the generic
+            # fallback hits -- never force-inserted ahead of it.
             title_hits = _dedupe_by_path([*entity_title_hits, *title_hits])
             fulltext_hits = _dedupe_by_path([*entity_fulltext_hits, *fulltext_hits])
         # Based on the full-text fallback only: a full-text AND-of-terms
@@ -746,35 +1032,55 @@ class ResearchEngine:
         if not fulltext_hits and not title_hits and not dense_paths:
             return [], timed_out, dense_note
 
-        # Reuse plan §7.2: three independent rankings (dense semantic
-        # search, title, body/full-text) fused via RRF at the article
-        # level, not blended as raw scores.
+        # Baseline v5: a 4th ranking -- ARTICLE SCORING (``_score_articles``)
+        # -- is fused alongside the reuse plan's three (dense semantic
+        # search, title, body/full-text), all via the same RRF, rather than
+        # any one of them force-inserting a slot ahead of the others (see
+        # ``_score_articles``'s docstring). The scorer uses each hit's own
+        # title + search snippet (a lead-text proxy already returned by the
+        # worker, so this costs no extra round-trip) and the question's OWN
+        # terms only (not keywords/topic_hint -- those already shape which
+        # articles appear as hits at all via ``search_query`` above).
+        own_terms = frozenset(tokenize(strip_instruction_words(query)))
+        hit_meta: dict[str, tuple[str, str]] = {}
+        for h in (*fulltext_hits, *title_hits):
+            if h.path not in hit_meta:
+                hit_meta[h.path] = (h.title, getattr(h, "snippet", "") or "")
+        scored_paths = (
+            _score_articles(hit_meta, own_terms, term_matches, role_weights) if hit_meta else []
+        )
+        # The fulltext/title lists themselves are also re-sorted by this
+        # same score before fusion (not just added as a 4th input): both
+        # can otherwise carry an internal order from a much cruder
+        # heuristic (the per-token fallback's own "matched term count,
+        # then LOCAL rarity" merge -- see ``_search_with_fallback``), which
+        # can rank several generic articles matching common terms (e.g.
+        # every "Boiling ..." title matching both "boiling" and "point")
+        # ahead of the one true entity article the scorer identifies via
+        # corpus-IDF + syntactic role + lead-text coordination. Re-sorting
+        # in place (rather than only adding one more equal-weight ranking)
+        # means the fused order reflects the scorer's judgment throughout,
+        # while still fusing -- via ``rrf_fuse`` below -- with the
+        # independent title/dense rankings rather than force-inserting
+        # anything ahead of them.
+        if hit_meta:
+            score_rank = {p: i for i, p in enumerate(scored_paths)}
+            fulltext_hits = sorted(
+                fulltext_hits, key=lambda h: score_rank.get(h.path, len(score_rank))
+            )
+            title_hits = sorted(title_hits, key=lambda h: score_rank.get(h.path, len(score_rank)))
+
         fused_articles = rrf_fuse(
-            [[h.path for h in fulltext_hits], [h.path for h in title_hits], dense_paths]
+            [
+                [h.path for h in fulltext_hits],
+                [h.path for h in title_hits],
+                dense_paths,
+                scored_paths,
+            ]
         )
         top_paths = [path for path, _ in fused_articles[: self._top_n_articles]]
         lexical_paths = {h.path for h in fulltext_hits} | {h.path for h in title_hits}
         dense_paths_set = set(dense_paths)
-
-        # Guarantee a slot for each of the (up to _ENTITY_GUARANTEED_SLOTS)
-        # rarest own query terms' own title-search hit -- see Baseline v4
-        # above. RRF fusion alone under-ranks a candidate that is only in
-        # one input list (title) against candidates present in both
-        # fulltext and title lists (e.g. every generic "Boiling ..." title
-        # that also turns up in the full-text AND-of-all-terms query), even
-        # though the title hit is the far more specific/relevant one. Same
-        # mechanism as the topic_hint guaranteed slot just below.
-        # Only a genuinely MISSING entity candidate is inserted -- one
-        # already present in ``top_paths`` keeps its fused rank rather than
-        # being force-promoted to the front, so a query that was already
-        # answered correctly (the common case) is never perturbed by this
-        # mechanism; it only rescues the specific failure mode above.
-        for entity_path in reversed(guaranteed_entity_paths):
-            if entity_path in top_paths:
-                continue
-            lexical_paths.add(entity_path)
-            top_paths.insert(0, entity_path)
-        top_paths = top_paths[: self._top_n_articles + len(guaranteed_entity_paths)]
 
         # Spec §5 step 3: topic_hint is "the current subject" -- i.e. an
         # entity the lesson is already about, not merely a keyword to
@@ -990,8 +1296,27 @@ class ResearchEngine:
         capped = cap_per_article(
             candidates, key=lambda c: c["path"], max_per_article=_DIVERSITY_CAP
         )
+        # Baseline v5 item 3 (relevance-cutoff packing, project-owner
+        # approved -- docs/retrieval_baseline.md "Baseline v5"): the token
+        # budget is a CAP, not a target. Stop packing when relevance falls
+        # off rather than filling the whole budget with weak passages.
+        top2_paths: list[str] = []
+        for c in candidates:
+            if c["path"] not in top2_paths:
+                top2_paths.append(c["path"])
+            if len(top2_paths) >= 2:
+                break
+        own_terms_for_packing = frozenset(tokenize(strip_instruction_words(query)))
+        cutoff_passages = _apply_relevance_cutoff(
+            capped,
+            own_terms_for_packing,
+            frozenset(top2_paths),
+            fraction=self._packing_relevance_fraction,
+            max_passages=self._packing_max_passages,
+            quantity_query=_asks_for_quantity(query),
+        )
         budget = budget_tokens if budget_tokens is not None else self._default_budget_tokens
-        packed = pack(capped, budget_tokens=budget, count_tokens=estimate_tokens)
+        packed = pack(cutoff_passages, budget_tokens=budget, count_tokens=estimate_tokens)
 
         coverage = _best_coverage(packed, coverage_terms, topic_hint_terms, own_term_count)
 

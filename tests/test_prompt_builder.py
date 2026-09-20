@@ -312,6 +312,121 @@ def test_evict_never_removes_system_even_under_extreme_pressure():
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Two-stage eviction: uncited evidence text dropped before whole turns
+# ---------------------------------------------------------------------------
+
+
+def _fill_log_with_uncited_evidence(log: PromptLog, n_turns: int = 30):
+    """Every turn's evidence is never cited by that turn's own assistant
+    reply (unlike ``_fill_log_until_over_budget``), so stage 1 should be
+    able to reclaim space without evicting any whole turn."""
+    for i in range(n_turns):
+        log.append_user(f"question {i} " * 10)
+        log.append_evidence(
+            passages=[{"id": f"p{i}", "label": f"S{i}", "text": f"evidence text {i} " * 20}]
+        )
+        log.append_assistant(f"answer {i} with no citation at all" * 3, cited_labels=[])
+
+
+def test_stage1_alone_stubs_uncited_evidence_oldest_first_no_turn_evicted():
+    budget = Budget.scaled(7000)
+    log = PromptLog(count_tokens=_count_tokens)
+    log.append_system("sys")
+    _fill_log_with_uncited_evidence(log, n_turns=30)
+
+    event = log.evict(budget)
+    assert event is not None
+    assert event.evicted_turns == 0
+    assert event.dropped_uncited_passages > 0
+    assert event.dropped_uncited_tokens > 0
+
+    rendered = log.render()
+    assert rendered[0]["role"] == "system"
+    # the very first turn's question is still present (no whole turn evicted)
+    assert any("question 0 " in str(m) for m in rendered)
+    # its evidence text, however, has been stubbed out
+    assert "evidence text 0 " not in str(rendered)
+    assert any("dropped to save space" in str(m) for m in rendered)
+
+
+def test_stage1_never_drops_evidence_cited_by_a_retained_assistant_message():
+    budget = Budget.scaled(7000)
+    log = PromptLog(count_tokens=_count_tokens)
+    log.append_system("sys")
+    # First turn's evidence IS cited; the rest are not.
+    log.append_user("question 0 " * 10)
+    log.append_evidence(passages=[{"id": "p0", "label": "S0", "text": "evidence text 0 " * 20}])
+    log.append_assistant("answer 0 citing S0" * 3, cited_labels=["S0"])
+    _fill_log_with_uncited_evidence(log, n_turns=29)
+
+    log.evict(budget)
+    rendered = log.render()
+    assert "evidence text 0 " in str(rendered)
+
+
+def test_stage2_still_fires_when_stage1_is_not_enough():
+    budget = Budget.scaled(4200)
+    log = PromptLog(count_tokens=_count_tokens)
+    log.append_system("sys")
+    _fill_log_with_uncited_evidence(log, n_turns=30)
+
+    event = log.evict(budget)
+    assert event is not None
+    # tiny budget: dropping evidence text alone can't be enough, whole
+    # turns must also go.
+    assert event.evicted_turns >= 1
+    assert log.tokens_used() <= budget.system + budget.history
+
+
+def test_stage1_keeps_log_valid_and_prefix_breaks_exactly_once():
+    budget = Budget.scaled(7000)
+    log = PromptLog(count_tokens=_count_tokens)
+    log.append_system("sys")
+    _fill_log_with_uncited_evidence(log, n_turns=30)
+
+    before_eviction = serialize_messages(log.render())
+    log.evict(budget)
+    log.validate()  # still a replayable message list
+    after_eviction = serialize_messages(log.render())
+    assert not after_eviction.startswith(before_eviction)
+
+    post_evict_snapshot = serialize_messages(log.render())
+    log.append_user("a fresh question after stage-1 eviction")
+    log.append_assistant("a fresh answer", cited_labels=[])
+    latest = serialize_messages(log.render())
+    assert latest.startswith(post_evict_snapshot)
+
+
+def test_stubbed_passage_is_resent_in_full_under_a_new_label_on_re_retrieval():
+    budget = Budget.scaled(7000)
+    log = PromptLog(count_tokens=_count_tokens)
+    log.append_system("sys")
+    _fill_log_with_uncited_evidence(log, n_turns=30)
+    log.evict(budget)
+
+    rendered_before = log.render()
+    assert "evidence text 0 " not in str(rendered_before)
+
+    # Research returns passage p0 again; the host assigns it a new label.
+    log.append_user("a follow-up question that re-triggers research on p0")
+    log.append_evidence(
+        passages=[{"id": "p0", "label": "S_new", "text": "evidence text 0 " * 20}]
+    )
+    log.append_assistant("answer citing the re-sent passage", cited_labels=["S_new"])
+
+    rendered_after = log.render()
+    full_text = "".join(str(m) for m in rendered_after)
+    # re-sent in full under the new label
+    assert full_text.count("evidence text 0 ") >= 1
+    # the old label is not resolvable as a citation target (never re-sent
+    # under S0 -- the host must flag S0 as unresolved if the model cites it)
+    assert not any(
+        m.get("passages") and any(p["label"] == "S0" for p in m["passages"])
+        for m in rendered_after
+    )
+
+
 def test_newest_turn_over_budget_raises_prompt_overflow():
     budget = Budget.scaled(32768)
     log = PromptLog(count_tokens=_count_tokens)

@@ -50,6 +50,8 @@ class EvictionEvent:
     evicted_turns: int
     tokens_before: int
     tokens_after: int
+    dropped_uncited_passages: int = 0
+    dropped_uncited_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -350,28 +352,85 @@ class PromptLog:
 
     # -- eviction --------------------------------------------------------
 
+    def _cited_labels(self) -> set[str]:
+        labels: set[str] = set()
+        for turn in self._turns:
+            for entry in turn:
+                if entry.get("role") == "assistant":
+                    labels.update(entry.get("cited_labels") or [])
+        return labels
+
     def evict(self, budget: Budget) -> EvictionEvent | None:
+        """Two-stage head eviction (spec §8, extended per the project
+        owner's approved change: uncited evidence is cheaper to lose than
+        whole turns, so it goes first).
+
+        Stage 1: within the *oldest* turns first, drop the passage TEXT of
+        evidence entries never cited by any retained assistant message,
+        replacing the tool-result content with a short stub. This keeps
+        the message list valid (every assistant ``tool_calls`` entry is
+        still followed by its tool result) but is no longer "retained
+        evidence": the passage id is forgotten so a later re-retrieval
+        re-sends it in full (under a new label -- the old label stays
+        unresolved).
+
+        Stage 2 (only if stage 1 was not enough): evict whole oldest
+        turns, as before. Both stages together are logged as a single
+        ``EvictionEvent`` -- still exactly one head edit, breaking the
+        byte-prefix property once."""
         operating_ceiling = budget.system + budget.history
         tokens_before = self.tokens_used()
         if tokens_before <= operating_ceiling:
             return None
 
+        # Decided once, up front: a label a retained assistant message
+        # cites right now is never dropped in stage 1, regardless of the
+        # order stage 1 happens to visit entries in.
+        needed_labels = self._cited_labels()
+
+        dropped_uncited_passages = 0
+        dropped_uncited_tokens = 0
+
+        for turn in self._turns:
+            if self.tokens_used() <= operating_ceiling:
+                break
+            for idx, entry in enumerate(turn):
+                if self.tokens_used() <= operating_ceiling:
+                    break
+                if entry.get("role") != "tool" or not entry.get("passages"):
+                    continue
+                passages = entry["passages"]
+                cited = [p for p in passages if p.get("label") in needed_labels]
+                uncited = [p for p in passages if p.get("label") not in needed_labels]
+                if not uncited:
+                    continue
+                for p in uncited:
+                    dropped_uncited_passages += 1
+                    dropped_uncited_tokens += self.count_tokens(p.get("text", "") or "")
+                    self._seen_ids.discard(p["id"])
+                if cited:
+                    turn[idx] = {**entry, "passages": [dict(p) for p in cited]}
+                else:
+                    turn[idx] = {
+                        "role": "tool",
+                        "content": (
+                            f"[evidence dropped to save space: {len(uncited)} "
+                            "passages, never cited]"
+                        ),
+                    }
+
         removed_entries: list[dict] = []
         evicted_turns = 0
-        while self.tokens_used() > operating_ceiling and len(self._turns) > 1:
-            removed = self._turns.pop(0)
-            removed_entries.extend(removed)
-            evicted_turns += 1
+        if self.tokens_used() > operating_ceiling:
+            while self.tokens_used() > operating_ceiling and len(self._turns) > 1:
+                removed = self._turns.pop(0)
+                removed_entries.extend(removed)
+                evicted_turns += 1
 
-        if evicted_turns == 0:
+        if evicted_turns == 0 and dropped_uncited_passages == 0:
             return None
 
-        needed_labels: set[str] = set()
-        for turn in self._turns:
-            for entry in turn:
-                if entry.get("role") == "assistant":
-                    needed_labels.update(entry.get("cited_labels") or [])
-
+        needed_labels = self._cited_labels()
         have_labels = {p["label"] for p in self._protected}
         for turn in self._turns:
             for entry in turn:
@@ -393,4 +452,6 @@ class PromptLog:
             evicted_turns=evicted_turns,
             tokens_before=tokens_before,
             tokens_after=tokens_after,
+            dropped_uncited_passages=dropped_uncited_passages,
+            dropped_uncited_tokens=dropped_uncited_tokens,
         )

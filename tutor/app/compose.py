@@ -290,6 +290,8 @@ def _make_turn_runner(
                     "evicted_turns": obj.get("evicted_turns"),
                     "tokens_before": obj.get("tokens_before"),
                     "tokens_after": obj.get("tokens_after"),
+                    "dropped_uncited_passages": obj.get("dropped_uncited_passages", 0),
+                    "dropped_uncited_tokens": obj.get("dropped_uncited_tokens", 0),
                 }
                 last_eviction[session_id] = payload
                 emit("eviction", payload)
