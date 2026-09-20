@@ -1,0 +1,12 @@
+{"id": "q01", "question": "What is the Pythagorean theorem?", "expected_paths": ["pythagorean_theorem"], "category": "direct", "split": "tuning"}
+{"id": "q02", "question": "What are the basics of algebra?", "expected_paths": ["algebra_basics"], "category": "direct", "split": "tuning"}
+{"id": "q03", "question": "Tell me about the history of mathematics.", "expected_paths": ["history_of_mathematics"], "category": "direct", "split": "tuning"}
+{"id": "q04", "question": "What is geometry an introduction to?", "expected_paths": ["geometry_intro"], "category": "direct", "split": "tuning"}
+{"id": "q05", "question": "What is an Erdos number?", "expected_paths": ["erdos_number"], "category": "direct", "split": "tuning"}
+{"id": "q06", "question": "How does photosynthesis work?", "expected_paths": ["photosynthesis"], "category": "direct", "split": "tuning"}
+{"id": "q07", "question": "What is the water cycle?", "expected_paths": ["the_water_cycle"], "category": "direct", "split": "heldout"}
+{"id": "q08", "question": "What caused World War Two?", "expected_paths": ["world_war_two"], "category": "why_how", "split": "heldout"}
+{"id": "q09", "question": "Why do we study the French Revolution?", "expected_paths": ["the_french_revolution"], "category": "why_how", "split": "heldout"}
+{"id": "q10", "question": "What are chemical bonds?", "expected_paths": ["chemical_bonds"], "category": "direct", "split": "heldout"}
+{"id": "q11", "question": "What are Newton's laws of motion?", "expected_paths": ["newtons_laws"], "category": "direct", "split": "heldout"}
+{"id": "q12", "question": "What is the periodic table?", "expected_paths": ["the_periodic_table"], "category": "direct", "split": "heldout"}

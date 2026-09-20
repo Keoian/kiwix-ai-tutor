@@ -6,7 +6,7 @@ requires it to be updated in the **same commit** that vendors the code.
 
 | Component | Upstream | Tag / commit | Licence | Vendored into |
 |---|---|---|---|---|
-| openzim-mcp | https://github.com/cameronrye/openzim-mcp | v3.3.4 / 9358db06f205bb0b95cc938c68405851a0e205a8 | MIT | `tutor/retrieval/zim/archive.py` (from `openzim_mcp/zim/archive.py`: `ZIM_MAGIC`, `_declared_zim_size`, `has_zim_signature`, `is_truncated_zim`, vendored near-verbatim); `tutor/retrieval/zim/resolve.py` (from `openzim_mcp/zim/redirects.py`: `resolve_redirect_chain`, adapted into `resolve_entry`) |
+| openzim-mcp | https://github.com/cameronrye/openzim-mcp | v3.3.4 / 9358db06f205bb0b95cc938c68405851a0e205a8 | MIT | `tutor/retrieval/zim/archive.py` (from `openzim_mcp/zim/archive.py`: `ZIM_MAGIC`, `_declared_zim_size`, `has_zim_signature`, `is_truncated_zim`, vendored near-verbatim); `tutor/retrieval/zim/resolve.py` (from `openzim_mcp/zim/redirects.py`: `resolve_redirect_chain`, adapted into `resolve_entry`); `tutor/retrieval/zim/content.py` (from `openzim_mcp/content_processor.py`: only the `select_main_content` landmark-priority idea kept, reimplemented; the html2text/heading-locator rendering pipeline was replaced with an online single-pass renderer); `tutor/retrieval/zim/bundle.py` (from `openzim_mcp/bundle.py`: only the "one parse, one bundle" shape of `extract_entry_bundle` kept; `_compute_section_offsets`/`_locate_heading_text`/`_match_decorated_heading_line`/`_strip_md_inline_decorations` were dropped in favour of the online offsets `content.py` records, and infobox/link extraction were rewritten from scratch) |
 
 ### openzim-mcp MIT licence text
 
