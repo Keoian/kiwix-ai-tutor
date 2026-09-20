@@ -171,6 +171,50 @@ body {
   opacity: 0.85;
 }
 
+/* 2026-09-20 attribution follow-up: subtle markers for host-side
+   sentence-level attribution -- distinct from model [S#] citation chips
+   above, per docs/attribution_design.md. The host never edits the
+   model's text, so these are small inline markers, not highlights. */
+.attribution-marker {
+  display: inline-block;
+  margin: 0 0.2rem;
+  font-size: 0.75em;
+  line-height: 1;
+  border: none;
+  background: none;
+  padding: 0;
+  vertical-align: middle;
+}
+
+button.attribution-marker {
+  cursor: pointer;
+}
+
+.attribution-backed {
+  color: var(--accent);
+}
+
+.attribution-unbacked {
+  color: var(--muted);
+  opacity: 0.8;
+}
+
+.attribution-unbacked-number {
+  color: #c0392b;
+  font-weight: bold;
+}
+
+#attribution-legend ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 0.85em;
+}
+
+#attribution-legend li {
+  margin-bottom: 0.35rem;
+}
+
 #action-bar {
   display: flex;
   gap: 0.5rem;

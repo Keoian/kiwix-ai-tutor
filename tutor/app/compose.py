@@ -22,12 +22,13 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import logging
 import math
 import threading
 from dataclasses import dataclass
 from typing import Any
 
-from tutor.app.citations import detect_evidence_dump, resolve_citations
+from tutor.app.citations import attribute_sentences, detect_evidence_dump, resolve_citations
 from tutor.app.lesson_state import LessonStore
 from tutor.app.llm_client import LlamaClient, LlamaError, StreamEvent
 from tutor.app.main import AppDeps
@@ -46,6 +47,8 @@ from tutor.tools import calc_tool
 _STUDENT_SAFE_ERROR = (
     "Sorry, I ran into a problem answering that. Please try asking again."
 )
+
+_logger = logging.getLogger(__name__)
 
 _TOKEN_CACHE_SIZE = 4096
 
@@ -318,6 +321,7 @@ def _make_turn_runner(
             return
 
         citation_passage_ids: list[str] = []
+        attributions_payload: dict | None = None
         if result.status == "ok":
             known_passages = session.known_passages()
             citations = resolve_citations(result.answer_text, known_passages)
@@ -339,6 +343,24 @@ def _make_turn_runner(
                     "unsupported_labels": unsupported_labels,
                 },
             )
+            # Host-side sentence-level attribution (2026-09-20 follow-up,
+            # docs/attribution_design.md): a separate SSE event, sent
+            # before "done", never editing the model's own answer text.
+            # Failure here must never fail an otherwise-successful turn.
+            try:
+                attribution_result = attribute_sentences(result.answer_text, known_passages)
+            except Exception:  # noqa: BLE001 - attribution is best-effort
+                _logger.exception("attribute_sentences failed for session %s", session_id)
+            else:
+                attributions_payload = {
+                    "attributions": [
+                        dataclasses.asdict(a) for a in attribution_result.attributions
+                    ],
+                    "unbacked": [
+                        dataclasses.asdict(u) for u in attribution_result.unbacked_spans
+                    ],
+                }
+                emit("attributions", attributions_payload)
             emit(
                 "done",
                 {
@@ -369,12 +391,22 @@ def _make_turn_runner(
                     user_input=user_input,
                     result=result,
                     citation_passage_ids=citation_passage_ids,
+                    attributions=attributions_payload,
                 )
 
     return turn_runner
 
 
-def _persist_turn(lessons, lesson_id, session, *, user_input, result, citation_passage_ids) -> None:
+def _persist_turn(
+    lessons,
+    lesson_id,
+    session,
+    *,
+    user_input,
+    result,
+    citation_passage_ids,
+    attributions: dict | None = None,
+) -> None:
     """Best-effort, atomic per-turn persistence for a session attached to a
     lesson (see ``routes.create_lesson``/``routes.resume_lesson``). A log
     left invalid by a crashed tool call is repaired first (mirroring
@@ -406,6 +438,7 @@ def _persist_turn(lessons, lesson_id, session, *, user_input, result, citation_p
             user_text=user_input.text if user_input.kind == "text" else None,
             action=user_input.action if user_input.kind == "action" else None,
             eviction_events=eviction_events,
+            attributions=attributions,
         )
     except ValueError:
         # Subject changed mid-lesson: the existing LessonStore rule is

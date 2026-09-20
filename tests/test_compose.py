@@ -161,6 +161,89 @@ def test_turn_runner_maps_token_tool_citations_done_events(tmp_path):
     assert citations_data["unsupported_labels"] == []
 
 
+def test_turn_runner_emits_attributions_event_before_done(tmp_path):
+    """2026-09-20 attribution follow-up: the host attributes sentences to
+    passages as a separate SSE event, sent before `done`, never editing the
+    model's text."""
+    cfg = _cfg_with_unreachable_llm_and_missing_archives(tmp_path)
+    answer = "The mitochondria is the powerhouse of the cell. [S1]"
+    events = [
+        StreamEvent(kind="token", text=answer),
+        StreamEvent(kind="done", finish_reason="stop", usage={}),
+    ]
+    fake_llm = _FakeLlm(events)
+
+    class _PassagesResearchEngine:
+        def research(self, query, *, topic_hint=None, keywords=None):
+            return {
+                "passages": [
+                    {
+                        "label": "S1",
+                        "id": "p1",
+                        "title": "Cell biology",
+                        "path": "Biology/Cell",
+                        "text": "The mitochondria is the powerhouse of the cell.",
+                        "kind": "article",
+                    }
+                ]
+            }
+
+    deps = build_deps(cfg, llm=fake_llm, research_engine=_PassagesResearchEngine())
+    session_id = deps.sessions.create()
+    frames = []
+
+    def emit(event_name, data):
+        frames.append((event_name, data))
+
+    cancel = threading.Event()
+    deps.turn_runner(
+        session_id, _Input(kind="text", text="What is the mitochondria?"), emit, cancel
+    )
+
+    names = [name for name, _ in frames]
+    assert "attributions" in names
+    assert names.index("attributions") < names.index("done")
+
+    attributions_data = dict(frames)["attributions"]
+    assert "attributions" in attributions_data
+    assert "unbacked" in attributions_data
+    assert attributions_data["attributions"][0]["passage_id"] == "p1"
+    assert attributions_data["attributions"][0]["label"] == "S1"
+
+
+def test_turn_runner_survives_attribution_exception(tmp_path, monkeypatch):
+    """A broken attribution layer must never fail the turn -- it just emits
+    no `attributions` event."""
+    import tutor.app.compose as compose_module
+
+    cfg = _cfg_with_unreachable_llm_and_missing_archives(tmp_path)
+    events = [
+        StreamEvent(kind="token", text="Water boils at 100C."),
+        StreamEvent(kind="done", finish_reason="stop", usage={}),
+    ]
+    fake_llm = _FakeLlm(events)
+    deps = build_deps(cfg, llm=fake_llm, research_engine=_FakeResearchEngine())
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(compose_module, "attribute_sentences", _boom)
+
+    session_id = deps.sessions.create()
+    frames = []
+
+    def emit(event_name, data):
+        frames.append((event_name, data))
+
+    cancel = threading.Event()
+    deps.turn_runner(session_id, _Input(kind="text", text="Does water boil?"), emit, cancel)
+
+    names = [name for name, _ in frames]
+    assert "attributions" not in names
+    assert names[-1] == "done"
+    assert dict(frames)["done"]["status"] == "ok"
+
+
 def test_turn_runner_flags_unsupported_citations_and_evidence_dump(tmp_path):
     """The owner's real failure: 11 off-topic passages, all labels resolve
     but none support the answer's claim, and the answer dumps the evidence

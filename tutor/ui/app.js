@@ -23,6 +23,7 @@
   let currentStudentId = null;
   let lastTurnMeta = null;
   let lastCitationsEvent = null;
+  let lastAttributionsEvent = null;
 
   // ---------------------------------------------------------------------
   // Students / lessons (WP-C4: profile selector, new lesson, resume list)
@@ -174,6 +175,120 @@
   }
 
   // -----------------------------------------------------------------------
+  // 2026-09-20 attribution follow-up (docs/attribution_design.md): the host
+  // attributes sentences to passages as a separate layer from the model's
+  // own [S#] labels. It never edits or rewrites the answer text -- it only
+  // adds small marker nodes (textContent/DOM nodes only, never raw markup) at sentence
+  // boundaries: a subtle marker for a host-backed sentence (opens the
+  // source viewer, same as a citation chip), a distinct style for an
+  // unbacked sentence ("the tutor's own words -- not checked against the
+  // library"), and a stronger one for unbacked_number (a figure not found
+  // anywhere in the library). Spans are char offsets into the raw answer
+  // text; renderTextWithCitations below never runs any markdown/HTML
+  // transform on that text, so offsets always line up with what is on
+  // screen -- a marker whose offset cannot be mapped onto the current text
+  // (out of range) is simply skipped rather than mis-highlighting.
+  // -----------------------------------------------------------------------
+
+  function attributionMarkers(attributionsEvent) {
+    const markers = [];
+    if (!attributionsEvent) return markers;
+    (attributionsEvent.attributions || []).forEach(function (a) {
+      if (a.model_cited) return; // the model's own [S#] chip already covers this
+      const span = a.sentence_span || [];
+      markers.push({ pos: span[1], kind: "backed", passageId: a.passage_id });
+    });
+    (attributionsEvent.unbacked || []).forEach(function (u) {
+      const span = u.span || [];
+      markers.push({
+        pos: span[1],
+        kind: u.reason === "unbacked_number" ? "unbacked-number" : "unbacked",
+      });
+    });
+    markers.sort(function (a, b) {
+      return a.pos - b.pos;
+    });
+    return markers;
+  }
+
+  function makeAttributionMarkerNode(marker) {
+    if (marker.kind === "backed") {
+      const btn = el("button", {
+        className: "attribution-marker attribution-backed",
+        text: "●",
+        attrs: { type: "button", "aria-label": "source-backed", "data-passage-id": marker.passageId || "" },
+      });
+      btn.addEventListener("click", function () {
+        openSourceViewer(marker.passageId);
+      });
+      return btn;
+    }
+    if (marker.kind === "unbacked-number") {
+      return el("span", {
+        className: "attribution-marker attribution-unbacked-number",
+        text: "⚠",
+        attrs: { "aria-label": "number not found in the library" },
+      });
+    }
+    return el("span", {
+      className: "attribution-marker attribution-unbacked",
+      text: "○",
+      attrs: { "aria-label": "the tutor's own words -- not checked against the library" },
+    });
+  }
+
+  // Rebuilds tutorNode's content from the final answer text, splitting on
+  // both the model's own [S#] citation groups and the host's attribution
+  // markers, in offset order. Only called once the answer is complete (on
+  // the "attributions" event) so `text` is stable and matches the spans.
+  function renderAnswerWithAttribution(container, text, attributionsEvent) {
+    container.textContent = "";
+    const markers = attributionMarkers(attributionsEvent).filter(function (m) {
+      return typeof m.pos === "number" && m.pos >= 0 && m.pos <= text.length;
+    });
+
+    const citationMatches = [];
+    CITATION_RE.lastIndex = 0;
+    let match;
+    while ((match = CITATION_RE.exec(text)) !== null) {
+      citationMatches.push({
+        start: match.index,
+        end: CITATION_RE.lastIndex,
+        labels: match[1].split(",").map(function (s) { return s.trim(); }),
+      });
+    }
+
+    let cursor = 0;
+    let markerIndex = 0;
+
+    function emitTextUpTo(pos) {
+      if (pos > cursor) {
+        container.appendChild(document.createTextNode(text.slice(cursor, pos)));
+        cursor = pos;
+      }
+    }
+
+    function emitMarkersUpTo(pos) {
+      while (markerIndex < markers.length && markers[markerIndex].pos <= pos) {
+        emitTextUpTo(markers[markerIndex].pos);
+        container.appendChild(makeAttributionMarkerNode(markers[markerIndex]));
+        markerIndex += 1;
+      }
+    }
+
+    citationMatches.forEach(function (citation) {
+      emitMarkersUpTo(citation.start);
+      emitTextUpTo(citation.start);
+      citation.labels.forEach(function (label) {
+        container.appendChild(renderCitationChip(label));
+      });
+      cursor = citation.end;
+    });
+    emitMarkersUpTo(text.length);
+    emitTextUpTo(text.length);
+  }
+
+  // -----------------------------------------------------------------------
   // 2026-09-20 evidence-dump follow-up: "resolves" != "supports". The host
   // never edits or removes anything from the model's own text -- it only
   // collapses a detected dump behind a toggle, and adds a plain note when
@@ -300,6 +415,7 @@
     let tutorLine = "";
     const tutorNode = appendMessage("tutor", "");
     lastCitationsEvent = null;
+    lastAttributionsEvent = null;
 
     currentAbortController = new AbortController();
     try {
@@ -374,6 +490,10 @@
     } else if (eventName === "citations") {
       lastCitationsEvent = data;
       renderCitations(tutorNode, data.citations);
+    } else if (eventName === "attributions") {
+      lastAttributionsEvent = data;
+      renderAnswerWithAttribution(tutorNode, getTutorLine(), data);
+      renderCitations(tutorNode, lastCitationsEvent && lastCitationsEvent.citations);
     } else if (eventName === "eviction") {
       appendEvictionNote(data);
     } else if (eventName === "error") {

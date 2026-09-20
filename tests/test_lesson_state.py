@@ -168,6 +168,58 @@ class TestTurnAppending:
             }
         ]
 
+    def test_append_turn_records_attributions(self, tmp_path):
+        """2026-09-20 attribution follow-up: sentence-level attribution is
+        persisted per-turn the same way eviction_events is, so reloading a
+        lesson can still show which sentences were host-backed/unbacked."""
+        profile_id = _make_profile_id(tmp_path)
+        store = LessonStore(tmp_path / "lessons.sqlite3")
+        lesson_id = store.start_lesson(profile_id=profile_id, subject="math")
+        attributions = {
+            "attributions": [
+                {
+                    "sentence_span": [0, 10],
+                    "passage_id": "p1",
+                    "label": "S1",
+                    "score": 1.0,
+                    "model_cited": True,
+                }
+            ],
+            "unbacked_spans": [{"span": [11, 20], "reason": "unbacked"}],
+        }
+        store.append_turn(
+            lesson_id,
+            subject="math",
+            user_text="Explain fractions",
+            route="preretrieve",
+            calc_calls=0,
+            research_calls=1,
+            citation_passage_ids=["p1"],
+            tokens_used=100,
+            cached_tokens=0,
+            attributions=attributions,
+        )
+        [turn] = store.list_turns(lesson_id)
+        assert turn.attributions == attributions
+
+    def test_append_turn_without_attributions_leaves_it_none(self, tmp_path):
+        profile_id = _make_profile_id(tmp_path)
+        store = LessonStore(tmp_path / "lessons.sqlite3")
+        lesson_id = store.start_lesson(profile_id=profile_id, subject="math")
+        store.append_turn(
+            lesson_id,
+            subject="math",
+            user_text="Explain fractions",
+            route="preretrieve",
+            calc_calls=0,
+            research_calls=1,
+            citation_passage_ids=["p1"],
+            tokens_used=100,
+            cached_tokens=0,
+        )
+        [turn] = store.list_turns(lesson_id)
+        assert turn.attributions is None
+
 
 class TestResumeRebuildsByteIdenticalLog:
     def test_resume_prompt_log_renders_byte_identical(self, tmp_path):

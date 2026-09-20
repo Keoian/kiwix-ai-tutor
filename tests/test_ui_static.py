@@ -170,6 +170,50 @@ def test_app_js_still_never_uses_innerhtml_after_dump_handling():
 
 
 # ---------------------------------------------------------------------------
+# 2026-09-20 attribution follow-up: host-side sentence-level attribution
+# (docs/attribution_design.md). The UI never edits the model's text or
+# inserts [S#] itself -- it renders a subtle marker per host-backed
+# sentence (opens the source viewer), a distinct style for unbacked
+# sentences, a stronger one for unbacked_number, and a legend using the
+# spec's own statement names.
+# ---------------------------------------------------------------------------
+
+
+def test_app_js_handles_attributions_event():
+    text = _read(APP_JS)
+    assert "attributions" in text
+
+
+def test_app_js_distinguishes_unbacked_number():
+    text = _read(APP_JS)
+    assert "unbacked_number" in text or "unbacked-number" in text
+
+
+def test_app_js_opens_source_viewer_for_host_backed_attribution():
+    text = _read(APP_JS)
+    assert "openSourceViewer" in text
+    assert "passage_id" in text
+
+
+def test_app_js_attribution_handling_uses_textcontent_only():
+    text = _read(APP_JS)
+    assert "innerHTML" not in text
+
+
+def test_index_html_has_attribution_legend():
+    text = _read(INDEX_HTML)
+    lower = text.lower()
+    assert "source-backed" in lower
+    assert "not checked against the library" in lower
+    assert "not found in the library" in lower
+
+
+def test_app_css_has_attribution_marker_styles():
+    text = _read(APP_CSS)
+    assert "attribution" in text.lower()
+
+
+# ---------------------------------------------------------------------------
 # kiosk launch scripts
 # ---------------------------------------------------------------------------
 
