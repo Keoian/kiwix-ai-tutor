@@ -148,6 +148,17 @@ class TurnRecord:
     expected_calc: float | None = None
     calc_answer_text: str | None = None
     calc_correct: bool | None = None
+    answer_text: str = ""
+    labels: list[str] = field(default_factory=list)
+    unsupported_labels: list[str] = field(default_factory=list)
+    citation_quality: str | None = None
+    evidence_dump: bool = False
+
+    @property
+    def is_factual(self) -> bool:
+        """Pre-retrieval turns only (the only turns citations are expected
+        on)."""
+        return bool(self.route and self.route.startswith("preretrieve"))
 
 
 def _percentile(values: list[float], p: float) -> float | None:
@@ -193,8 +204,11 @@ def aggregate(records: list[TurnRecord]) -> dict[str, Any]:
 
     total_citations = sum(r.citations for r in ok)
     total_resolved = sum(r.citations_resolved for r in ok)
-    factual = [r for r in ok if r.route and r.route.startswith("preretrieve")]
+    factual = [r for r in ok if r.is_factual]
     uncited_count = sum(1 for r in factual if r.uncited)
+    cited_turns = sum(1 for r in factual if r.labels)
+    supported_turns = sum(1 for r in factual if r.labels and not r.unsupported_labels)
+    evidence_dump_turns = sum(1 for r in factual if r.evidence_dump)
 
     calc_items = [r for r in ok if r.expected_calc is not None]
     calc_correct = [r for r in calc_items if r.calc_correct]
@@ -235,6 +249,11 @@ def aggregate(records: list[TurnRecord]) -> dict[str, Any]:
         "citation_resolved_rate": (total_resolved / total_citations) if total_citations else None,
         "uncited_rate": (uncited_count / len(factual)) if factual else None,
         "factual_turns": len(factual),
+        "cited_turns": cited_turns,
+        "cited_rate": (cited_turns / len(factual)) if factual else None,
+        "supported_turns": supported_turns,
+        "supported_rate": (supported_turns / len(factual)) if factual else None,
+        "evidence_dump_turns": evidence_dump_turns,
         "calc_items": len(calc_items),
         "calc_correct": len(calc_correct),
         "calc_accuracy": (len(calc_correct) / len(calc_items)) if calc_items else None,
@@ -371,6 +390,39 @@ def render_report(
                   f"correct: {summary['calc_correct']} ({_fmt(summary['calc_accuracy'])})")
     lines.append("")
 
+    lines.append("### Citations (factual turns only)")
+    lines.append("")
+    lines.append(
+        "cited_rate == 1 - uncited_rate (same factual-turn denominator, complementary "
+        "definitions: cited_rate counts turns with >=1 [S#] label, uncited_rate counts "
+        "turns with none)."
+    )
+    lines.append("")
+    lines.append("| metric | value | definition |")
+    lines.append("|---|---|---|")
+    lines.append(
+        f"| factual_turns | {summary['factual_turns']} | "
+        "pre-retrieval turns (route starts with `preretrieve`) |"
+    )
+    lines.append(
+        f"| cited_turns / cited_rate | {summary['cited_turns']} / {_fmt(summary['cited_rate'])} | "
+        "factual turns with at least one [S#] citation label |"
+    )
+    lines.append(
+        f"| supported_turns / supported_rate | {summary['supported_turns']} / "
+        f"{_fmt(summary['supported_rate'])} | "
+        "factual turns with >=1 citation label and no unsupported labels |"
+    )
+    lines.append(
+        f"| evidence_dump_turns | {summary['evidence_dump_turns']} | "
+        "factual turns flagged as dumping raw evidence instead of a synthesized answer |"
+    )
+    lines.append(
+        f"| uncited_rate | {_fmt(summary['uncited_rate'])} | "
+        "factual turns with no [S#] citation at all (== 1 - cited_rate) |"
+    )
+    lines.append("")
+
     lines.append("## Research status mix (measured, captured via a research()-call recorder; "
                   "no research_status field is exposed over the wire today)")
     lines.append("")
@@ -437,6 +489,25 @@ def render_report(
     lines.append("")
 
     return "\n".join(lines)
+
+
+def turns_dump_path(out_path: str) -> Path:
+    """The path a per-turn JSON dump for ``out_path`` is written to: same
+    stem, under ``data/`` instead of ``out_path``'s own directory, with a
+    ``.turns.json`` suffix (e.g. ``docs/x/q1_soak10.md`` ->
+    ``data/q1_soak10.turns.json``)."""
+    return Path("data") / f"{Path(out_path).stem}.turns.json"
+
+
+def write_turns_dump(records: list[TurnRecord], out_path: str) -> Path:
+    """Write every ``TurnRecord`` (including ``answer_text``) as JSON next
+    to the report, so a run can be re-scored later without re-running the
+    soak. Returns the path written."""
+    dump_path = turns_dump_path(out_path)
+    dump_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = [dataclasses.asdict(r) | {"is_factual": r.is_factual} for r in records]
+    dump_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return dump_path
 
 
 def _fmt(x: float | None) -> str:
@@ -605,6 +676,10 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
                 error = None
                 answer_text = ""
                 eviction_events = 0
+                labels: list[str] = []
+                unsupported_labels: list[str] = []
+                citation_quality = None
+                evidence_dump = False
 
                 try:
                     with client.stream(
@@ -621,8 +696,10 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
                                 continue
                             data = json.loads(line[len("data: "):])
                             now = time.monotonic()
-                            if event_name == "token" and ttft is None:
-                                ttft = now - t0
+                            if event_name == "token":
+                                if ttft is None:
+                                    ttft = now - t0
+                                answer_text += data.get("text", "") or ""
                             elif event_name == "tool":
                                 if tt_tool is None:
                                     tt_tool = now - t0
@@ -634,6 +711,8 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
                                 citations_resolved = sum(
                                     1 for c in cites if not c.get("unresolved")
                                 )
+                                labels = [c.get("label") for c in cites if c.get("label")]
+                                unsupported_labels = list(data.get("unsupported_labels", []))
                             elif event_name == "eviction":
                                 # GAP 2 fix: eviction_reprefill is now
                                 # forwarded live over SSE instead of this
@@ -645,7 +724,9 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
                                 tokens_used = data.get("tokens_used")
                                 cached_tokens = data.get("cached_tokens")
                                 uncited = bool(data.get("uncited"))
-                                answer_text = data.get("answer", "") or ""
+                                answer_text = data.get("answer") or answer_text
+                                citation_quality = data.get("citation_quality")
+                                evidence_dump = bool(data.get("evidence_dump"))
                                 if data.get("calc_calls") is not None:
                                     calc_calls = data["calc_calls"]
                             elif event_name == "error":
@@ -698,6 +779,11 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
                         expected_calc=expected_calc,
                         calc_answer_text=answer_text,
                         calc_correct=calc_correct,
+                        answer_text=answer_text,
+                        labels=labels,
+                        unsupported_labels=unsupported_labels,
+                        citation_quality=citation_quality,
+                        evidence_dump=evidence_dump,
                     )
                 )
 
@@ -732,6 +818,7 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
                 time.sleep(think_time_s)
 
             summary = aggregate(records)
+            write_turns_dump(records, out_path)
 
             # --- resume check: fresh app instance, same data_dir ---
             from tutor.app.prompt import serialize_messages

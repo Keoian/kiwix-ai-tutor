@@ -8,6 +8,9 @@ fakes.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from eval.run_lesson_soak import (
@@ -18,6 +21,8 @@ from eval.run_lesson_soak import (
     cycle_script,
     render_report,
     score_calc,
+    turns_dump_path,
+    write_turns_dump,
 )
 
 # ---------------------------------------------------------------------------
@@ -103,6 +108,11 @@ def _rec(**kwargs) -> TurnRecord:
         cached_tokens=800,
         eviction_events=0,
         status="ok",
+        answer_text="Plants use sunlight [S1].",
+        labels=["S1"],
+        unsupported_labels=[],
+        citation_quality="ok",
+        evidence_dump=False,
     )
     base.update(kwargs)
     return TurnRecord(**base)
@@ -173,6 +183,41 @@ def test_aggregate_cache_hit_ratio_mean():
     assert summary["cache_hit_ratio_mean"] == pytest.approx((0.9 + 0.5) / 2)
 
 
+def test_turn_record_is_factual_reflects_route():
+    assert _rec(route="preretrieve").is_factual is True
+    assert _rec(route="preretrieve_deep").is_factual is True
+    assert _rec(route="action").is_factual is False
+    assert _rec(route=None).is_factual is False
+
+
+def test_aggregate_cited_and_supported_rates_over_factual_turns_only():
+    records = [
+        _rec(index=1, route="preretrieve", labels=["S1"], unsupported_labels=[]),
+        _rec(index=2, route="preretrieve", labels=["S1"], unsupported_labels=["S1"]),
+        _rec(index=3, route="preretrieve", labels=[], unsupported_labels=[], uncited=True),
+        _rec(index=4, route="action", labels=[], unsupported_labels=[]),
+    ]
+    summary = aggregate(records)
+    assert summary["factual_turns"] == 3
+    assert summary["cited_turns"] == 2
+    assert summary["cited_rate"] == pytest.approx(2 / 3)
+    assert summary["supported_turns"] == 1
+    assert summary["supported_rate"] == pytest.approx(1 / 3)
+    assert summary["uncited_rate"] == pytest.approx(1 / 3)
+    # documented relationship: cited_rate == 1 - uncited_rate
+    assert summary["cited_rate"] == pytest.approx(1 - summary["uncited_rate"])
+
+
+def test_aggregate_evidence_dump_turns_counted_over_factual_only():
+    records = [
+        _rec(index=1, route="preretrieve", evidence_dump=True),
+        _rec(index=2, route="preretrieve", evidence_dump=False),
+        _rec(index=3, route="action", evidence_dump=True),
+    ]
+    summary = aggregate(records)
+    assert summary["evidence_dump_turns"] == 1
+
+
 def test_aggregate_empty_records_does_not_crash():
     summary = aggregate([])
     assert summary["turns_completed"] == 0
@@ -220,6 +265,46 @@ def test_render_report_handles_no_resource_samples():
     summary = aggregate([])
     report = render_report(summary, [], {"generated_at": "t", "resume_check": "SKIPPED"})
     assert "no resource samples were collected" in report
+
+
+def test_render_report_includes_citations_table_for_factual_turns():
+    records = [
+        _rec(index=1, route="preretrieve", labels=["S1"], unsupported_labels=[]),
+        _rec(index=2, route="preretrieve", labels=[], unsupported_labels=[], uncited=True),
+    ]
+    summary = aggregate(records)
+    report = render_report(summary, [], {"generated_at": "t", "resume_check": "SKIPPED"})
+    assert "Citations (factual turns only)" in report
+    assert "cited_turns / cited_rate" in report
+    assert "supported_turns / supported_rate" in report
+    assert "evidence_dump_turns" in report
+    assert "1 - cited_rate" in report or "1 - uncited_rate" in report
+
+
+# ---------------------------------------------------------------------------
+# per-turn JSON dump (for later re-scoring)
+# ---------------------------------------------------------------------------
+
+
+def test_turns_dump_path_mirrors_stem_under_data_dir():
+    assert turns_dump_path("docs/x/q1_soak10.md") == Path("data/q1_soak10.turns.json")
+
+
+def test_write_turns_dump_writes_json_with_answer_text(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    records = [
+        _rec(index=1, answer_text="Plants make sugar [S1]."),
+        _rec(index=2, answer_text="Because sunlight."),
+    ]
+    out_path = str(tmp_path / "docs" / "q1_soak10.md")
+    dump_path = write_turns_dump(records, out_path)
+    assert dump_path == Path("data/q1_soak10.turns.json")
+    assert dump_path.exists()
+    loaded = json.loads(dump_path.read_text(encoding="utf-8"))
+    assert len(loaded) == 2
+    assert loaded[0]["answer_text"] == "Plants make sugar [S1]."
+    assert loaded[0]["is_factual"] is True
+    assert loaded[1]["answer_text"] == "Because sunlight."
 
 
 # ---------------------------------------------------------------------------
