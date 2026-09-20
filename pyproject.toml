@@ -18,6 +18,8 @@ dependencies = [
     # "exactly one live child" assertions (used in tests and, if needed,
     # by the worker's own supervision logic).
     "psutil>=5.9",
+    # WP-C2: calc tool expression evaluation (whitelist parser over sympy).
+    "sympy>=1.12",
 ]
 
 [project.optional-dependencies]
@@ -28,6 +30,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["tutor*", "eval*"]
+
+[tool.setuptools.package-data]
+"tutor.retrieval.hybrid" = ["stopwords_en.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
