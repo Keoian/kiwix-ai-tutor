@@ -22,7 +22,7 @@ from tutor.tools.schemas import TOOLS, validate_tool_call
 
 pytestmark = pytest.mark.integration
 
-_CONFIG_PATHS = ["config/dev.toml", "config/dev.granite.toml"]
+_CONFIG_PATHS = ["config/dev.toml", "config/dev.granite.toml", "config/dev.ternary.toml"]
 
 
 def _make_client(config_path: str) -> LlamaClient:
