@@ -225,3 +225,56 @@ def test_load_questions_filters_to_fixture_zim_articles():
     # q01-q05's expected_paths exist in tests/zim_fixtures.py's fixture
     # ZIM; q06-q12 (photosynthesis, water cycle, WWII, ...) do not.
     assert ids == {"q01", "q02", "q03", "q04", "q05"}
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-20 live re-measurement follow-up: filter_questions (split /
+# categories / deterministic first-n), pure and fake-only.
+# ---------------------------------------------------------------------------
+
+
+def test_filter_questions_by_split():
+    from eval.run_turn_eval import filter_questions
+
+    rows = [
+        {"id": "a", "split": "tuning", "category": "direct"},
+        {"id": "b", "split": "heldout", "category": "direct"},
+    ]
+    out = filter_questions(rows, split="tuning")
+    assert [r["id"] for r in out] == ["a"]
+
+
+def test_filter_questions_by_categories():
+    from eval.run_turn_eval import filter_questions
+
+    rows = [
+        {"id": "a", "split": "tuning", "category": "direct"},
+        {"id": "b", "split": "tuning", "category": "why_how"},
+        {"id": "c", "split": "tuning", "category": "absent"},
+    ]
+    out = filter_questions(rows, categories=["direct", "why_how"])
+    assert [r["id"] for r in out] == ["a", "b"]
+
+
+def test_filter_questions_n_is_deterministic_first_n_after_filtering():
+    from eval.run_turn_eval import filter_questions
+
+    rows = [
+        {"id": "a", "split": "tuning", "category": "direct"},
+        {"id": "b", "split": "tuning", "category": "direct"},
+        {"id": "c", "split": "heldout", "category": "direct"},
+        {"id": "d", "split": "tuning", "category": "direct"},
+    ]
+    out = filter_questions(rows, split="tuning", n=2)
+    assert [r["id"] for r in out] == ["a", "b"]
+
+
+def test_score_answer_uncited_flag_mirrors_has_citation():
+    record = _record(answer_text="no labels here")
+    scored = score_answer(record)
+    assert scored["uncited"] is True
+    record2 = _record(
+        answer_text="cited [S1]",
+        citations=[{"label": "S1", "path": "pythagorean_theorem", "unresolved": False}],
+    )
+    assert score_answer(record2)["uncited"] is False

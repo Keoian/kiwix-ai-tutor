@@ -48,9 +48,12 @@ _FIXTURE_ARTICLE_IDS = {
 _TEACHING_MARKERS = ("?", "try", "step", "first,", "next,")
 
 
-def load_questions(path: Path = _QUESTIONS_PATH) -> list[dict]:
-    """Load questions whose ``expected_paths`` are covered by the fixture
-    ZIM, in file order."""
+def load_questions(path: Path = _QUESTIONS_PATH, *, filter_to_fixture: bool = True) -> list[dict]:
+    """Load questions in file order. When ``filter_to_fixture`` (default,
+    used by the fixture-ZIM path) only rows whose ``expected_paths`` are
+    covered by the fixture ZIM are kept; real-archive question files (e.g.
+    ``eval/questions/simplewiki_questions.jsonl``) pass ``filter_to_fixture=
+    False`` since there is no fixture-article allowlist for them."""
     questions = []
     with path.open(encoding="utf-8") as fh:
         for line in fh:
@@ -58,7 +61,9 @@ def load_questions(path: Path = _QUESTIONS_PATH) -> list[dict]:
             if not line:
                 continue
             row = json.loads(line)
-            if any(p in _FIXTURE_ARTICLE_IDS for p in row.get("expected_paths", [])):
+            if not filter_to_fixture or any(
+                p in _FIXTURE_ARTICLE_IDS for p in row.get("expected_paths", [])
+            ):
                 questions.append(row)
     return questions
 
@@ -117,7 +122,29 @@ def score_answer(record: AnswerRecord) -> dict:
         "answer_len_chars": len(record.answer_text),
         "taught": taught,
         "evidence_dump": record.evidence_dump,
+        "uncited": not has_citation,
     }
+
+
+def filter_questions(
+    rows: list[dict],
+    *,
+    split: str | None = None,
+    categories: list[str] | None = None,
+    n: int | None = None,
+) -> list[dict]:
+    """Filter loaded question rows by ``split``/``categories`` (both
+    optional, applied in that order), then take a deterministic first-``n``
+    (in the input's own order) if ``n`` is given. Pure, no I/O."""
+    out = rows
+    if split is not None:
+        out = [r for r in out if r.get("split") == split]
+    if categories is not None:
+        cats = set(categories)
+        out = [r for r in out if r.get("category") in cats]
+    if n is not None:
+        out = out[:n]
+    return out
 
 
 def aggregate(scores: list[dict]) -> dict:
@@ -194,10 +221,20 @@ def run_variant(
         agent_loop.render_evidence = render_evidence_fn  # type: ignore[attr-defined]
 
     scores = []
+    details = []
     try:
         for row in questions:
             session = make_session()
             user_input = _UserInputLike(kind="text", text=row["question"])
+
+            first_token_ms: float | None = None
+            t_start = time.monotonic()
+
+            def _timed_emit(evt, _t_start=t_start):
+                nonlocal first_token_ms
+                if first_token_ms is None and getattr(evt, "kind", None) == "token":
+                    first_token_ms = (time.monotonic() - _t_start) * 1000.0
+
             result = agent_loop.run_turn(
                 session,
                 user_input,
@@ -205,10 +242,12 @@ def run_variant(
                 research_engine=research_engine,
                 calc=calc,
                 budget=budget,
-                emit=lambda _obj: None,
+                emit=_timed_emit,
                 system_text_override=system_text,
                 temperature=temperature,
             )
+            total_ms = (time.monotonic() - t_start) * 1000.0
+
             known_passages = session.known_passages()
             resolved_citations = resolve_citations(result.answer_text, known_passages)
             citations = [
@@ -230,14 +269,32 @@ def run_variant(
                     result.answer_text, resolved_citations, known_passages
                 ),
             )
-            scores.append(score_answer(record))
+            scored = score_answer(record)
+            scored["calc_calls"] = result.calc_calls
+            scored["first_token_ms"] = first_token_ms
+            scored["total_ms"] = total_ms
+            scored["prompt_tokens"] = result.prompt_tokens
+            scored["passages_in_packet"] = len(known_passages)
+            scores.append(scored)
+            details.append(
+                {
+                    **scored,
+                    "question": row["question"],
+                    "answer_text": result.answer_text,
+                    "citations": citations,
+                    "route": result.route,
+                }
+            )
     finally:
         agent_loop.render_evidence = orig_render_evidence
 
+    run_variant.last_details = details  # type: ignore[attr-defined]
     return scores
 
 
-def _build_live_collaborators(config_path: str, zim_path: Path, tmp_path: Path):
+def _build_live_collaborators(
+    config_path: str, zim_path: Path | None, tmp_path: Path, registry_path: Path | None = None
+):
     from tutor.app.llm_client import LlamaClient
     from tutor.app.prompt import Budget
     from tutor.app.session import Session
@@ -247,13 +304,19 @@ def _build_live_collaborators(config_path: str, zim_path: Path, tmp_path: Path):
     from tutor.settings import load_config
 
     cfg = load_config(config_path)
-    llm = LlamaClient(cfg.server.base_url, timeout_s=10)
+    # 2026-09-20 live re-measurement: 10s was far too short for real-archive
+    # prompt prefill on this GPU (harness note: "large prompt prefill is
+    # slow") -- RUN A's first pass showed a wall of "Sorry, I ran into a
+    # problem" answers that were actually HTTP timeouts, not model
+    # failures. 120s covers a cold prefill plus generation comfortably.
+    llm = LlamaClient(cfg.server.base_url, timeout_s=120)
     if not llm.health():
         return None
 
-    registry_path = tmp_path / "archives.toml"
-    registry_path.write_text(
-        f"""
+    if registry_path is None:
+        registry_path = tmp_path / "archives.toml"
+        registry_path.write_text(
+            f"""
 [[archive]]
 id = "fixture_ssd"
 path = '{zim_path}'
@@ -262,8 +325,8 @@ kind = "encyclopedia"
 subjects = []
 storage = "ssd"
 """,
-        encoding="utf-8",
-    )
+            encoding="utf-8",
+        )
     registry: Registry = load_registry(registry_path)
     snapshot_store = SnapshotStore(tmp_path / "snapshots.sqlite")
     research_engine = ResearchEngine(
@@ -299,28 +362,74 @@ def main(argv: list[str] | None = None) -> int:
     import shutil
     import tempfile
 
-    from tests.zim_fixtures import build_zim
-
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="config/dev.toml")
+    parser.add_argument(
+        "--registry", default=None, help="Archive registry TOML; default: temp fixture registry"
+    )
+    parser.add_argument(
+        "--questions", default=None, help="Questions JSONL; default: fixture question set"
+    )
+    parser.add_argument("--split", default=None)
+    parser.add_argument("--categories", default=None, help="Comma-separated category allowlist")
+    parser.add_argument(
+        "--n", type=int, default=None, help="Deterministic first-n after filtering"
+    )
+    parser.add_argument(
+        "--variants", default=None, help="Comma-separated variant names; default: all"
+    )
+    parser.add_argument(
+        "--out", default=None, help="Markdown report path; also writes a sibling .json dump"
+    )
     args = parser.parse_args(argv)
 
-    questions = load_questions()
+    use_fixture = args.registry is None
+    if args.questions is not None:
+        questions = load_questions(Path(args.questions), filter_to_fixture=use_fixture)
+    else:
+        questions = load_questions()
+
+    categories = args.categories.split(",") if args.categories else None
+    questions = filter_questions(questions, split=args.split, categories=categories, n=args.n)
 
     tmp = tempfile.mkdtemp()
     try:
         tmp_path = Path(tmp)
-        zim_path = build_zim(tmp_path / "fixture.zim", indexing=True)
-        collaborators = _build_live_collaborators(args.config, zim_path, tmp_path)
+        zim_path = None
+        if use_fixture:
+            from tests.zim_fixtures import build_zim
+
+            zim_path = build_zim(tmp_path / "fixture.zim", indexing=True)
+        collaborators = _build_live_collaborators(
+            args.config,
+            zim_path,
+            tmp_path,
+            registry_path=Path(args.registry) if args.registry else None,
+        )
         if collaborators is None:
             print("llama-server /health unreachable; skipping live experiment.")
             return 0
 
         from eval.system_prompt_variants import VARIANTS
 
+        available = dict(VARIANTS)
+        available["current"] = {"system_text": None}
+
+        if args.variants:
+            names = args.variants.split(",")
+            variant_items = [(n, available[n]) for n in names if n in available]
+        else:
+            variant_items = list(available.items())
+
         summaries: dict[str, dict] = {}
+        all_details: dict[str, list] = {}
         t0 = time.monotonic()
-        for name, variant in VARIANTS.items():
+        for name, variant in variant_items:
+            system_text = variant.get("system_text")
+            if system_text is None:
+                import tutor.app.agent_loop as agent_loop
+
+                system_text = agent_loop._load_default_system_text()
             scores = run_variant(
                 questions,
                 make_session=collaborators["make_session"],
@@ -328,14 +437,25 @@ def main(argv: list[str] | None = None) -> int:
                 research_engine=collaborators["research_engine"],
                 calc=collaborators["calc"],
                 budget=collaborators["budget"],
-                system_text=variant["system_text"],
+                system_text=system_text,
                 render_evidence_fn=variant.get("render_evidence_fn"),
                 temperature=variant.get("temperature"),
             )
             summaries[name] = aggregate(scores)
+            all_details[name] = getattr(run_variant, "last_details", [])
             print(f"[{name}] done, elapsed {time.monotonic() - t0:.0f}s")
 
-        print(render_report(summaries))
+        report = render_report(summaries)
+        print(report)
+
+        if args.out:
+            out_path = Path(args.out)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(report + "\n", encoding="utf-8")
+            json_path = Path("data") / (out_path.stem + ".json")
+            json_path.parent.mkdir(parents=True, exist_ok=True)
+            json_path.write_text(json.dumps(all_details, indent=2), encoding="utf-8")
+            print(f"wrote {out_path} and {json_path}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

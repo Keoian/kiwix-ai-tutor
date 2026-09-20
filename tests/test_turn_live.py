@@ -201,11 +201,20 @@ def test_factual_question_pre_retrieves_streams_and_resolves_citations(live_app)
     if not citations:
         pytest.xfail(
             "model behaviour: no [S#] citation emitted for this fixture "
-            "question (measured 3/5 (60%) on 2026-09-20 across 5 fixture "
-            "questions against config/dev.toml's Bonsai-8B-Q1_0 model, "
-            "after adopting the evidence-block citation reminder in "
-            "tutor.app.citations.render_evidence -- up from 0.20 with the "
-            "prior renderer, still below the 80% bar for a hard assertion; "
+            "question. Re-measured live 2026-09-20 (evidence-dump "
+            "follow-up, real simplewiki archive, config/dev.toml's "
+            "Bonsai-8B-Q1_0 model, 18 real-lesson factual questions, "
+            "shipped 'current' system prompt + reminder wording): "
+            "cited_and_supported (all citations resolve AND pass "
+            "is_supported) = 0/18 (0%), citation_rate (>=1 [S#] label at "
+            "all) = 2/18 (11%), evidence_dump_rate = 0%. Two further "
+            "host-side levers (a shorter system prompt; temperature 0.2) "
+            "were tried and neither cleared the model's own knowledge "
+            "answering the question without citing supplied evidence -- "
+            "still far below the 80% bar for a hard assertion, and now "
+            "known to be model-limited rather than host-wording-limited "
+            "(the fixture-only 60% figure this xfail previously cited "
+            "does not generalize to real-archive, real-lesson questions); "
             "see eval/run_turn_eval.py and docs/citation_experiment.md)"
         )
 

@@ -64,6 +64,7 @@ class TurnResult:
     research_calls: int = 0
     calc_calls: int = 0
     cached_tokens: int | None = 0
+    prompt_tokens: int | None = None
     events: list = field(default_factory=list)
     uncited: bool = False
     """True when the route was a factual pre-retrieval (evidence was
@@ -286,6 +287,7 @@ def run_turn(
                 research_calls=research_calls,
                 calc_calls=calc_calls,
                 cached_tokens=usage.get("cached_tokens", 0),
+                prompt_tokens=usage.get("prompt_tokens"),
                 events=events,
                 uncited=uncited,
             )

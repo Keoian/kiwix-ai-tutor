@@ -209,26 +209,135 @@ which `run_variant` now populates via `detect_evidence_dump`).
 `render_report`'s table gained both columns. All test-first, fakes only,
 no network (`tests/test_run_turn_eval.py`).
 
-### Status: live re-measurement PENDING
+### Status: live re-measurement DONE (2026-09-20)
 
-**None of this has been re-measured against the live model.** The wording
-change is a plausible fix for the evidence-dump failure (it addresses the
-exact defect observed: cite-everything phrasing, no "say so if nothing
-answers" instruction, no explicit "don't dump" instruction), but the
-0.20 -> 0.60 citation-rate result upstream of it came from A/B measurement
-against the real 1-bit-8B model, and this wording has not been. The
-server is in active use by the project owner right now, so
-`python -m eval.run_turn_eval` (which drives the real turn path against a
-live llama-server) was deliberately **not** run for this change. Before
-trusting the new wording:
+Re-measured against the real `config/dev.toml` server (Bonsai-8B-Q1_0),
+the real `simplewiki` archive (`config/archives.simplewiki_only.toml`,
+no fixture ZIM), and 18 held-out-of-fixture questions from
+`eval/questions/simplewiki_questions.jsonl` (`--split tuning
+--categories direct,why_how,student_phrasing --n 18`), each a fresh
+single-turn session. `eval/run_turn_eval.py` was extended first
+(test-first, `tests/test_run_turn_eval.py`) with `--registry
+--questions --split --categories --n --variants --out` and a JSON
+per-answer dump (`data/citation_run_2026-09-20.json`) carrying
+`calc_calls`, `first_token_ms`, `total_ms`, `prompt_tokens`,
+`passages_in_packet`, `uncited`, in addition to the existing scoring
+fields.
 
-```powershell
-# Once the server is free:
-curl http://127.0.0.1:8080/health
-python -m eval.run_turn_eval
-```
+**Bug found and fixed first:** the harness's `LlamaClient` was
+constructed with `timeout_s=10`, far too short for real-archive prompt
+prefill on this GPU. The first RUN A pass returned the student-safe
+error message ("Sorry, I ran into a problem...") for roughly half the
+18 questions -- those were HTTP timeouts, not model refusals. Raised to
+`timeout_s=120` (`eval/run_turn_eval.py::_build_live_collaborators`)
+and re-ran; zero timeout errors after the fix. All numbers below are
+from the fixed-timeout run.
 
-and check `supported_citation_rate` / `evidence_dump_rate` alongside the
-existing `citation_rate` -- the new wording should raise the former and
-drive the latter toward 0 without regressing the 0.60 citation rate this
-document's earlier section measured.
+**RUN A -- shipped configuration (`current`: real system prompt,
+default `render_evidence`, default temperature), n=18:**
+
+| Variant | n | citation_rate | all_resolve_rate | supported_citation_rate | evidence_dump_rate | on_topic_rate | taught_rate | first_token p50 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 18 | 0.11 | 0.11 | 0.00 | 0.00 | 0.11 | 0.28 | see data/citation_run_2026-09-20.json |
+
+Cited-and-supported = 0/18. This is far below the 0.5 gate in the task
+brief, so RUN C ran (below). Reading the per-answer JSON dump: the
+model overwhelmingly answers real-lesson factual questions from its own
+parametric knowledge without emitting any `[S#]` label at all (16/18
+answers `uncited`), even though every turn was `route=preretrieve`
+(real evidence was supplied, 6 passages/packet). The two questions that
+did cite worked correctly (one supported, e.g. sw63's nitrogen boiling
+point cleanly cited `[S1]`). This reproduces the same failure shape as
+the 0.889-uncited measurement from the real 30-minute lesson --
+confirming that was not an artifact of that particular session, and
+that the reworded reminder/system-prompt did **not** move the needle on
+real-archive, real-lesson questions the way the fixture-only 5-question
+A/B (0.20 -> 0.60) suggested it would.
+
+**RUN C -- two further host-side levers, same 18 questions (triggered
+because RUN A's supported rate was below 0.5):**
+
+| Variant | n | citation_rate | all_resolve_rate | supported_citation_rate | evidence_dump_rate | on_topic_rate | taught_rate |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| c_short_prompt | 18 | 0.06 | 0.06 | 0.00 | 0.00 | 0.06 | 0.22 |
+| d_temperature_0.2 | 18 | 0.11 | 0.11 | 0.11 | 0.00 | 0.06 | 0.22 |
+
+Neither variant beats `current`'s 0.00 supported rate by the required
+>= 0.15 margin (`c_short_prompt` is worse; `d_temperature_0.2` gains
+only 0.11). **Nothing was adopted.** The shipped `current` configuration
+(system prompt + evidence-reminder wording from the 2026-09-20
+evidence-dump follow-up above) remains the default; `tests/
+test_turn_live.py`'s citation xfail reason was updated to this
+measurement (below).
+
+**RUN B -- owner's exact helium question, 3x, `current` variant:**
+
+Question: "Output the boiling point of helium in celsius and
+farenheit." Against `config/archives.simplewiki_only.toml` (real
+simplewiki ZIM). All three runs: `uncited=True` (no `[S#]` label),
+`calc_calls=0` (calc was NOT invoked for the C->F conversion despite
+the system prompt's explicit instruction to always use calc for unit
+conversions), `passages_in_packet=6`, route `preretrieve`.
+
+Verbatim answers:
+
+1. "The boiling point of helium is approximately **-268.9C** (or
+   **-452.0F**). This information is based on the fact that helium has
+   the lowest boiling point of all the elements, and its boiling point
+   is significantly lower than that of water."
+2. "The boiling point of helium is **-268.92C** or **-452.04F**. This
+   is based on the information that helium does not usually react with
+   anything else and has the lowest boiling point among all elements.
+   The boiling point of a substance depends on the surrounding air
+   pressure. For helium, this means its boiling point is significantly
+   lower than that of water, which boils at **100C** (212F) at
+   standard pressure."
+3. "The boiling point of helium is -268.9C (which is approximately
+   -452.0F). This is the lowest boiling point among all elements."
+
+Checked what the retrieval packet actually contained
+(`data/check_helium_packet.py`, scratch): the `Helium` passages
+retrieved (`S1`, `S2`) state qualitatively that "It has the lowest
+boiling point of all the elements" but carry **no numeric boiling-point
+figure** at all -- Simple Wikipedia's Helium article text in this
+packet doesn't surface an infobox value the retrieval pulled in. So the
+model's numbers are from its own parametric knowledge, not the
+evidence, which is consistent with it not citing (there was nothing to
+cite for the specific figure) -- but the system prompt also asks the
+model to say plainly when it's answering from its own knowledge rather
+than the evidence, and none of the three runs did that either.
+
+On accuracy: true values are -268.93 C / -452.07 F. The three runs
+(-268.9/-268.92/-268.9 C, -452.0/-452.04/-452.0 F) are all within
+about 0.03-0.07 of the true Celsius figure and 0.03-0.07 of the true
+Fahrenheit figure -- close, plausibly memorized, not evidence-grounded,
+and not run through `calc` as instructed (the C->F conversion is
+internally consistent across all three answers, e.g. -268.92C ->
+-452.04F is the correct linear conversion, so the model's arithmetic
+here happens to be right even without calc -- but the instruction to
+use calc was not followed).
+
+### What was adopted, and what remains model-limited
+
+**Adopted: nothing new.** The shipped `current` system prompt +
+evidence-reminder wording remains the host's default; RUN C's two
+alternatives did not clear the required improvement bar. The host-side
+timeout fix (`timeout_s=10 -> 120` in the eval harness) was adopted
+into the harness itself since it was a measurement bug, not a citation
+lever, and it does not touch any code that ships to students.
+
+**Model-limited, not host-limited, going into M6:** on real-archive,
+real-lesson factual questions, the shipped 1-bit-8B model
+overwhelmingly answers from its own parametric knowledge and does not
+reach for the supplied `[S#]` evidence at all (89% uncited here, in
+line with the 0.889 figure from the real 30-minute lesson), even when
+the evidence block, the system prompt, and a lower sampling temperature
+all explicitly ask it to cite only what's supported and say so when
+evidence doesn't answer. Three host-controlled levers have now been
+tried against live real-archive traffic (evidence-reminder wording,
+system-prompt length, temperature) without closing this gap. This is
+the standing item to carry into the Q2_0 comparison at M6: the citation
+behavior needs to be checked again there, but the working hypothesis is
+that this is a quantization/capability ceiling of the current 1-bit-8B
+model on citation-following, not a host-prompt-wording problem the
+current levers can still move.
