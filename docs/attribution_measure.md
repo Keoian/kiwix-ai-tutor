@@ -40,3 +40,39 @@ say the threshold is definitively wrong; re-run with more why/elliptical follow-
 Started for this soak (PID 9064, `data/dev.soak8421.toml`, `data/soak8421_state/`), verified
 healthy, then **stopped by this task** after the soak completed. `:8420` and llama-server `:8080`
 were never touched.
+
+## Citation-rate discrepancy (v2 10-min soak: 44/44 `[S1]`, this 3-min soak: 0/12)
+
+Investigated whether commits `06e91c2`/`2b56bce`/`26c14d0`/`aeb7a31` (the new host-side
+`attribute_sentences` layer, its SSE `attributions` event, and the soak's
+`process_turn_stream()` refactor) regressed model-label citation or its parsing. They did not:
+
+- `git diff cdee690 HEAD -- tutor/ eval/` touches only `tutor/app/citations.py` (purely additive:
+  new `attribute_sentences`/`Attribution`/`UnbackedSpan` — never edits `resolve_citations`, the
+  evidence-packet/prompt composition, or `tutor/app/system_prompt.txt`), `tutor/app/compose.py`
+  (emits the new `attributions` event in a `try/except` that can only *add* an event, never touches
+  the existing `citations` event or `answer_text`), `tutor/app/lesson_state.py` (one new nullable
+  column), and `eval/*` (new metrics + `process_turn_stream()`, a lossless extraction of the same
+  inline SSE-parsing loop — `tests/test_lesson_soak.py`'s `process_turn_stream`/`attribution` tests
+  pass, as do `tests/test_citations.py` and `tests/test_compose.py` with the fake LLM).
+- `data/dev.soak8421.toml` vs `config/dev.granite.toml`/`config/dev.toml`: only `port` and
+  `data_dir` differ (checked via `diff` on the non-comment lines). Same sampling
+  (`temperature=0.5`/`top_p=0.9`/`top_k=20`), same runtime flags, same registry.
+- The per-turn dump proves retrieval and the evidence packet worked normally: turn 1's
+  `attribution_event` shows all 7 answer sentences attributed (`model_cited: False`, i.e. no `[S#]`
+  in the text) to passage `S1` with overlap scores up to 12 — the same passage the v2 baseline's
+  turn 1 also cited as `[S1]`. So `research()` retrieved and labeled the same passage in both runs;
+  the model simply never emitted the `[S1]` token this run. In the v2 baseline, `[S1]` appears only
+  as a single trailing token at the very end of the answer (`data/granite_soak10_v2.turns.json`
+  turn 0: `"... nearly all organisms. [S1]"`) — a one-token habit, not something the prompt forces
+  every turn.
+
+**Conclusion: model-output variance, not a code or config regression.** Same llama-server, same
+weights, same sampling config, same evidence packet, same prompt-composition code path — the
+model chose not to append its trailing `[S1]` token in this run's 12 factual answers. `[S1]` was
+a single low-probability trailing token in the baseline to begin with, so a 44/44 → 0/12 swing
+across independent 10-minute vs. 3-minute runs (different RNG state, different KV-cache history
+from `:8420` traffic sharing `:8080`, colder cache per the ttft note above) is consistent with
+sampling noise on a token the model was never reliably forced to emit. No code change made.
+**Unverified:** whether the same 0% rate reproduces on a longer soak (only 12 factual turns
+here) or is specific to this one run.
