@@ -233,6 +233,172 @@ _CITATION_REMINDER = (
 )
 
 
+_FIGURE_RE = re.compile(r"[-−]?\d+(?:\.\d+)?")
+
+_NON_CLAIM_MAX_WORDS = 4
+
+
+def _normalize_minus(text: str) -> str:
+    """ASCII hyphen-minus and Unicode minus (U+2212) are the same figure."""
+    return text.replace("−", "-")
+
+
+def _figures(text: str) -> set[str]:
+    """The set of number tokens (sign + digits + optional decimal) in
+    ``text``, with Unicode minus normalized to ASCII hyphen-minus."""
+    return set(_FIGURE_RE.findall(_normalize_minus(text)))
+
+
+def _sentence_spans(text: str) -> list[tuple[int, int]]:
+    """Sentence/bullet-line spans into the ORIGINAL ``text``, split at the
+    same points as ``_sentences`` but keeping character offsets (leading
+    and trailing whitespace trimmed from each span)."""
+    bounds = []
+    start = 0
+    for m in _SENTENCE_SPLIT_RE.finditer(text):
+        bounds.append((start, m.start()))
+        start = m.end()
+    bounds.append((start, len(text)))
+    spans = []
+    for s, e in bounds:
+        chunk = text[s:e]
+        lstrip = len(chunk) - len(chunk.lstrip())
+        rstrip = len(chunk) - len(chunk.rstrip())
+        ns, ne = s + lstrip, e - rstrip
+        if ns < ne:
+            spans.append((ns, ne))
+    return spans
+
+
+def _is_short_non_claim(sentence: str) -> bool:
+    """A question to the student, or a short exclamation like "Great
+    question!" -- neither a claim to attribute nor one to flag unbacked."""
+    s = sentence.strip()
+    if not s:
+        return True
+    if s.endswith("?"):
+        return True
+    if s.endswith("!") and len(re.findall(r"\w+", s)) <= _NON_CLAIM_MAX_WORDS:
+        return True
+    return False
+
+
+def _labels_in(sentence: str) -> list[str]:
+    labels: dict[str, None] = {}
+    for group in _LABEL_GROUP_RE.findall(sentence):
+        for label in _LABEL_RE.findall(group):
+            labels.setdefault(label, None)
+    return list(labels)
+
+
+def _best_supporting_passage(sentence: str, passages: list[dict]) -> tuple[dict | None, int]:
+    """The passage (if any) that best supports ``sentence`` by ``is_supported``,
+    broken by most shared content terms (reuses the tokenizer/overlap rule
+    ``is_supported`` already uses -- not duplicated here)."""
+    sentence_terms = set(tokenize(sentence))
+    best: dict | None = None
+    best_score = -1
+    for passage in passages:
+        text = passage.get("text", "")
+        if not is_supported(sentence, text):
+            continue
+        shared = sentence_terms & set(tokenize(text))
+        score = len(shared)
+        if score > best_score:
+            best_score = score
+            best = passage
+    return best, best_score
+
+
+@dataclass(frozen=True)
+class Attribution:
+    sentence_span: tuple[int, int]
+    passage_id: str | None
+    label: str
+    score: float
+    model_cited: bool
+
+
+@dataclass(frozen=True)
+class UnbackedSpan:
+    span: tuple[int, int]
+    reason: str
+
+
+@dataclass(frozen=True)
+class AttributionResult:
+    attributions: list[Attribution]
+    unbacked_spans: list[UnbackedSpan]
+
+
+def attribute_sentences(answer: str, passages: list[dict]) -> AttributionResult:
+    """Attribute each sentence/bullet-line of ``answer`` to the passage (if
+    any) it is drawn from, without ever modifying ``answer`` or fabricating
+    a ``[S#]`` label it does not itself carry (per §11's "host never
+    fabricates a citation" rule -- see docs/attribution_design.md).
+
+    A sentence that itself carries a resolvable ``[S#]`` label is attributed
+    to that passage with ``model_cited=True``. An unlabeled sentence is
+    attributed (``model_cited=False``) to whichever given passage best
+    supports it by the same overlap rule ``is_supported``/``resolve_citations``
+    use, if any does. Everything else lands in ``unbacked_spans``, flagged
+    ``"unbacked_number"`` instead of plain ``"unbacked"`` when the sentence
+    contains a figure that appears in none of the (non-empty) passages
+    supplied -- an invented number is riskier than a generic own-example. A
+    short non-claim (a question to the student, a short exclamation) lands
+    in neither list. Pure function: ``answer`` is never modified and spans
+    index the original string exactly.
+    """
+    by_label = {p["label"]: p for p in passages}
+    attributions: list[Attribution] = []
+    unbacked: list[UnbackedSpan] = []
+
+    for start, end in _sentence_spans(answer):
+        sentence = answer[start:end]
+        if _is_short_non_claim(sentence):
+            continue
+
+        resolvable = [(lbl, by_label[lbl]) for lbl in _labels_in(sentence) if lbl in by_label]
+        if resolvable:
+            for _label, passage in resolvable:
+                attributions.append(
+                    Attribution(
+                        sentence_span=(start, end),
+                        passage_id=passage.get("id"),
+                        label=passage["label"],
+                        score=1.0,
+                        model_cited=True,
+                    )
+                )
+            continue
+
+        best, score = _best_supporting_passage(sentence, passages)
+        if best is not None:
+            attributions.append(
+                Attribution(
+                    sentence_span=(start, end),
+                    passage_id=best.get("id"),
+                    label=best["label"],
+                    score=float(score),
+                    model_cited=False,
+                )
+            )
+            continue
+
+        reason = "unbacked"
+        if passages:
+            sentence_figures = _figures(sentence)
+            if sentence_figures:
+                passage_figures: set[str] = set()
+                for passage in passages:
+                    passage_figures |= _figures(passage.get("text", ""))
+                if not (sentence_figures & passage_figures):
+                    reason = "unbacked_number"
+        unbacked.append(UnbackedSpan(span=(start, end), reason=reason))
+
+    return AttributionResult(attributions=attributions, unbacked_spans=unbacked)
+
+
 def render_evidence(packet: dict) -> str:
     """Render a retrieval packet's passages as an evidence block, one
     line/block per passage (label at the start), marking Q&A-kind
