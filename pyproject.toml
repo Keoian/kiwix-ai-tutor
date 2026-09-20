@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kiwix-ai-tutor"
+version = "0.0.1"
+description = "Offline school tutor: llama-server + Kiwix ZIM retrieval, Windows and Linux"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "MIT" }
+dependencies = [
+    # Deliberately empty at the skeleton commit. Dependencies are added by the work
+    # package that first needs them, pinned, per plan §7.
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[tool.setuptools.packages.find]
+include = ["tutor*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "integration: needs a real ZIM archive, a live llama-server, or other machine-local state (not run in CI)",
+    "slow: takes more than a few seconds",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+# PLW1514 (open() without an explicit encoding) is a preview rule, and plan §5 makes it
+# mandatory rather than optional, so preview is on deliberately.
+preview = true
+
+[tool.ruff.lint]
+# The last four groups are the machine-checkable half of plan §5 (cross-platform rules).
+# PTH bans os.path in favour of pathlib; PLW1514 bans open() without an explicit encoding;
+# flake8-tidy-imports bans the POSIX-only modules outright.
+select = ["E", "F", "W", "I", "UP", "B", "PTH", "PLW1514", "TID251"]
+
+[tool.ruff.lint.per-file-ignores]
+# Vendored OpenZIM MCP code keeps upstream formatting; we still enforce the portability rules.
+"tutor/retrieval/zim/*" = ["E", "W", "I", "UP", "B"]
+# Tests may build paths as strings when the point of the test is the string itself.
+"tests/*" = ["PTH"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"resource".msg = "POSIX only (plan §5). Put it behind tutor/platform_/linux.py."
+"fcntl".msg = "POSIX only (plan §5). Put it behind tutor/platform_/linux.py."
+"os.fork".msg = "POSIX only (plan §5). Use multiprocessing with the spawn start method."
+"signal.SIGKILL".msg = "POSIX only (plan §5). Use Process.kill() or tutor/platform_/."

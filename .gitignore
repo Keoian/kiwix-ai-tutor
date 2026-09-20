@@ -1,0 +1,30 @@
+# Runtime installations and model weights are never committed (plan §2, §10.2).
+runtime/
+*.gguf
+*.zim
+*.zim.part
+
+# Dense sidecar artifacts and caches
+*.fp16
+index_store/
+.cache/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
