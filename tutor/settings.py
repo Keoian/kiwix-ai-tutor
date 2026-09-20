@@ -101,6 +101,7 @@ class EmbeddingConfig:
     ctx_size: int
     sidecar_dir: Path
     archive_id: str
+    enabled: bool
 
     @property
     def base_url(self) -> str:
@@ -288,10 +289,18 @@ def load_config(path: Path) -> Config:
             value = embedding_table.get(key, default)
             return _require_type(value, str, "embedding", key)
 
+        def _emb_bool(key: str, default: bool) -> bool:
+            value = embedding_table.get(key, default)
+            return _require_type(value, bool, "embedding", key)
+
         emb_n_gpu_layers = _emb_int("n_gpu_layers", 0)
         emb_threads = _emb_int("threads", 4)
         emb_ctx_size = _emb_int("ctx_size", 512)
         emb_archive_id = _emb_str("archive_id", "simplewiki")
+        # Default False: the M4 held-out gate FAILED (docs/M4_report.md), so
+        # dense/hybrid retrieval must never be a silent default. A config
+        # must opt in explicitly with `enabled = true`.
+        emb_enabled = _emb_bool("enabled", False)
         emb_sidecar_dir_str = _emb_str("sidecar_dir", "runtime/simplewiki_dense")
         emb_sidecar_dir = Path(emb_sidecar_dir_str)
         if not emb_sidecar_dir.is_absolute():
@@ -308,6 +317,7 @@ def load_config(path: Path) -> Config:
             ctx_size=emb_ctx_size,
             sidecar_dir=emb_sidecar_dir,
             archive_id=emb_archive_id,
+            enabled=emb_enabled,
         )
 
     return Config(runtime=runtime, server=server, sampling=sampling, app=app, embedding=embedding)

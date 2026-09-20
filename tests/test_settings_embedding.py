@@ -65,6 +65,10 @@ dim = 384
     assert cfg.embedding.host == "127.0.0.1"
     assert cfg.embedding.port == 8081
     assert cfg.embedding.dim == 384
+    # M4 gate FAILED on held-out (see docs/M4_report.md): dense/hybrid must
+    # not be a silent default, so [embedding].enabled defaults to False when
+    # omitted from the config.
+    assert cfg.embedding.enabled is False
     assert cfg.embedding.model_path.name == "embedding.gguf"
     # relative model_path resolves against [runtime].runtime_dir
     assert cfg.embedding.model_path.parent.name == "models"
@@ -149,12 +153,41 @@ dim = 0
         load_config(_write(tmp_path, extra))
 
 
+def test_embedding_table_enabled_explicit_true(tmp_path: Path):
+    extra = """
+[embedding]
+host = "127.0.0.1"
+port = 8081
+model_path = "models/embedding.gguf"
+dim = 384
+enabled = true
+"""
+    cfg = load_config(_write(tmp_path, extra))
+    assert cfg.embedding.enabled is True
+
+
+def test_embedding_table_rejects_bad_enabled(tmp_path: Path):
+    extra = """
+[embedding]
+host = "127.0.0.1"
+port = 8081
+model_path = "models/embedding.gguf"
+dim = 384
+enabled = "yes"
+"""
+    with pytest.raises(ConfigError, match="enabled"):
+        load_config(_write(tmp_path, extra))
+
+
 def test_real_dev_toml_has_embedding_table():
     repo_root = Path(__file__).resolve().parent.parent
     cfg = load_config(repo_root / "config" / "dev.toml")
     assert cfg.embedding is not None
     assert cfg.embedding.dim == 384
     assert cfg.embedding.port == 8081
+    # M4 gate FAILED on held-out (docs/M4_report.md): dev.toml keeps dense
+    # disabled by default until the gate passes.
+    assert cfg.embedding.enabled is False
 
 
 def test_cli_argv_embedding(tmp_path: Path, capsys):

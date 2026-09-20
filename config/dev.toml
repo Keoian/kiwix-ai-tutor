@@ -57,3 +57,8 @@ threads = 4
 ctx_size = 512
 sidecar_dir = "runtime/simplewiki_dense"
 archive_id = "simplewiki"
+# M4 held-out gate FAILED (docs/M4_report.md): hybrid+lead_augmentation beat
+# lexical-v2 on tuning but recall@1 and MRR got WORSE on held-out, so dense
+# retrieval must not be a silent default. Leave this false until a fresh
+# held-out set clears the gate; set true only alongside that evidence.
+enabled = false

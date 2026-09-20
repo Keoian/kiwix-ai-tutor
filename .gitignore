@@ -32,3 +32,5 @@ htmlcov/
 .DS_Store
 Thumbs.db
 .retrieval_eval_cache/
+docs/.hybrid_matrix_cache/
+docs/.soak_run.log

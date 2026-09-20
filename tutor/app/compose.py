@@ -116,6 +116,18 @@ def _open_dense(cfg: Any, engine_registry: Registry) -> tuple[dict[str, DenseInd
     if emb is None:
         return {}, None, dict(_DENSE_UNAVAILABLE_STATUS)
 
+    if not getattr(emb, "enabled", False):
+        # M4 gate FAILED on held-out (docs/M4_report.md): hybrid beat
+        # lexical-v2 on tuning but recall@1/MRR got worse on held-out, so
+        # dense retrieval must never be a silent default. A config must
+        # opt in explicitly with [embedding].enabled = true.
+        return {}, None, {
+            "available": False,
+            "reason": "disabled in config",
+            "rows": None,
+            "model": None,
+        }
+
     try:
         entry = engine_registry.get(emb.archive_id)
     except RegistryError:

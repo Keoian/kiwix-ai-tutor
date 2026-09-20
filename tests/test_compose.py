@@ -230,6 +230,10 @@ def _cfg_with_dense(
         cfg.embedding,
         sidecar_dir=sidecar_dir if sidecar_dir is not None else (tmp_path / "no_such_sidecar"),
         archive_id=archive_id,
+        # dev.toml ships with dense disabled by default (M4 gate FAILED on
+        # held-out; see docs/M4_report.md). These tests exercise the sidecar
+        # wiring itself, so opt in explicitly.
+        enabled=True,
     )
     return dataclasses.replace(cfg, server=server, app=app_cfg, embedding=embedding)
 
@@ -298,6 +302,22 @@ def test_build_deps_stays_lexical_only_when_sidecar_has_no_paths_file(tmp_path, 
     status = deps.status_provider()
 
     assert status["dense"]["available"] is False
+
+
+def test_build_deps_stays_lexical_only_when_dense_disabled_in_config(tmp_path, fixture_zim):
+    # Fresh, valid sidecar -- but [embedding].enabled is false (the M4 gate
+    # FAILED on held-out; docs/M4_report.md). Dense must stay off.
+    sidecar_dir = tmp_path / "sidecar"
+    _build_sidecar(fixture_zim, sidecar_dir)
+    cfg = _cfg_with_dense(tmp_path, fixture_zim, sidecar_dir=sidecar_dir)
+    cfg = dataclasses.replace(cfg, embedding=dataclasses.replace(cfg.embedding, enabled=False))
+
+    deps = build_deps(cfg)
+    status = deps.status_provider()
+
+    assert status["dense"]["available"] is False
+    assert status["dense"]["reason"] == "disabled in config"
+    assert status["dense"]["rows"] is None
 
 
 def test_build_deps_reports_dense_unavailable_when_not_configured(tmp_path):
