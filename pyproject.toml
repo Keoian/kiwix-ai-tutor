@@ -20,12 +20,17 @@ dependencies = [
     "psutil>=5.9",
     # WP-C2: calc tool expression evaluation (whitelist parser over sympy).
     "sympy>=1.12",
+    # WP-C3: tutor app HTTP server (SSE streaming UI backend).
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "ruff>=0.5",
+    # WP-C3: required by fastapi.testclient.TestClient.
+    "httpx>=0.27",
 ]
 
 [tool.setuptools.packages.find]
@@ -33,6 +38,8 @@ include = ["tutor*", "eval*"]
 
 [tool.setuptools.package-data]
 "tutor.retrieval.hybrid" = ["stopwords_en.txt"]
+"tutor.ui" = ["*.html", "*.js", "*.css"]
+"tutor.app" = ["system_prompt.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -62,6 +69,10 @@ known-first-party = ["tutor", "eval", "tests"]
 [tool.ruff.lint.per-file-ignores]
 # Vendored OpenZIM MCP code keeps upstream formatting; we still enforce the portability rules.
 "tutor/retrieval/zim/*" = ["E", "W", "I", "UP", "B"]
+# linux.py is the one file allowed to use POSIX-only APIs (plan §5); `resource` is
+# imported lazily inside function bodies (see test_platform.py) so this only relaxes
+# the banned-api lint, not the runtime import-hygiene guarantee.
+"tutor/platform_/linux.py" = ["TID251"]
 # Tests may build paths as strings when the point of the test is the string itself.
 "tests/*" = ["PTH"]
 

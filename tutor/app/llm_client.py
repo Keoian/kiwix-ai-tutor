@@ -77,6 +77,7 @@ class StreamEvent:
     name: str | None = None
     arguments_json: str | None = None
     error: str | None = None
+    message: str | None = None
 
 
 class LlamaClient:

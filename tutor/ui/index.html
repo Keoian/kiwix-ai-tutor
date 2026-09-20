@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Offline Tutor</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <div id="app">
+    <header id="top-bar">
+      <h1>Offline Tutor</h1>
+      <label id="subject-label" for="subject">Subject</label>
+      <select id="subject">
+        <option value="general">General</option>
+        <option value="math">Math</option>
+        <option value="history">History</option>
+      </select>
+    </header>
+
+    <main id="main-area">
+      <section id="chat-pane">
+        <div id="chat" role="log" aria-live="polite"></div>
+
+        <div id="action-bar">
+          <button id="btn-simpler" type="button" data-action="simpler">Simpler</button>
+          <button id="btn-deeper" type="button" data-action="deeper">Deeper</button>
+          <button id="btn-hint" type="button" data-action="hint">Hint</button>
+          <button id="btn-research" type="button" data-action="research_this">Research this</button>
+        </div>
+
+        <form id="composer">
+          <textarea id="input" rows="2" placeholder="Ask a question..."></textarea>
+          <button id="send" type="submit">Send</button>
+          <button id="stop" type="button">Stop</button>
+        </form>
+      </section>
+
+      <aside id="side-pane">
+        <section id="source-viewer" aria-label="Source viewer">
+          <h2>Source</h2>
+          <div id="source-viewer-body">
+            <p id="source-empty">Select a citation to see its source.</p>
+          </div>
+        </section>
+
+        <section id="status-panel" aria-label="Status">
+          <h2>Status</h2>
+          <dl id="status-panel-body"></dl>
+        </section>
+      </aside>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

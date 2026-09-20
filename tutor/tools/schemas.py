@@ -45,7 +45,12 @@ CALC_TOOL: dict = {
         "name": "calc",
         "description": (
             "Evaluate an arithmetic expression in a sandbox. Use this before stating "
-            "any numeric result beyond single-digit arithmetic."
+            "any numeric result beyond single-digit arithmetic. Also accepts a single "
+            "equation form 'solve(<linear/quadratic equation in x>)', e.g. "
+            "'solve(2*x + 3 = 11)' -> \"x = 4\", or 'solve(x**2 - 5*x + 6 = 0)' -> "
+            "\"x = 2 or x = 3\". When a solved root is not already a plain integer or "
+            "exact fraction, a decimal approximation is appended, e.g. "
+            "\"x = sqrt(2) ≈ 1.41421356237\"."
         ),
         "parameters": {
             "type": "object",
@@ -54,7 +59,10 @@ CALC_TOOL: dict = {
             "properties": {
                 "expression": {
                     "type": "string",
-                    "description": "The arithmetic expression to evaluate, e.g. '2 + 2'.",
+                    "description": (
+                        "The arithmetic expression to evaluate, e.g. '2 + 2', or a "
+                        "'solve(...)' equation in x, e.g. 'solve(2*x + 3 = 11)'."
+                    ),
                 },
             },
         },

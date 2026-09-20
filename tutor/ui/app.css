@@ -1,0 +1,257 @@
+:root {
+  --bg: #f5f7fa;
+  --panel-bg: #ffffff;
+  --text: #1b2430;
+  --muted: #5b6672;
+  --accent: #2f6fed;
+  --accent-text: #ffffff;
+  --border: #d9e0e8;
+  --calc-bg: #eef6ee;
+  --calc-border: #8fbf8f;
+  --chip-bg: #e6edfb;
+  --chip-text: #1c4ed8;
+  --danger: #c0392b;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14181f;
+    --panel-bg: #1d232c;
+    --text: #e9edf2;
+    --muted: #9aa6b2;
+    --accent: #5b8dfd;
+    --accent-text: #0b1220;
+    --border: #2b3340;
+    --calc-bg: #16261a;
+    --calc-border: #3f7d47;
+    --chip-bg: #202c47;
+    --chip-text: #9bb6ff;
+    --danger: #e07a6c;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", Verdana, sans-serif;
+  font-size: 18px;
+  line-height: 1.5;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+#top-bar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 1.25rem;
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--border);
+}
+
+#top-bar h1 {
+  font-size: 1.25rem;
+  margin: 0;
+  margin-right: auto;
+}
+
+#subject {
+  font-size: 1rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel-bg);
+  color: var(--text);
+}
+
+#main-area {
+  flex: 1;
+  display: flex;
+  gap: 1rem;
+  padding: 1rem;
+  min-height: 0;
+}
+
+#chat-pane {
+  flex: 2;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem;
+}
+
+#chat {
+  flex: 1;
+  overflow-y: auto;
+  padding-right: 0.5rem;
+}
+
+.msg {
+  margin-bottom: 1rem;
+  white-space: pre-wrap;
+}
+
+.msg-user {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.msg-tutor {
+  color: var(--text);
+}
+
+.msg-error {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.calc-result {
+  display: inline-block;
+  margin: 0.25rem 0;
+  padding: 0.4rem 0.6rem;
+  background: var(--calc-bg);
+  border: 1px solid var(--calc-border);
+  border-radius: 8px;
+  font-family: "Consolas", monospace;
+}
+
+.citation-chip {
+  display: inline-block;
+  margin: 0 0.15rem;
+  padding: 0.1rem 0.5rem;
+  background: var(--chip-bg);
+  color: var(--chip-text);
+  border: none;
+  border-radius: 999px;
+  font-size: 0.85em;
+  cursor: pointer;
+}
+
+.citation-chip:hover,
+.citation-chip:focus {
+  outline: 2px solid var(--accent);
+}
+
+#action-bar {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0.75rem 0;
+}
+
+#action-bar button {
+  padding: 0.5rem 0.9rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-bg);
+  color: var(--text);
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+#action-bar button:hover,
+#action-bar button:focus {
+  border-color: var(--accent);
+}
+
+#composer {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-end;
+}
+
+#input {
+  flex: 1;
+  font-size: 1rem;
+  padding: 0.5rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-bg);
+  color: var(--text);
+  resize: vertical;
+}
+
+#send,
+#stop {
+  font-size: 1rem;
+  padding: 0.6rem 1.1rem;
+  border-radius: 8px;
+  border: none;
+  cursor: pointer;
+}
+
+#send {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+#stop {
+  background: var(--panel-bg);
+  color: var(--danger);
+  border: 1px solid var(--danger);
+}
+
+#side-pane {
+  flex: 1;
+  min-width: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+#source-viewer,
+#status-panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem;
+  overflow-y: auto;
+}
+
+#source-viewer h2,
+#status-panel h2 {
+  margin-top: 0;
+  font-size: 1.05rem;
+}
+
+.source-highlight {
+  background: var(--chip-bg);
+  color: var(--chip-text);
+  border-radius: 4px;
+  padding: 0 0.1rem;
+}
+
+#status-panel-body {
+  margin: 0;
+}
+
+#status-panel-body dt {
+  font-weight: 600;
+  color: var(--muted);
+}
+
+#status-panel-body dd {
+  margin: 0 0 0.5rem 0;
+}
+
+@media (max-width: 900px) {
+  #main-area {
+    flex-direction: column;
+  }
+}
