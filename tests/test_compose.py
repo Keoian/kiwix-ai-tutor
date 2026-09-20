@@ -153,6 +153,67 @@ def test_turn_runner_maps_token_tool_citations_done_events(tmp_path):
     done_data = frames[-1][1]
     assert done_data["status"] == "ok"
     assert "Water" in done_data["answer"]
+    # 2026-09-20 evidence-dump follow-up: no citations at all -> "uncited",
+    # never "unsupported" (there is nothing to fail to support).
+    assert done_data["citation_quality"] == "uncited"
+    assert done_data["evidence_dump"] is False
+    citations_data = dict(frames)["citations"]
+    assert citations_data["unsupported_labels"] == []
+
+
+def test_turn_runner_flags_unsupported_citations_and_evidence_dump(tmp_path):
+    """The owner's real failure: 11 off-topic passages, all labels resolve
+    but none support the answer's claim, and the answer dumps the evidence
+    back out label-stacked on one trailer sentence."""
+    cfg = _cfg_with_unreachable_llm_and_missing_archives(tmp_path)
+    topics = [f"Output device number {i} converts signals for a computer." for i in range(1, 12)]
+    bullets = [f"[S{i}]: {topics[i - 1]}" for i in range(1, 12)]
+    stacked = "".join(f"[S{i}]" for i in range(1, 12))
+    answer = (
+        "The boiling point of helium is -268.92C.\n\n"
+        "Here's the reasoning:\n" + "\n".join(bullets) + "\n" + stacked
+    )
+    events = [
+        StreamEvent(kind="token", text=answer),
+        StreamEvent(kind="done", finish_reason="stop", usage={}),
+    ]
+    fake_llm = _FakeLlm(events)
+
+    class _PassagesResearchEngine:
+        def research(self, query, *, topic_hint=None, keywords=None):
+            passages = [
+                {
+                    "label": f"S{i}",
+                    "id": f"p{i}",
+                    "title": f"Output topic {i}",
+                    "path": f"Computing/Output{i}",
+                    "text": topics[i - 1],
+                    "kind": "article",
+                }
+                for i in range(1, 12)
+            ]
+            return {"passages": passages}
+
+    deps = build_deps(cfg, llm=fake_llm, research_engine=_PassagesResearchEngine())
+    session_id = deps.sessions.create()
+    frames = []
+
+    def emit(event_name, data):
+        frames.append((event_name, data))
+
+    cancel = threading.Event()
+    deps.turn_runner(
+        session_id,
+        _Input(kind="text", text="Output the boiling point of helium."),
+        emit,
+        cancel,
+    )
+
+    citations_data = dict(frames)["citations"]
+    assert len(citations_data["unsupported_labels"]) == 11
+    done_data = dict(frames)["done"]
+    assert done_data["citation_quality"] == "unsupported"
+    assert done_data["evidence_dump"] is True
 
 
 def test_turn_runner_reports_error_status_without_crashing(tmp_path):

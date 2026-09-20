@@ -142,6 +142,34 @@ def test_app_js_uses_textcontent_for_untrusted_text():
 
 
 # ---------------------------------------------------------------------------
+# 2026-09-20 evidence-dump follow-up: the UI collapses a detected evidence
+# dump behind a toggle and shows a plain note when every citation on a turn
+# is unsupported (docs/citation_experiment.md). textContent/DOM-node only,
+# same as the rest of the citation rendering -- no innerHTML anywhere.
+# ---------------------------------------------------------------------------
+
+
+def test_app_js_reacts_to_evidence_dump_flag():
+    text = _read(APP_JS)
+    assert "evidence_dump" in text
+
+
+def test_app_js_offers_a_toggle_to_show_pasted_sources():
+    text = _read(APP_JS)
+    assert "show the tutor's pasted sources" in text.lower()
+
+
+def test_app_js_shows_unsupported_sources_note():
+    text = _read(APP_JS)
+    assert "did not match this question" in text.lower()
+
+
+def test_app_js_still_never_uses_innerhtml_after_dump_handling():
+    text = _read(APP_JS)
+    assert "innerHTML" not in text
+
+
+# ---------------------------------------------------------------------------
 # kiosk launch scripts
 # ---------------------------------------------------------------------------
 

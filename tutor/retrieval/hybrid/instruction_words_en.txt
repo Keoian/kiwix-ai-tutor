@@ -1,0 +1,26 @@
+# Imperative/instruction verbs that, when used as the leading imperative
+# head of a question (or inside a "tell me" / "give me" / "show me" /
+# "can you explain" style wrapper phrase -- see
+# tutor.retrieval.hybrid.lexical.strip_instruction_words), name an action
+# the model should take rather than a topic term to search or judge
+# coverage on. Only stripped when the question has other content left
+# after removing them, so a real topic like "output device" or "What is
+# output?" is never affected (the word is never the sole content term,
+# and is only stripped from the LEADING position or wrapper phrase, never
+# mid-sentence).
+give
+tell
+show
+list
+explain
+describe
+state
+name
+write
+find
+define
+calculate
+convert
+compare
+summarize
+output

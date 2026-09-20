@@ -4,7 +4,13 @@ of ``eval/run_turn_eval.py``: ``score_answer``, ``aggregate``,
 
 from __future__ import annotations
 
-from eval.run_turn_eval import AnswerRecord, aggregate, load_questions, render_report, score_answer
+from eval.run_turn_eval import (
+    AnswerRecord,
+    aggregate,
+    load_questions,
+    render_report,
+    score_answer,
+)
 
 
 def _record(**overrides) -> AnswerRecord:
@@ -14,6 +20,7 @@ def _record(**overrides) -> AnswerRecord:
         expected_paths=["pythagorean_theorem"],
         answer_text="",
         citations=[],
+        evidence_dump=False,
     )
     base.update(overrides)
     return AnswerRecord(**base)
@@ -65,6 +72,91 @@ def test_score_answer_detects_teaching_question():
     assert scored["taught"] is True
 
 
+# ---------------------------------------------------------------------------
+# 2026-09-20 evidence-dump follow-up: supported_citation_rate,
+# evidence_dump_rate (docs/citation_experiment.md). Re-measurement with the
+# live model is PENDING; these are pure functions exercised with fakes.
+# ---------------------------------------------------------------------------
+
+
+def test_score_answer_all_supported_true_when_every_citation_supported():
+    record = _record(
+        answer_text="Water boils at 100C [S1].",
+        citations=[
+            {"label": "S1", "path": "pythagorean_theorem", "unresolved": False, "supported": True}
+        ],
+    )
+    scored = score_answer(record)
+    assert scored["all_supported"] is True
+
+
+def test_score_answer_all_supported_false_when_a_citation_is_unsupported():
+    record = _record(
+        answer_text="Water boils at 100C [S1].",
+        citations=[
+            {"label": "S1", "path": "pythagorean_theorem", "unresolved": False, "supported": False}
+        ],
+    )
+    scored = score_answer(record)
+    assert scored["all_supported"] is False
+
+
+def test_score_answer_all_supported_false_when_uncited():
+    record = _record(answer_text="Water boils at 100C.")
+    scored = score_answer(record)
+    assert scored["all_supported"] is False
+
+
+def test_score_answer_carries_evidence_dump_flag():
+    record = _record(answer_text="x [S1]", evidence_dump=True)
+    assert score_answer(record)["evidence_dump"] is True
+    record2 = _record(answer_text="x [S1]", evidence_dump=False)
+    assert score_answer(record2)["evidence_dump"] is False
+
+
+def test_aggregate_computes_supported_citation_rate_and_evidence_dump_rate():
+    scores = [
+        score_answer(
+            _record(
+                answer_text="cited [S1]",
+                citations=[
+                    {
+                        "label": "S1",
+                        "path": "pythagorean_theorem",
+                        "unresolved": False,
+                        "supported": True,
+                    }
+                ],
+                evidence_dump=False,
+            )
+        ),
+        score_answer(
+            _record(
+                answer_text="dumped [S1][S2][S3][S4]",
+                citations=[
+                    {
+                        "label": f"S{i}",
+                        "path": "pythagorean_theorem",
+                        "unresolved": False,
+                        "supported": False,
+                    }
+                    for i in range(1, 5)
+                ],
+                evidence_dump=True,
+            )
+        ),
+    ]
+    summary = aggregate(scores)
+    assert summary["supported_citation_rate"] == 0.5
+    assert summary["evidence_dump_rate"] == 0.5
+
+
+def test_aggregate_empty_input_zeroes_new_rates_too():
+    summary = aggregate([])
+    assert summary["supported_citation_rate"] == 0.0
+    assert summary["evidence_dump_rate"] == 0.0
+
+
 def test_aggregate_computes_rates_over_multiple_scores():
     scores = [
         score_answer(_record(answer_text="cited [S1]", citations=[
@@ -97,6 +189,34 @@ def test_render_report_produces_one_row_per_variant_in_order():
     assert lines[2].startswith("| baseline |")
     assert lines[3].startswith("| variant_a |")
     assert "1.00" in lines[3]
+
+
+def test_render_report_includes_supported_citation_and_evidence_dump_rate_columns():
+    summaries = {
+        "baseline": aggregate(
+            [
+                score_answer(
+                    _record(
+                        answer_text="x [S1]",
+                        citations=[
+                            {
+                                "label": "S1",
+                                "path": "pythagorean_theorem",
+                                "unresolved": False,
+                                "supported": True,
+                            }
+                        ],
+                        evidence_dump=False,
+                    )
+                )
+            ]
+        ),
+    }
+    report = render_report(summaries)
+    assert "supported_citation_rate" in report
+    assert "evidence_dump_rate" in report
+    assert "1.00" in report.splitlines()[2]
+    assert "0.00" in report.splitlines()[2]
 
 
 def test_load_questions_filters_to_fixture_zim_articles():

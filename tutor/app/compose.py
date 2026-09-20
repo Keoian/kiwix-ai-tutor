@@ -27,7 +27,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
-from tutor.app.citations import resolve_citations
+from tutor.app.citations import detect_evidence_dump, resolve_citations
 from tutor.app.lesson_state import LessonStore
 from tutor.app.llm_client import LlamaClient, LlamaError, StreamEvent
 from tutor.app.main import AppDeps
@@ -317,11 +317,25 @@ def _make_turn_runner(
 
         citation_passage_ids: list[str] = []
         if result.status == "ok":
-            citations = resolve_citations(result.answer_text, session.known_passages())
+            known_passages = session.known_passages()
+            citations = resolve_citations(result.answer_text, known_passages)
             citation_passage_ids = [c.passage_id for c in citations if c.passage_id]
+            unsupported_labels = [c.label for c in citations if not c.supported]
+            evidence_dump = detect_evidence_dump(
+                result.answer_text, citations, known_passages
+            )
+            if not citations:
+                citation_quality = "uncited"
+            elif unsupported_labels:
+                citation_quality = "unsupported"
+            else:
+                citation_quality = "ok"
             emit(
                 "citations",
-                {"citations": [dataclasses.asdict(c) for c in citations]},
+                {
+                    "citations": [dataclasses.asdict(c) for c in citations],
+                    "unsupported_labels": unsupported_labels,
+                },
             )
             emit(
                 "done",
@@ -334,6 +348,8 @@ def _make_turn_runner(
                     "cached_tokens": result.cached_tokens or 0,
                     "tokens_used": session.log.tokens_used(),
                     "uncited": result.uncited,
+                    "citation_quality": citation_quality,
+                    "evidence_dump": evidence_dump,
                 },
             )
         elif result.status == "cancelled":

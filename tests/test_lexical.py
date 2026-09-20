@@ -153,3 +153,67 @@ def test_singularize_is_deterministic_and_idempotent():
     from tutor.retrieval.hybrid.lexical import singularize
 
     assert singularize(singularize("moons")) == singularize("moons")
+
+
+def test_strip_instruction_words_leading_imperative():
+    from tutor.retrieval.hybrid.lexical import strip_instruction_words
+
+    stripped = strip_instruction_words(
+        "Output the boiling point of helium in celsius and farenheit."
+    )
+    assert tokenize(stripped) == tokenize(
+        "the boiling point of helium in celsius and farenheit."
+    )
+    assert "output" not in tokenize(stripped)
+
+
+def test_strip_instruction_words_keeps_real_topic_when_sole_content_term():
+    from tutor.retrieval.hybrid.lexical import strip_instruction_words
+
+    # "output" is the only content word -- must never be stripped.
+    stripped = strip_instruction_words("What is output?")
+    assert "output" in tokenize(stripped)
+
+
+def test_strip_instruction_words_keeps_real_topic_mid_sentence():
+    from tutor.retrieval.hybrid.lexical import strip_instruction_words
+
+    stripped = strip_instruction_words("What is an output device?")
+    assert "output" in tokenize(stripped)
+    assert "device" in tokenize(stripped)
+
+
+def test_strip_instruction_words_wrapper_phrases():
+    from tutor.retrieval.hybrid.lexical import strip_instruction_words
+
+    for text in (
+        "Tell me the boiling point of helium",
+        "Give me the boiling point of helium",
+        "Can you explain the boiling point of helium",
+    ):
+        toks = tokenize(strip_instruction_words(text))
+        assert "helium" in toks
+        assert "tell" not in toks
+        assert "give" not in toks
+        assert "explain" not in toks
+
+
+def test_strip_instruction_words_idempotent():
+    from tutor.retrieval.hybrid.lexical import strip_instruction_words
+
+    once = strip_instruction_words("List the planets")
+    twice = strip_instruction_words(once)
+    assert tokenize(once) == tokenize(twice)
+
+
+def test_rank_terms_by_rarity_drops_zero_hits_and_orders_ascending():
+    from tutor.retrieval.hybrid.lexical import rank_terms_by_rarity
+
+    counts = {"output": 500, "point": 300, "helium": 4, "farenheit": 0}
+    assert rank_terms_by_rarity(counts) == ["helium", "point", "output"]
+
+
+def test_rank_terms_by_rarity_empty():
+    from tutor.retrieval.hybrid.lexical import rank_terms_by_rarity
+
+    assert rank_terms_by_rarity({}) == []

@@ -58,3 +58,27 @@
 {"id": "sw58", "question": "What is a table made of, as furniture?", "expected_paths": ["Table_(furniture)"], "category": "tables_formulas", "split": "tuning"}
 {"id": "sw59", "question": "What are metric prefixes used for in units?", "expected_paths": ["Metric_prefix"], "category": "tables_formulas", "split": "heldout"}
 {"id": "sw60", "question": "What is a fraction in maths?", "expected_paths": ["Fraction_(mathematics)"], "category": "tables_formulas", "split": "heldout"}
+{"id": "sw61", "question": "Output the boiling point of helium in celsius and farenheit.", "expected_paths": ["Helium"], "category": "student_phrasing", "split": "tuning"}
+{"id": "sw62", "question": "What is the boiling point of helium in celsius and fahrenheit?", "expected_paths": ["Helium"], "category": "student_phrasing", "split": "tuning"}
+{"id": "sw63", "question": "Tell me the boiling point of nitrogen.", "expected_paths": ["Nitrogen"], "category": "student_phrasing", "split": "tuning"}
+{"id": "sw64", "question": "Give me the freezing point of water.", "expected_paths": ["Water"], "category": "student_phrasing", "split": "tuning"}
+{"id": "sw65", "question": "List the planets in the Solar System.", "expected_paths": ["Solar_System"], "category": "student_phrasing", "split": "tuning"}
+{"id": "sw66", "question": "Can you explain what causes lightning?", "expected_paths": ["Lightning"], "category": "student_phrasing", "split": "tuning"}
+{"id": "sw67", "question": "So um, like, what actually is a black hole anyway?", "expected_paths": ["Black_hole"], "category": "student_phrasing", "split": "tuning"}
+{"id": "sw68", "question": "Output the chemical symbol for gold.", "expected_paths": ["Gold"], "category": "student_phrasing", "split": "tuning"}
+{"id": "sw69", "question": "Convert the boiling point of oxygen to farenheit please.", "expected_paths": ["Oxygen"], "category": "student_phrasing", "split": "tuning"}
+{"id": "sw70", "question": "Please tell me about the speed of sound in air.", "expected_paths": ["Speed_of_sound"], "category": "student_phrasing", "split": "tuning"}
+{"id": "sw71", "question": "Name the largest planet in our solar system.", "expected_paths": ["Jupiter"], "category": "student_phrasing", "split": "tuning"}
+{"id": "sw72", "question": "Describe how a rainbow forms in the sky.", "expected_paths": ["Rainbow"], "category": "student_phrasing", "split": "tuning"}
+{"id": "sw73", "question": "Show me how photosynthesis works in plants.", "expected_paths": ["Photosynthesis"], "category": "student_phrasing", "split": "heldout"}
+{"id": "sw74", "question": "Give me the definition of density in physics.", "expected_paths": ["Density"], "category": "student_phrasing", "split": "heldout"}
+{"id": "sw75", "question": "Tell me the melting point of iron in celsius and farenheit.", "expected_paths": ["Iron"], "category": "student_phrasing", "split": "heldout"}
+{"id": "sw76", "question": "Can you describe how volcanoes erupt?", "expected_paths": ["Volcano"], "category": "student_phrasing", "split": "heldout"}
+{"id": "sw77", "question": "Um, quick question, what's a comet exactly?", "expected_paths": ["Comet"], "category": "student_phrasing", "split": "heldout"}
+{"id": "sw78", "question": "List examples of mammals.", "expected_paths": ["Mammal"], "category": "student_phrasing", "split": "heldout"}
+{"id": "sw79", "question": "Explain what causes rainbows to form.", "expected_paths": ["Rainbow"], "category": "student_phrasing", "split": "heldout"}
+{"id": "sw80", "question": "Write a short summary of what gravity is.", "expected_paths": ["Gravity"], "category": "student_phrasing", "split": "heldout"}
+{"id": "sw81", "question": "Find the atomic number of carbon.", "expected_paths": ["Carbon"], "category": "student_phrasing", "split": "heldout"}
+{"id": "sw82", "question": "Output the freezing point of nitrogen in farenheit.", "expected_paths": ["Nitrogen"], "category": "student_phrasing", "split": "heldout"}
+{"id": "sw83", "question": "State what a comet is made of.", "expected_paths": ["Comet"], "category": "student_phrasing", "split": "heldout"}
+{"id": "sw84", "question": "Calculate, well actually just tell me, the number of planets in the Solar System.", "expected_paths": ["Solar_System"], "category": "student_phrasing", "split": "heldout"}

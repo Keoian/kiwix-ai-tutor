@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from tutor.app.citations import extract_labels, resolve_citations
+from tutor.app.citations import detect_evidence_dump, extract_labels, resolve_citations
 
 _QUESTIONS_PATH = Path(__file__).parent / "questions" / "fixture_questions.jsonl"
 
@@ -72,6 +72,12 @@ class AnswerRecord:
     expected_paths: list[str]
     answer_text: str
     citations: list[dict] = field(default_factory=list)
+    evidence_dump: bool = False
+    """2026-09-20 evidence-dump follow-up (docs/citation_experiment.md):
+    the host's ``tutor.app.citations.detect_evidence_dump`` verdict for
+    this answer, already computed by the caller (``run_variant`` below)
+    since it needs the retrieval packet's passages, which this record does
+    not otherwise carry."""
 
 
 def score_answer(record: AnswerRecord) -> dict:
@@ -83,6 +89,15 @@ def score_answer(record: AnswerRecord) -> dict:
     resolved = [c for c in record.citations if not c.get("unresolved")]
     unresolved = [c for c in record.citations if c.get("unresolved")]
     all_resolve = has_citation and not unresolved
+
+    # 2026-09-20 evidence-dump follow-up: a citation "resolving" is not the
+    # same as it "supporting" the sentence that carries it (see
+    # tutor.app.citations.is_supported / Citation.supported). All labels
+    # here have to resolve *and* be marked supported for the answer to
+    # count as fully citation-supported.
+    all_supported = has_citation and not unresolved and all(
+        c.get("supported") for c in record.citations
+    )
 
     on_topic = any(
         c.get("path") in record.expected_paths for c in resolved if c.get("path")
@@ -96,10 +111,12 @@ def score_answer(record: AnswerRecord) -> dict:
         "has_citation": has_citation,
         "n_labels": len(labels),
         "all_resolve": all_resolve,
+        "all_supported": all_supported,
         "n_unresolved": len(unresolved),
         "on_topic_citation": on_topic,
         "answer_len_chars": len(record.answer_text),
         "taught": taught,
+        "evidence_dump": record.evidence_dump,
     }
 
 
@@ -112,6 +129,8 @@ def aggregate(scores: list[dict]) -> dict:
             "n": 0,
             "citation_rate": 0.0,
             "all_resolve_rate": 0.0,
+            "supported_citation_rate": 0.0,
+            "evidence_dump_rate": 0.0,
             "on_topic_rate": 0.0,
             "taught_rate": 0.0,
             "avg_answer_len_chars": 0.0,
@@ -120,6 +139,8 @@ def aggregate(scores: list[dict]) -> dict:
         "n": n,
         "citation_rate": sum(s["has_citation"] for s in scores) / n,
         "all_resolve_rate": sum(s["all_resolve"] for s in scores) / n,
+        "supported_citation_rate": sum(s["all_supported"] for s in scores) / n,
+        "evidence_dump_rate": sum(s["evidence_dump"] for s in scores) / n,
         "on_topic_rate": sum(s["on_topic_citation"] for s in scores) / n,
         "taught_rate": sum(s["taught"] for s in scores) / n,
         "avg_answer_len_chars": sum(s["answer_len_chars"] for s in scores) / n,
@@ -129,15 +150,16 @@ def aggregate(scores: list[dict]) -> dict:
 def render_report(variant_summaries: dict[str, dict]) -> str:
     """Render a Markdown table, one row per variant, in insertion order."""
     header = (
-        "| Variant | n | citation_rate | all_resolve_rate | on_topic_rate "
-        "| taught_rate | avg_len |\n"
-        "|---|---:|---:|---:|---:|---:|---:|"
+        "| Variant | n | citation_rate | all_resolve_rate | supported_citation_rate "
+        "| evidence_dump_rate | on_topic_rate | taught_rate | avg_len |\n"
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|"
     )
     rows = []
     for name, summary in variant_summaries.items():
         rows.append(
             f"| {name} | {summary['n']} | {summary['citation_rate']:.2f} "
-            f"| {summary['all_resolve_rate']:.2f} | {summary['on_topic_rate']:.2f} "
+            f"| {summary['all_resolve_rate']:.2f} | {summary['supported_citation_rate']:.2f} "
+            f"| {summary['evidence_dump_rate']:.2f} | {summary['on_topic_rate']:.2f} "
             f"| {summary['taught_rate']:.2f} | {summary['avg_answer_len_chars']:.0f} |"
         )
     return "\n".join([header, *rows])
@@ -187,13 +209,16 @@ def run_variant(
                 system_text_override=system_text,
                 temperature=temperature,
             )
+            known_passages = session.known_passages()
+            resolved_citations = resolve_citations(result.answer_text, known_passages)
             citations = [
                 {
                     "label": c.label,
                     "path": c.path,
                     "unresolved": c.unresolved,
+                    "supported": c.supported,
                 }
-                for c in resolve_citations(result.answer_text, session.known_passages())
+                for c in resolved_citations
             ]
             record = AnswerRecord(
                 question_id=row["id"],
@@ -201,6 +226,9 @@ def run_variant(
                 expected_paths=row["expected_paths"],
                 answer_text=result.answer_text,
                 citations=citations,
+                evidence_dump=detect_evidence_dump(
+                    result.answer_text, resolved_citations, known_passages
+                ),
             )
             scores.append(score_answer(record))
     finally:

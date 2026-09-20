@@ -32,7 +32,13 @@ from typing import Any
 
 from tutor.retrieval.hybrid.dense import DenseIndex
 from tutor.retrieval.hybrid.diversity import cap_per_article
-from tutor.retrieval.hybrid.lexical import BM25, singularize, tokenize
+from tutor.retrieval.hybrid.lexical import (
+    BM25,
+    rank_terms_by_rarity,
+    singularize,
+    strip_instruction_words,
+    tokenize,
+)
 from tutor.retrieval.hybrid.packer import estimate_tokens, pack
 from tutor.retrieval.hybrid.passages import split_passages
 from tutor.retrieval.hybrid.ranking import (
@@ -65,6 +71,27 @@ _PER_OP_DEADLINE_CAP_S = 3.0
 _MIN_OP_DEADLINE_S = 0.05
 _QUEUE_SLACK_S = 0.05
 _THREAD_JOIN_TIMEOUT_S = 0.5
+_MAX_FALLBACK_SEARCHES = 6
+
+# Baseline v4 (see docs/retrieval_baseline.md "Baseline v4"): even when the
+# joined all-terms query returns *some* hits, they can all be wrong (every
+# word happens to co-occur in some unrelated article) while the one article
+# that is actually the entity in question ("Helium") never appears because
+# it lacks one word (a misspelling, or a unit symbol like "°C" instead
+# of the word "celsius"). Real IDF (libzim's own `getEstimatedMatches`,
+# corpus-wide -- not just this request's local hit counts) picks out the
+# rarest/most specific query terms, which are always run as their own title
+# search (finds "Helium" directly) and as a small top-k-rarest-terms
+# full-text query (a relaxed AND that can still succeed even though the
+# *full* AND query would need one more, absent, term). Bounded the same way
+# as the existing per-token fallback so a long question can never blow the
+# soft deadline.
+_MAX_ENTITY_TERM_SEARCHES = 4
+_ENTITY_TITLE_LIMIT = 3
+_ENTITY_TITLE_RESULTS = 3
+_ENTITY_RELAXED_AND_SIZES = (2, 3)
+_ENTITY_GUARANTEED_SLOTS = 2
+_IDF_CACHE_MAXSIZE = 4096
 
 # Reuse plan §7.2 "Dense article top 16": the dense sidecar's own
 # candidate list, fused at article level with the lexical/title rankings
@@ -99,7 +126,7 @@ def _query_terms(query: str, topic_hint: str | None) -> set[str]:
     the topic_hint in there let a subject hint alone satisfy coverage for an
     off-topic question (review pass 2, finding 2).
     """
-    terms = set(tokenize(query))
+    terms = set(tokenize(strip_instruction_words(query)))
     if topic_hint:
         terms |= set(tokenize(topic_hint))
     return terms
@@ -130,7 +157,15 @@ _CONTINUATION_FILLERS = frozenset({"tell", "more", "explain", "elaborate", "cont
 
 
 def _elliptical_term_count(query: str) -> int:
-    return len(frozenset(tokenize(query)) - _CONTINUATION_FILLERS)
+    return len(frozenset(tokenize(strip_instruction_words(query))) - _CONTINUATION_FILLERS)
+
+
+def _own_term_count(query: str) -> int:
+    """Number of the question's OWN content terms (instruction words
+    stripped, ``topic_hint`` excluded) -- used only to gate the coverage
+    floor (see ``_OWN_TERM_FLOOR_MIN_COUNT``), never to decide whether the
+    topic_hint may be folded in (that is ``_elliptical_term_count``)."""
+    return len(frozenset(tokenize(strip_instruction_words(query))))
 
 
 def _coverage_terms(query: str, topic_hint: str | None = None) -> frozenset[str]:
@@ -143,7 +178,7 @@ def _coverage_terms(query: str, topic_hint: str | None = None) -> frozenset[str]
     judged strictly on those -- a topic_hint can never single-handedly
     manufacture coverage for it (that was the bug: a subject hint alone
     making an off-topic candidate look "covered")."""
-    own = frozenset(tokenize(query))
+    own = frozenset(tokenize(strip_instruction_words(query)))
     if topic_hint and _elliptical_term_count(query) <= _ELLIPTICAL_TERM_COUNT:
         return own | frozenset(tokenize(topic_hint))
     return own
@@ -157,11 +192,25 @@ def _coverage_terms(query: str, topic_hint: str | None = None) -> frozenset[str]
 # threshold.
 _COVERAGE_CANDIDATES_CHECKED = 3
 
+# The documented "generic single-word title" hole (docs/retrieval_baseline.md):
+# a bare ``title_match`` used to be enough to call a candidate covered even
+# when almost none of the question's own words appeared anywhere in it --
+# e.g. "Output the boiling point of helium..." title-matching "Output"
+# (Input/output, Logic gate, ...) while "helium" never showed up. Once the
+# question has at least this many of its OWN content terms (topic_hint
+# excluded -- see ``_own_term_count``), a title match on an own term alone
+# is only honored if own-term TEXT coverage also clears this floor. Tuned
+# on the tuning split of eval/questions/simplewiki_questions.jsonl -- see
+# docs/retrieval_baseline.md "Baseline v3".
+_OWN_TERM_COVERAGE_FLOOR = 0.34
+_OWN_TERM_FLOOR_MIN_COUNT = 3
+
 
 def _best_coverage(
     candidates: list[dict[str, Any]],
     query_terms: set[str],
     topic_hint_terms: frozenset[str],
+    own_term_count: int = 0,
 ) -> dict[str, Any]:
     """The least-weak :func:`compute_coverage` result among the top-scored
     ``_COVERAGE_CANDIDATES_CHECKED`` candidates (any one of them being a
@@ -177,11 +226,19 @@ def _best_coverage(
     itself).
     """
     if not candidates:
-        return compute_coverage(query_terms, None, None, hint_terms=topic_hint_terms)
+        return compute_coverage(
+            query_terms, None, None, hint_terms=topic_hint_terms, own_term_count=own_term_count
+        )
     top = sorted(candidates, key=lambda c: -c["score"])[:_COVERAGE_CANDIDATES_CHECKED]
     best: dict[str, Any] | None = None
     for c in top:
-        cov = compute_coverage(query_terms, c["title"], c["text"], hint_terms=topic_hint_terms)
+        cov = compute_coverage(
+            query_terms,
+            c["title"],
+            c["text"],
+            hint_terms=topic_hint_terms,
+            own_term_count=own_term_count,
+        )
         if not cov["weak"]:
             return cov
         if best is None or cov["term_coverage"] > best["term_coverage"]:
@@ -195,6 +252,7 @@ def compute_coverage(
     title: str | None,
     text: str | None,
     hint_terms: frozenset[str] | None = None,
+    own_term_count: int = 0,
 ) -> dict[str, Any]:
     """Explainable coverage flags for a single candidate.
 
@@ -224,6 +282,16 @@ def compute_coverage(
     norm_query_terms = {singularize(t) for t in query_terms}
     term_coverage = len(norm_query_terms & passage_terms) / len(norm_query_terms)
     title_match = bool(norm_query_terms & title_terms)
+    if (
+        title_match
+        and own_term_count >= _OWN_TERM_FLOOR_MIN_COUNT
+        and term_coverage < _OWN_TERM_COVERAGE_FLOOR
+    ):
+        # A title match on one own term (often a generic single word like
+        # "Output" or "Effect") is not enough when the question has several
+        # other own content terms and almost none of them show up anywhere
+        # in this candidate's text -- see _OWN_TERM_COVERAGE_FLOOR.
+        title_match = False
     if not title_match and hint_terms:
         norm_hint_terms = {singularize(t) for t in hint_terms}
         if term_coverage >= _COVERAGE_TERM_THRESHOLD and (norm_hint_terms & title_terms):
@@ -391,6 +459,12 @@ class ResearchEngine:
         self._workers: dict[str, Any] = {}
         self._fingerprints: dict[str, str] = {}
         self._response_cache: OrderedDict[tuple[Any, ...], ResearchResponse] = OrderedDict()
+        # Real corpus-IDF signal (libzim `getEstimatedMatches`), cached per
+        # (archive fingerprint, term) since the same term is looked up
+        # across many requests and archive contents only change when the
+        # ZIM itself changes (fingerprint changes too). Bounded LRU so a
+        # long-running process's memory does not grow without limit.
+        self._idf_cache: OrderedDict[tuple[str, str], int] = OrderedDict()
 
     def close(self) -> None:
         for worker in self._workers.values():
@@ -453,6 +527,31 @@ class ResearchEngine:
                 paths.append(path)
         return paths, None
 
+    def _term_matches(
+        self, entry: ArchiveEntry, worker: Any, term: str, *, deadline_s: float
+    ) -> int:
+        """Cached real corpus-IDF signal for ``term`` in ``entry``'s archive:
+        libzim's own `getEstimatedMatches`, not a local per-request hit
+        count. Any failure (timeout, worker error) degrades to ``0`` --
+        "no rarity signal for this term" -- never fatal, and is not
+        cached (a transient failure should not poison the cache for the
+        life of the process).
+        """
+        key = (self._fingerprint_digest(entry), term)
+        cached = self._idf_cache.get(key)
+        if cached is not None:
+            self._idf_cache.move_to_end(key)
+            return cached
+        res = _call_worker(worker, "estimated_matches", deadline_s=deadline_s, term=term)
+        if res is None or res.status != "ok" or res.value is None:
+            return 0
+        matches = int(res.value)
+        self._idf_cache[key] = matches
+        self._idf_cache.move_to_end(key)
+        while len(self._idf_cache) > _IDF_CACHE_MAXSIZE:
+            self._idf_cache.popitem(last=False)
+        return matches
+
     def _process_archive(
         self,
         entry: ArchiveEntry,
@@ -470,7 +569,7 @@ class ResearchEngine:
         # query can yield zero hits even when the topic is clearly present),
         # so search uses the same pinned tokenizer as BM25 rather than the
         # raw question string.
-        tokens = tokenize(query)
+        tokens = tokenize(strip_instruction_words(query))
         # Spec §7.2 step 1: "plus the model keywords if present" -- append
         # the (already-validated) model-supplied keywords to the lexical
         # query terms used for candidate generation.
@@ -485,6 +584,12 @@ class ResearchEngine:
         tokens.extend(topic_hint_tokens)
         search_query = " ".join(tokens)
 
+        # Bound on extra per-token worker searches across BOTH the fulltext
+        # and title fallback passes combined, per archive per request (item
+        # 3): the fallback must never blow the soft deadline just because a
+        # long natural-language question has many tokens.
+        fallback_searches_used = 0
+
         def _op_deadline() -> float:
             return max(_MIN_OP_DEADLINE_S, min(_PER_OP_DEADLINE_CAP_S, remaining()))
 
@@ -498,27 +603,58 @@ class ResearchEngine:
 
         def _search_with_fallback(op: str, limit: int) -> tuple[list[Any], bool, bool]:
             # Xapian's query parser ANDs bare terms together, so a natural-
-            # language question with a stray non-corpus word (e.g. "tell",
-            # "about") can zero out an otherwise-good query. When the joined
-            # query returns nothing, fall back to merging each token's own
-            # single-term hits (deduplicated, first-seen order). The
-            # returned ``used_fallback`` flag is carried onto each result
-            # (see the "used_fallback" key below) purely for observability
-            # -- coverage itself is judged by term/title overlap (see
+            # language question with a stray non-corpus/misspelt word (e.g.
+            # "farenheit") can zero out an otherwise-good query. When the
+            # joined query returns nothing, fall back to per-token searches
+            # (bounded, see ``_MAX_FALLBACK_SEARCHES``, so extra worker
+            # round-trips stay within the soft deadline) and rank the
+            # resulting ARTICLES by (a) how many distinct query terms they
+            # matched -- more is better -- and (b) the rarity of the rarest
+            # of those terms (fewer hits of its own -- see
+            # ``rank_terms_by_rarity``), so a specific/rare term like
+            # "helium" outweighs a generic one like "output" or "point", and
+            # a term with zero hits at all (a misspelling) is dropped
+            # outright rather than diluting the merge. The returned
+            # ``used_fallback`` flag is carried onto each result (see the
+            # "used_fallback" key below) purely for observability --
+            # coverage itself is judged by term/title overlap (see
             # ``compute_coverage``), not by which search path found it.
             hits, failed = _search(op, search_query, limit)
             if hits or failed or not tokens:
                 return hits, failed, False
-            merged: list[Any] = []
-            seen: set[str] = set()
+            nonlocal fallback_searches_used
+            term_hits_by_term: dict[str, list[Any]] = {}
+            term_counts: dict[str, int] = {}
             any_failed = False
             for term in tokens:
+                if fallback_searches_used >= _MAX_FALLBACK_SEARCHES:
+                    break
+                fallback_searches_used += 1
                 term_hits, term_failed = _search(op, term, limit)
                 any_failed = any_failed or term_failed
-                for hit in term_hits:
-                    if hit.path not in seen:
-                        seen.add(hit.path)
-                        merged.append(hit)
+                term_hits_by_term[term] = term_hits
+                term_counts[term] = len(term_hits)
+            rarity_order = rank_terms_by_rarity(term_counts)
+            rarity_rank = {term: i for i, term in enumerate(rarity_order)}
+            matched_terms: dict[str, set[str]] = {}
+            first_hit: dict[str, Any] = {}
+            first_seen_order: dict[str, int] = {}
+            for term in rarity_order:
+                for hit in term_hits_by_term[term]:
+                    if hit.path not in first_hit:
+                        first_hit[hit.path] = hit
+                        first_seen_order[hit.path] = len(first_seen_order)
+                        matched_terms[hit.path] = set()
+                    matched_terms[hit.path].add(term)
+            ordered_paths = sorted(
+                first_hit,
+                key=lambda p: (
+                    -len(matched_terms[p]),
+                    min(rarity_rank[t] for t in matched_terms[p]),
+                    first_seen_order[p],
+                ),
+            )
+            merged = [first_hit[p] for p in ordered_paths]
             return merged[:limit], any_failed, True
 
         fulltext_hits, fulltext_failed, fulltext_fallback = _search_with_fallback(
@@ -528,6 +664,62 @@ class ResearchEngine:
             "search_titles", _TITLE_LIMIT
         )
         timed_out = timed_out or fulltext_failed or title_failed
+
+        def _dedupe_by_path(hits: list[Any]) -> list[Any]:
+            seen: set[str] = set()
+            out: list[Any] = []
+            for h in hits:
+                if h.path not in seen:
+                    seen.add(h.path)
+                    out.append(h)
+            return out
+
+        # Always (not only when the all-terms query returned zero hits, see
+        # Baseline v4 above) add "entity candidates": title-search each of
+        # the rarest own query terms directly, and run a relaxed AND of just
+        # the top-k rarest terms. This is the fix for the case where the
+        # full AND query *does* return hits (so the existing zero-hits-only
+        # fallback above never runs) but they are all wrong because the
+        # true entity article lacks one word the question used (a
+        # misspelling, or a symbol like degC where the question spelled out
+        # "celsius"). Bounded to a few extra worker calls total.
+        guaranteed_entity_paths: list[str] = []
+        if tokens and remaining() > 0:
+            unique_tokens = list(dict.fromkeys(tokens))
+            term_matches: dict[str, int] = {}
+            for i, term in enumerate(unique_tokens):
+                if i >= _MAX_ENTITY_TERM_SEARCHES or remaining() <= 0:
+                    break
+                term_matches[term] = self._term_matches(
+                    entry, worker, term, deadline_s=_op_deadline()
+                )
+            # Rarest (fewest corpus-wide matches) first; a term with zero
+            # matches anywhere in the archive (a misspelling) carries no
+            # rarity signal and is dropped, same rationale as
+            # ``rank_terms_by_rarity``.
+            rarity_order = sorted(
+                (t for t in term_matches if term_matches[t] > 0),
+                key=lambda t: (term_matches[t], unique_tokens.index(t)),
+            )
+            entity_title_hits: list[Any] = []
+            for term in rarity_order[:_ENTITY_TITLE_LIMIT]:
+                hits, failed = _search("search_titles", term, _ENTITY_TITLE_RESULTS)
+                timed_out = timed_out or failed
+                if hits and term in rarity_order[:_ENTITY_GUARANTEED_SLOTS]:
+                    guaranteed_entity_paths.append(hits[0].path)
+                entity_title_hits.extend(hits)
+            entity_fulltext_hits: list[Any] = []
+            for k in _ENTITY_RELAXED_AND_SIZES:
+                if len(rarity_order) >= k:
+                    joined = " ".join(rarity_order[:k])
+                    hits, failed = _search("search_fulltext", joined, _FULLTEXT_LIMIT)
+                    timed_out = timed_out or failed
+                    entity_fulltext_hits.extend(hits)
+            # Entity hits are prepended: they are the strongest, most
+            # specific signal (rare/entity terms only), so they should win
+            # ties in the RRF fusion below over generic fallback hits.
+            title_hits = _dedupe_by_path([*entity_title_hits, *title_hits])
+            fulltext_hits = _dedupe_by_path([*entity_fulltext_hits, *fulltext_hits])
         # Based on the full-text fallback only: a full-text AND-of-terms
         # search failing outright is the strong signal that the query's
         # content words never co-occur in any article. Title-suggestion
@@ -563,6 +755,26 @@ class ResearchEngine:
         top_paths = [path for path, _ in fused_articles[: self._top_n_articles]]
         lexical_paths = {h.path for h in fulltext_hits} | {h.path for h in title_hits}
         dense_paths_set = set(dense_paths)
+
+        # Guarantee a slot for each of the (up to _ENTITY_GUARANTEED_SLOTS)
+        # rarest own query terms' own title-search hit -- see Baseline v4
+        # above. RRF fusion alone under-ranks a candidate that is only in
+        # one input list (title) against candidates present in both
+        # fulltext and title lists (e.g. every generic "Boiling ..." title
+        # that also turns up in the full-text AND-of-all-terms query), even
+        # though the title hit is the far more specific/relevant one. Same
+        # mechanism as the topic_hint guaranteed slot just below.
+        # Only a genuinely MISSING entity candidate is inserted -- one
+        # already present in ``top_paths`` keeps its fused rank rather than
+        # being force-promoted to the front, so a query that was already
+        # answered correctly (the common case) is never perturbed by this
+        # mechanism; it only rescues the specific failure mode above.
+        for entity_path in reversed(guaranteed_entity_paths):
+            if entity_path in top_paths:
+                continue
+            lexical_paths.add(entity_path)
+            top_paths.insert(0, entity_path)
+        top_paths = top_paths[: self._top_n_articles + len(guaranteed_entity_paths)]
 
         # Spec §5 step 3: topic_hint is "the current subject" -- i.e. an
         # entity the lesson is already about, not merely a keyword to
@@ -691,6 +903,7 @@ class ResearchEngine:
         query_terms = _query_terms(query, topic_hint)
         coverage_terms = _coverage_terms(query, topic_hint)
         topic_hint_terms = frozenset(tokenize(topic_hint)) if topic_hint else frozenset()
+        own_term_count = _own_term_count(query)
 
         # Embed the query at most once per request, bounded by whatever
         # time remains before the soft deadline (never longer than
@@ -747,7 +960,9 @@ class ResearchEngine:
         _consult(primary_archives)
 
         if fallback_archives and not soft_elapsed() and remaining() > 0:
-            preliminary_coverage = _best_coverage(candidates, coverage_terms, topic_hint_terms)
+            preliminary_coverage = _best_coverage(
+                candidates, coverage_terms, topic_hint_terms, own_term_count
+            )
             if preliminary_coverage["weak"]:
                 _consult(fallback_archives)
 
@@ -778,7 +993,7 @@ class ResearchEngine:
         budget = budget_tokens if budget_tokens is not None else self._default_budget_tokens
         packed = pack(capped, budget_tokens=budget, count_tokens=estimate_tokens)
 
-        coverage = _best_coverage(packed, coverage_terms, topic_hint_terms)
+        coverage = _best_coverage(packed, coverage_terms, topic_hint_terms, own_term_count)
 
         passages: list[ResearchPassage] = []
         if not coverage["weak"]:

@@ -17,6 +17,7 @@ from pathlib import Path
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 
 _STOPWORDS_PATH = Path(__file__).with_name("stopwords_en.txt")
+_INSTRUCTION_WORDS_PATH = Path(__file__).with_name("instruction_words_en.txt")
 
 
 @lru_cache(maxsize=1)
@@ -25,10 +26,72 @@ def _stopwords() -> frozenset[str]:
     return frozenset(line.strip() for line in text.splitlines() if line.strip())
 
 
+@lru_cache(maxsize=1)
+def _instruction_words() -> frozenset[str]:
+    text = _INSTRUCTION_WORDS_PATH.read_text(encoding="utf-8")
+    return frozenset(
+        line.strip().lower()
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    )
+
+
 def tokenize(text: str) -> list[str]:
     """Lowercase, unicode-aware tokenize, dropping English stopwords."""
     stopwords = _stopwords()
     return [t for t in (m.group(0).lower() for m in _TOKEN_RE.finditer(text)) if t not in stopwords]
+
+
+# Wrapper phrases that signal "this is an instruction to the model", not a
+# topic: "tell me", "give me", "show me", "can you explain/describe/tell/
+# show/give/list", and a bare "please". Stripped from anywhere in the text
+# (not just the lead) since they never carry topic content of their own.
+_INSTRUCTION_PHRASE_RE = re.compile(
+    r"\b(?:tell|give|show)\s+me\b"
+    r"|\bcan\s+you\s+(?:explain|describe|tell|show|give|list)\b"
+    r"|\bplease\b",
+    re.IGNORECASE,
+)
+_LEADING_WORD_RE = re.compile(r"^\s*([A-Za-z]+)\b")
+
+
+def strip_instruction_words(text: str) -> str:
+    """Strip instruction/imperative wrapping from ``text`` for query and
+    coverage term extraction (see ``instruction_words_en.txt``).
+
+    Two independent things are stripped: (1) known wrapper phrases like
+    "tell me" / "can you explain" anywhere in the text, and (2) a leading
+    imperative verb from ``instruction_words_en.txt`` (e.g. "Output the
+    boiling point of helium...") -- but ONLY when the text still has other
+    content left afterwards, so a real topic query like "output device" or
+    "What is output?" (where the instruction word is the sole content term,
+    or not in leading position) is left untouched. Idempotent; safe to call
+    on already-stripped text.
+    """
+    stripped = _INSTRUCTION_PHRASE_RE.sub(" ", text)
+    match = _LEADING_WORD_RE.match(stripped)
+    if match and match.group(1).lower() in _instruction_words():
+        rest = stripped[match.end() :]
+        if tokenize(rest):
+            stripped = rest
+    return stripped
+
+
+def rank_terms_by_rarity(term_hit_counts: dict[str, int]) -> list[str]:
+    """Order ``term_hit_counts``' keys by rarity (fewest search hits first),
+    dropping terms with zero hits entirely (misspelt/OOV terms like
+    "farenheit" that never occur in the corpus at all).
+
+    Used by the candidate-generation fallback (see ``research.py``) to
+    prefer specific/rare terms (e.g. "helium") over generic/common ones
+    (e.g. "output", "point") when the all-terms query returns nothing and
+    candidates must be built from a relaxed, coordination-ranked query.
+    Ties keep first-seen (insertion) order for determinism.
+    """
+    nonzero = [(term, count) for term, count in term_hit_counts.items() if count > 0]
+    order = {term: i for i, term in enumerate(term_hit_counts)}
+    nonzero.sort(key=lambda tc: (tc[1], order[tc[0]]))
+    return [term for term, _ in nonzero]
 
 
 _SIBILANT_ES_SUFFIXES = ("ses", "xes", "zes", "ches", "shes")

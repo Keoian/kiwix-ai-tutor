@@ -600,3 +600,249 @@ def test_ranking_flags_none_vs_default_object_identical_response(
     d1.pop("timings", None)
     d2.pop("timings", None)
     assert d1 == d2
+
+
+# ---------------------------------------------------------------------------
+# Coverage floor: a title match on one generic own term must not be enough
+# when the question has >= 3 own content terms and almost none of them show
+# up in the candidate's text (the real "Output the boiling point of helium
+# in celsius and fahrenheit" failure -- title-matching "Output" while
+# "helium"/"boiling"/"celsius"/"fahrenheit" are all absent).
+# ---------------------------------------------------------------------------
+
+
+def test_compute_coverage_generic_title_match_below_floor_is_weak():
+    coverage = compute_coverage(
+        query_terms={"boiling", "point", "helium", "celsius", "fahrenheit"},
+        title="Output",
+        text="Output is data sent from a computer, such as to a printer or screen.",
+        own_term_count=5,
+    )
+    assert coverage["title_match"] is False
+    assert coverage["weak"] is True
+
+
+def test_compute_coverage_title_match_above_floor_is_not_weak():
+    coverage = compute_coverage(
+        query_terms={"boiling", "point", "helium", "celsius", "fahrenheit"},
+        title="Helium",
+        text="Helium boils at a very low temperature, about -269 celsius or -452 fahrenheit.",
+        own_term_count=5,
+    )
+    assert coverage["title_match"] is True
+    assert coverage["weak"] is False
+
+
+def test_compute_coverage_floor_not_applied_below_min_own_term_count():
+    # Only 2 own content terms -- the floor gate (>= 3) never kicks in, so
+    # the existing single-shared-term title match behavior is unchanged.
+    coverage = compute_coverage(
+        query_terms={"pythagorean", "theorem"},
+        title="Pythagorean theorem",
+        text="Some unrelated filler text about nothing in particular here.",
+        own_term_count=2,
+    )
+    assert coverage["title_match"] is True
+    assert coverage["weak"] is False
+
+
+# ---------------------------------------------------------------------------
+# Candidate-generation fallback (item 3): when the all-terms query returns
+# nothing, candidate articles are ranked by distinct-term coordination and
+# term rarity, not first-seen order -- a rare term (Erdős, appearing in only
+# 2 of the fixture's ~55 articles) must win over a common one ("school",
+# appearing in ~50 of them), and a misspelt/OOV term must be dropped
+# entirely rather than diluting the merge.
+# ---------------------------------------------------------------------------
+
+
+def test_fallback_prefers_rare_term_article_over_common_term_articles(
+    registry_toml, snapshot_store, tmp_path
+):
+    # "hypotenuse" only appears in the fixture's Pythagorean theorem
+    # article; "school" appears in ~50 of the ~55 fixture articles (every
+    # generated simple-topic page says "X is a school topic"). No article
+    # has both, so the joined all-terms query returns nothing and the
+    # fallback must win on "hypotenuse"'s rarity, not "school"'s ubiquity.
+    from tutor.retrieval.registry import load_registry
+
+    registry = load_registry(registry_toml)
+    engine = _engine(registry_toml, snapshot_store, tmp_path)
+    entry = registry.for_subject(None)[0]
+    candidates, _timed_out, _note = engine._process_archive(
+        entry, "hypotenuse school", lambda: 5.0
+    )
+    assert candidates, "expected fallback candidates"
+    candidates.sort(key=lambda c: -c["score"])
+    assert candidates[0]["used_fallback"] is True
+    assert candidates[0]["title"] == "Pythagorean Theorem"
+
+
+# ---------------------------------------------------------------------------
+# Baseline v4: entity candidates via real corpus-IDF (getEstimatedMatches).
+#
+# Reproduces the real-archive failure reported against simplewiki: an
+# all-terms AND query returns hits (so the zero-hits-only fallback above
+# never runs), but every hit is a generic wrong article ("Boiling point",
+# "Boiling", ...) because the true entity article ("Helium") lacks one
+# word the question used ("celsius"/"farenheit"). A FakeWorker below stands
+# in for the real ZIM worker so the scenario is exact and deterministic
+# (the real archive is exercised separately, out of process, per the task
+# brief -- not from the unit suite).
+# ---------------------------------------------------------------------------
+
+
+class _EntityFakeWorker:
+    """Fake worker reproducing the "AND succeeds but wrong" bug: the
+    all-terms fulltext query returns several generic "Boiling_*" articles
+    (none of them the true entity), while a direct title search on either
+    of the two rarest terms ("celsius", "helium") finds the right article
+    outright, and `estimated_matches` gives each term a distinct,
+    realistic corpus-wide rarity ranking.
+    """
+
+    _MATCHES = {"boiling": 1042, "point": 17517, "helium": 332, "celsius": 222}
+    _GENERIC_HITS = [
+        ("Boiling_point", "Boiling point"),
+        ("Boiling", "Boiling"),
+        ("Boiling_tube", "Boiling tube"),
+    ]
+    _TITLE_HITS = {
+        "celsius": [("Celsius", "Celsius")],
+        "helium": [("Helium", "Helium")],
+    }
+    _HTML_BY_PATH = {
+        "Boiling_point": "<html><head><title>Boiling point</title></head>"
+        "<body><h1>Boiling point</h1><p>Boiling point is a physical "
+        "property.</p></body></html>",
+        "Boiling": "<html><head><title>Boiling</title></head>"
+        "<body><h1>Boiling</h1><p>Boiling is a process.</p></body></html>",
+        "Boiling_tube": "<html><head><title>Boiling tube</title></head>"
+        "<body><h1>Boiling tube</h1><p>A boiling tube is lab glassware.</p>"
+        "</body></html>",
+        "Celsius": "<html><head><title>Celsius</title></head>"
+        "<body><h1>Celsius</h1><p>Celsius is a temperature scale.</p>"
+        "</body></html>",
+        "Helium": "<html><head><title>Helium</title></head>"
+        "<body><h1>Helium</h1><p>Helium has the lowest boiling point of "
+        "all the elements, about -269 degrees celsius.</p></body></html>",
+    }
+
+    def __init__(self, archive_path: Path) -> None:
+        self._archive_path = archive_path
+
+    def _hits(self, pairs, source: str):
+        from tutor.retrieval.zim.search import SearchHit
+
+        return [
+            SearchHit(path=p, title=t, rank=i, snippet="", source=source)
+            for i, (p, t) in enumerate(pairs)
+        ]
+
+    def request(self, op: str, *, deadline_s: float, **kwargs) -> WorkerResult:
+        if op == "estimated_matches":
+            term = kwargs["term"]
+            return WorkerResult(
+                status="ok", value=self._MATCHES.get(term, 0), error=None, elapsed_s=0.0
+            )
+        if op == "search_fulltext":
+            query = kwargs["query"]
+            terms = set(query.split())
+            if terms >= {"boiling", "point", "helium", "celsius"}:
+                return WorkerResult(
+                    status="ok",
+                    value=self._hits(self._GENERIC_HITS, "fulltext"),
+                    error=None,
+                    elapsed_s=0.0,
+                )
+            # Relaxed-AND queries of just the rarest terms: no article in
+            # this fake corpus contains both "celsius" and "helium" as
+            # literal words (Helium's own text spells out "celsius" only
+            # lowercase within a sentence -- treated here as not a fulltext
+            # AND match, matching the real bug: the Helium article uses a
+            # degree symbol, not the literal word, in the real archive).
+            return WorkerResult(status="ok", value=[], error=None, elapsed_s=0.0)
+        if op == "search_titles":
+            query = kwargs["query"].strip()
+            pairs = self._TITLE_HITS.get(query)
+            if pairs:
+                return WorkerResult(
+                    status="ok", value=self._hits(pairs, "title"), error=None, elapsed_s=0.0
+                )
+            return WorkerResult(status="ok", value=[], error=None, elapsed_s=0.0)
+        if op == "fetch_entry":
+            from tutor.retrieval.zim.search import FetchedEntry
+
+            path = kwargs["path"]
+            html = self._HTML_BY_PATH.get(path)
+            if html is None:
+                return WorkerResult(status="error", value=None, error="unknown path", elapsed_s=0.0)
+            title = html.split("<title>")[1].split("</title>")[0]
+            return WorkerResult(
+                status="ok",
+                value=FetchedEntry(
+                    path=path, title=title, mimetype="text/html", html=html, hops=()
+                ),
+                error=None,
+                elapsed_s=0.0,
+            )
+        return WorkerResult(status="error", value=None, error=f"unknown op {op}", elapsed_s=0.0)
+
+    def close(self) -> None:
+        pass
+
+
+def test_entity_candidate_guaranteed_slot_wins_over_generic_and_matches(
+    registry_toml, snapshot_store, tmp_path
+):
+    from tutor.retrieval.registry import load_registry
+
+    registry = load_registry(registry_toml)
+    engine = _engine(
+        registry_toml,
+        snapshot_store,
+        tmp_path,
+        worker_factory=lambda path: _EntityFakeWorker(path),
+    )
+    entry = registry.for_subject(None)[0]
+    candidates, _timed_out, _note = engine._process_archive(
+        entry,
+        "Output the boiling point of helium in celsius and farenheit.",
+        lambda: 5.0,
+    )
+    titles = []
+    seen = set()
+    for c in sorted(candidates, key=lambda c: -c["score"]):
+        if c["title"] not in seen:
+            seen.add(c["title"])
+            titles.append(c["title"])
+    assert "Helium" in titles[:2], titles
+
+
+def test_idf_lookup_is_cached_per_archive_and_term(registry_toml, snapshot_store, tmp_path):
+    """The real `getEstimatedMatches` call is made at most once per
+    (archive, term) across a whole request -- repeat lookups (e.g. the same
+    term reused across the fulltext/title fallback and the entity-candidate
+    pass) hit the engine's own bounded cache instead of the worker."""
+
+    class _CountingWorker(_EntityFakeWorker):
+        calls: dict[str, int] = {}
+
+        def request(self, op: str, *, deadline_s: float, **kwargs):
+            if op == "estimated_matches":
+                term = kwargs["term"]
+                self.calls[term] = self.calls.get(term, 0) + 1
+            return super().request(op, deadline_s=deadline_s, **kwargs)
+
+    from tutor.retrieval.registry import load_registry
+
+    registry = load_registry(registry_toml)
+    worker = _CountingWorker(Path("unused"))
+    engine = _engine(
+        registry_toml, snapshot_store, tmp_path, worker_factory=lambda path: worker
+    )
+    entry = registry.for_subject(None)[0]
+    engine._process_archive(entry, "boiling point helium celsius", lambda: 5.0)
+    calls_after_first = dict(worker.calls)
+    engine._process_archive(entry, "boiling point helium celsius", lambda: 5.0)
+    assert worker.calls == calls_after_first, "second call must hit the IDF cache, not the worker"

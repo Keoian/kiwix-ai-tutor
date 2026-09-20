@@ -17,6 +17,7 @@ from tutor.retrieval.zim.search import (
     FetchedEntry,
     NoFulltextIndex,
     SearchHit,
+    estimated_matches,
     fetch_entry,
     search_fulltext,
     search_titles,
@@ -93,6 +94,33 @@ def test_search_fulltext_raises_no_fulltext_index_on_noindex_zim(noindex_zim: Pa
     archive = Archive(str(noindex_zim))
     with pytest.raises(NoFulltextIndex):
         search_fulltext(archive, "photosynthesis", limit=10)
+
+
+def test_estimated_matches_nonzero_for_known_topic(fixture_zim: Path) -> None:
+    archive = Archive(str(fixture_zim))
+    assert estimated_matches(archive, "Pythagoras") > 0
+
+
+def test_estimated_matches_zero_for_offcorpus_term(fixture_zim: Path) -> None:
+    archive = Archive(str(fixture_zim))
+    assert estimated_matches(archive, "zzqxwfnorbleasdkjqwe") == 0
+
+
+def test_estimated_matches_zero_for_blank_query(fixture_zim: Path) -> None:
+    archive = Archive(str(fixture_zim))
+    assert estimated_matches(archive, "   ") == 0
+
+
+def test_estimated_matches_rarer_term_has_fewer_matches(fixture_zim: Path) -> None:
+    # "Erdős" appears in only 2 of the fixture's ~55 articles; "school"
+    # appears in ~50 of them (every generated simple-topic page).
+    archive = Archive(str(fixture_zim))
+    assert estimated_matches(archive, "Erdős") < estimated_matches(archive, "school")
+
+
+def test_estimated_matches_zero_on_noindex_zim(noindex_zim: Path) -> None:
+    archive = Archive(str(noindex_zim))
+    assert estimated_matches(archive, "photosynthesis") == 0
 
 
 def test_search_titles_returns_hits_for_known_topic(fixture_zim: Path) -> None:

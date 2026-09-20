@@ -22,6 +22,7 @@
   let currentAbortController = null;
   let currentStudentId = null;
   let lastTurnMeta = null;
+  let lastCitationsEvent = null;
 
   // ---------------------------------------------------------------------
   // Students / lessons (WP-C4: profile selector, new lesson, resume list)
@@ -172,6 +173,57 @@
     });
   }
 
+  // -----------------------------------------------------------------------
+  // 2026-09-20 evidence-dump follow-up: "resolves" != "supports". The host
+  // never edits or removes anything from the model's own text -- it only
+  // collapses a detected dump behind a toggle, and adds a plain note when
+  // every citation on the turn is unsupported. textContent/DOM nodes only.
+  // -----------------------------------------------------------------------
+
+  function collapseEvidenceDump(tutorNode) {
+    const existingChildren = Array.prototype.slice.call(tutorNode.childNodes);
+    const contentWrap = el("div", { className: "dump-content" });
+    contentWrap.hidden = true;
+    existingChildren.forEach(function (child) {
+      contentWrap.appendChild(child);
+    });
+    const toggle = el("button", {
+      className: "dump-toggle",
+      text: "Show the tutor's pasted sources",
+      attrs: { type: "button" },
+    });
+    toggle.addEventListener("click", function () {
+      contentWrap.hidden = !contentWrap.hidden;
+      toggle.textContent = contentWrap.hidden
+        ? "Show the tutor's pasted sources"
+        : "Hide the tutor's pasted sources";
+    });
+    tutorNode.appendChild(toggle);
+    tutorNode.appendChild(contentWrap);
+  }
+
+  function appendUnsupportedSourcesNote() {
+    const wrapper = el("div", { className: "msg msg-note" });
+    const note = el("span", {
+      className: "unsupported-note",
+      text: "The tutor's sources did not match this question.",
+    });
+    wrapper.appendChild(note);
+    chat.appendChild(wrapper);
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  function applyCitationQuality(tutorNode, doneData, citationsEvent) {
+    if (doneData && doneData.evidence_dump) {
+      collapseEvidenceDump(tutorNode);
+    }
+    const citations = (citationsEvent && citationsEvent.citations) || [];
+    const unsupportedLabels = (citationsEvent && citationsEvent.unsupported_labels) || [];
+    if (citations.length > 0 && unsupportedLabels.length === citations.length) {
+      appendUnsupportedSourcesNote();
+    }
+  }
+
   function renderCitationChip(label, passageId) {
     const chip = el("button", {
       className: "citation-chip",
@@ -247,6 +299,7 @@
 
     let tutorLine = "";
     const tutorNode = appendMessage("tutor", "");
+    lastCitationsEvent = null;
 
     currentAbortController = new AbortController();
     try {
@@ -319,6 +372,7 @@
         appendCalcResult(data.result !== undefined ? String(data.result) : JSON.stringify(data));
       }
     } else if (eventName === "citations") {
+      lastCitationsEvent = data;
       renderCitations(tutorNode, data.citations);
     } else if (eventName === "eviction") {
       appendEvictionNote(data);
@@ -326,6 +380,7 @@
       appendError(data.message || "An error occurred.");
     } else if (eventName === "done") {
       lastTurnMeta = data;
+      applyCitationQuality(tutorNode, data, lastCitationsEvent);
       refreshStatus();
     }
   }

@@ -48,9 +48,21 @@ from tutor.retrieval.zim.models import ArticleBundle, SectionMeta
 # rows) for an unchanged archive -- see docs/bundle_and_passages.md. Anything
 # keyed on a bundle (e.g. a passage id, see ``hybrid/passages.py``) folds
 # this in so a stale value is never served across an extractor change.
-EXTRACTOR_VERSION = "zim-bundle-v1"
+#
+# v2 (item 4, real-failure fix): the infobox -- previously extracted into
+# ``ArticleBundle.infobox`` but never rendered into ``bundle.text`` -- is
+# now ALSO appended as one final synthetic "Infobox" section, so
+# ``split_passages`` yields a citable "Key: value" passage for it (e.g.
+# Helium's boiling point in a table cell now reaches the model; before this
+# it was extracted but silently unreachable). This changes ``bundle.text``
+# for every article that has an infobox, which changes every downstream
+# passage id for that article (see ``hybrid/passages.py``'s id formula,
+# which folds in ``extractor_version``) -- see docs/bundle_and_passages.md
+# for what that invalidates.
+EXTRACTOR_VERSION = "zim-bundle-v2"
 
 _INFOBOX_SELECTORS = ("table.infobox",)
+_INFOBOX_HEADING = "Infobox"
 
 
 def _extract_infobox(root: Tag) -> tuple[tuple[str, str], ...]:
@@ -140,6 +152,11 @@ def build_bundle(html: str, *, path: str, title: str) -> ArticleBundle:
     links = tuple(iter_internal_links(root))
     infobox = _extract_infobox(root)
     text, headings = _render_with_headings(root)
+    if infobox:
+        kv_lines = "\n".join(f"{label}: {value}" for label, value in infobox)
+        heading_start = len(text) + 2  # after the "\n\n" separator below
+        text = f"{text}\n\n{_INFOBOX_HEADING}\n{kv_lines}"
+        headings = [*headings, (2, _INFOBOX_HEADING, heading_start)]
     sections = _build_sections(text, headings)
     return ArticleBundle(
         path=path,

@@ -148,6 +148,29 @@ body {
   outline: 2px solid var(--accent);
 }
 
+/* 2026-09-20 evidence-dump follow-up: collapsed "pasted sources" toggle
+   and the plain unsupported-sources note. */
+.dump-toggle {
+  display: block;
+  margin-top: 0.5rem;
+  padding: 0.3rem 0.6rem;
+  background: var(--chip-bg);
+  color: var(--chip-text);
+  border: none;
+  border-radius: 8px;
+  font-size: 0.85em;
+  cursor: pointer;
+}
+
+.dump-content[hidden] {
+  display: none;
+}
+
+.unsupported-note {
+  font-style: italic;
+  opacity: 0.85;
+}
+
 #action-bar {
   display: flex;
   gap: 0.5rem;

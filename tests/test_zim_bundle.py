@@ -355,3 +355,33 @@ def test_bundle_build_twice_equal(fixture_zim: Path):
     b1 = build_bundle(html, path="pythagorean_theorem", title=entry.title)
     b2 = build_bundle(html, path="pythagorean_theorem", title=entry.title)
     assert b1 == b2
+
+
+def test_build_bundle_infobox_appended_as_synthetic_passage_ready_section():
+    b = _build(INFOBOX_LISTS_HTML, path="infobox")
+    assert b.infobox
+    infobox_section = next(s for s in b.sections if s.heading == "Infobox")
+    section_text = b.text[infobox_section.start : infobox_section.end]
+    # bundle.text[start:end] == passage text contract holds for the
+    # synthetic section exactly like every other section.
+    assert section_text.startswith("Infobox")
+    for label, value in b.infobox:
+        assert f"{label}: {value}" in section_text
+
+
+def test_build_bundle_no_infobox_no_synthetic_section():
+    b = _build(PLAIN_HTML, path="plain")
+    assert b.infobox == ()
+    assert not any(s.heading == "Infobox" for s in b.sections)
+
+
+def test_build_bundle_infobox_section_splits_into_citable_passage():
+    from tutor.retrieval.hybrid.passages import split_passages
+
+    b = _build(INFOBOX_LISTS_HTML, path="infobox")
+    passages = split_passages(b, fingerprint_digest="digest", archive_id="arch")
+    infobox_passages = [p for p in passages if p.heading_path == ("Infobox",)]
+    assert infobox_passages
+    p = infobox_passages[0]
+    assert b.text[p.start : p.end] == p.text
+    assert "Geometry" in p.text or "Pythagoras" in p.text

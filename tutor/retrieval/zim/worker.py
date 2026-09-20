@@ -21,7 +21,12 @@ from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any
 
-from tutor.retrieval.zim.search import fetch_entry, search_fulltext, search_titles
+from tutor.retrieval.zim.search import (
+    estimated_matches,
+    fetch_entry,
+    search_fulltext,
+    search_titles,
+)
 
 _CONTEXT = mp.get_context("spawn")
 
@@ -101,6 +106,8 @@ def _child_main(archive_path_str: str, conn: Connection) -> None:
                 )
             elif op == "fetch_entry":
                 value = fetch_entry(archive, kwargs["path"])
+            elif op == "estimated_matches":
+                value = estimated_matches(archive, kwargs["term"])
             else:
                 conn.send(("error", None, f"unknown op: {op}"))
                 continue

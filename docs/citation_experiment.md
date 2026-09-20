@@ -123,3 +123,112 @@ python -m pytest tests/test_run_turn_eval.py tests/test_citations.py -q -p no:wa
 # Run the live plumbing test (now updated xfail reason):
 python -m pytest -m integration tests/test_turn_live.py -v -p no:warnings
 ```
+
+## 2026-09-20 follow-up: evidence-dump failure
+
+Real failure from the project owner's session, verbatim (paraphrased
+below, exact shape reproduced as a test fixture -- see
+`tests/test_citations.py::_helium_dump_fixture` and
+`tests/test_compose.py::test_turn_runner_flags_unsupported_citations_and_evidence_dump`):
+
+> Question: "Output the boiling point of helium in celsius and
+> farenheit." Retrieval (being fixed separately by another workstream)
+> returned 11 passages about computer "output" devices, logic gates and
+> multiplexers -- a lexical false-positive on the word "output" in the
+> question. The model answered from memory ("-268.92°C or -452.04°F",
+> slightly wrong -- the true value is -268.93°C / -452.07°F -- and it did
+> not call `calc`), then wrote "Here's the reasoning:" followed by a
+> bullet list that copied out all 11 off-topic passages verbatim as
+> "[S1]: ..." ... "[S11]: ...", and ended the final sentence with
+> "[S1][S2]...[S11]" stacked together. Every label *resolved* (all 11
+> passages existed in the packet) so the host's old citation handling
+> treated this as a fully-cited answer, even though not one of them
+> supports anything the answer claims about helium.
+
+### Three host-side defects fixed here
+
+1. **"Resolves" != "supports".** `tutor.app.citations.Citation` gains a
+   `supported: bool` field. `resolve_citations` computes it with
+   `is_supported(sentence, passage_text)`: the sentence/bullet carrying
+   the label is tokenized with `tutor.retrieval.hybrid.lexical.tokenize`
+   (reused, not reimplemented) and compared against the cited passage's
+   text; supported if they share >= 2 content terms (numbers count, since
+   `tokenize` keeps digit runs) or >= 30% of the sentence's own content
+   terms are shared. A sentence that merely quotes its passage back would
+   pass this check on its own -- but see (2): when that quoting is part of
+   a detected evidence dump, those specific citations are overridden back
+   to `supported=False` (`tutor.app.citations._dump_signal`), since
+   regurgitating the source is not the same as a legitimate citation
+   quoting it. The `citations` SSE event (`tutor.app.compose`) now also
+   carries `unsupported_labels`, and the `done` event carries
+   `citation_quality`: `"ok"` (citations exist and all support), `"uncited"`
+   (no `[S#]` label at all), or `"unsupported"` (at least one label present
+   but not supporting). The host still never adds, removes, or rewrites a
+   label in the model's own text -- `supported` is metadata alongside the
+   citation, never a mutation of the answer.
+
+2. **Evidence dumping.** `tutor.app.citations.detect_evidence_dump` flags
+   an answer as `evidence_dump: true` (also in the `done` event) on either
+   of two mechanical signals: (a) label-stacking -- a single
+   sentence/bullet carrying 4 or more distinct `[S#]` labels (the
+   "...[S1][S2]...[S11]" trailer), or (b) wholesale copying -- at least 3
+   distinct cited sentences/bullets each have >= 80% of their own content
+   terms contained in the passage their label resolves to. `tutor/ui/app.js`
+   never edits the model's text; when `evidence_dump` is true it collapses
+   the already-rendered answer behind a "Show the tutor's pasted sources"
+   toggle button (`textContent` only, DOM nodes built the same way as the
+   rest of the citation rendering -- `tests/test_ui_static.py` stays
+   green, no `innerHTML` anywhere), and when every citation on the turn is
+   unsupported it adds a plain note, "The tutor's sources did not match
+   this question."
+
+3. **Wording.** The evidence reminder adopted for the 0.20 -> 0.60
+   citation-rate win (`render_evidence`'s trailing line) plausibly
+   encouraged this failure: "Cite the sources you use like [S1]" reads as
+   "cite all of them," not "cite only what's relevant." It is now: "Cite
+   only a source that actually supports the sentence, like [S1]. Do not
+   list or copy the sources. If none of them answers the question, say
+   so." `tutor/app/system_prompt.txt` mirrors the same instruction, plus
+   two additions: say plainly when the evidence doesn't cover the
+   question and answer only what you're confident of as your own
+   knowledge; and always use the `calc` tool for unit conversions (the
+   owner's transcript did a Celsius/Fahrenheit conversion from memory
+   instead). The prompt stays within the ~800-token slot
+   (`tests/test_citations.py::test_system_prompt_stays_within_approx_800_token_budget`,
+   a length/3.5 approximation -- the same fallback
+   `tutor.app.compose._make_count_tokens` uses when the real tokenizer is
+   unreachable).
+
+### Mechanical scoring extended
+
+`eval/run_turn_eval.py`'s `score_answer`/`aggregate` gain
+`all_supported`/`supported_citation_rate` (citation exists, resolves, and
+is supported -- strictly stronger than `all_resolve_rate`) and
+`evidence_dump`/`evidence_dump_rate` (from `AnswerRecord.evidence_dump`,
+which `run_variant` now populates via `detect_evidence_dump`).
+`render_report`'s table gained both columns. All test-first, fakes only,
+no network (`tests/test_run_turn_eval.py`).
+
+### Status: live re-measurement PENDING
+
+**None of this has been re-measured against the live model.** The wording
+change is a plausible fix for the evidence-dump failure (it addresses the
+exact defect observed: cite-everything phrasing, no "say so if nothing
+answers" instruction, no explicit "don't dump" instruction), but the
+0.20 -> 0.60 citation-rate result upstream of it came from A/B measurement
+against the real 1-bit-8B model, and this wording has not been. The
+server is in active use by the project owner right now, so
+`python -m eval.run_turn_eval` (which drives the real turn path against a
+live llama-server) was deliberately **not** run for this change. Before
+trusting the new wording:
+
+```powershell
+# Once the server is free:
+curl http://127.0.0.1:8080/health
+python -m eval.run_turn_eval
+```
+
+and check `supported_citation_rate` / `evidence_dump_rate` alongside the
+existing `citation_rate` -- the new wording should raise the former and
+drive the latter toward 0 without regressing the 0.60 citation rate this
+document's earlier section measured.

@@ -64,6 +64,21 @@ def test_worker_search_titles_matches_inprocess_search(fixture_zim: Path) -> Non
     assert result.value == expected
 
 
+def test_worker_estimated_matches_matches_inprocess_search(fixture_zim: Path) -> None:
+    from libzim.reader import Archive
+
+    from tutor.retrieval.zim.search import estimated_matches
+
+    archive = Archive(str(fixture_zim))
+    expected = estimated_matches(archive, "Pythagoras")
+
+    with ZimWorker(fixture_zim) as worker:
+        result = worker.request("estimated_matches", deadline_s=10.0, term="Pythagoras")
+    assert result.status == "ok"
+    assert result.value == expected
+    assert expected > 0
+
+
 def test_worker_fetch_entry_returns_plain_data(fixture_zim: Path) -> None:
     with ZimWorker(fixture_zim) as worker:
         result = worker.request("fetch_entry", deadline_s=10.0, path="pythagorean_theorem")

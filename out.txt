@@ -1,0 +1,7 @@
+cov_terms frozenset({'erdős', 'school'})
+'Erdos Number' ['erdos', 'number'] 'Erdős number'
+{'term_coverage': 0.5, 'title_match': False, 'weak': True}
+'Erdos Number' ['erdos', 'number'] 'Definition\n\nCollaboration distance to Erdős in history of mathematics .'
+{'term_coverage': 0.5, 'title_match': False, 'weak': True}
+'Erdos Number' ['erdos', 'number'] 'Trivia\n\nMost working mathematicians have a small Erdős number.\n\n0 for Erdős hims'
+{'term_coverage': 0.5, 'title_match': False, 'weak': True}

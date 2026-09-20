@@ -161,6 +161,28 @@ def search_titles(archive: Any, query: str, *, limit: int = 10) -> list[SearchHi
     )
 
 
+def estimated_matches(archive: Any, term: str) -> int:
+    """Xapian's own estimated total-hit count for ``term`` in ``archive``.
+
+    Used as a real corpus-IDF specificity signal for candidate generation
+    (rarer terms like "helium" outrank generic ones like "output" or
+    "boiling") without needing an extra per-term search+resolve pass just
+    to learn a count. Returns ``0`` for a blank query or an archive with no
+    full-text index (the same "no signal" value a truly absent term would
+    give), never raises.
+    """
+    if _is_blank(term):
+        return 0
+    if not bool(archive.has_fulltext_index):
+        return 0
+    try:
+        searcher = Searcher(archive)
+        search = searcher.search(Query().set_query(term))
+        return int(search.getEstimatedMatches())
+    except Exception:  # noqa: BLE001 - best-effort rarity signal
+        return 0
+
+
 def fetch_entry(archive: Any, path: str) -> FetchedEntry:
     """Fetch ``path``'s entry (following redirects) as plain, picklable data."""
     resolved = resolve_entry(archive, path)

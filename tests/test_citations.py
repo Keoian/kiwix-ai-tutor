@@ -217,7 +217,14 @@ def test_render_evidence_appends_citation_reminder_after_non_empty_packet():
     """Measured (eval/run_turn_eval.py, docs/citation_experiment.md): a
     one-line reminder appended at the end of the evidence block raised the
     live citation rate from 0.20 to 0.60 on the fixture questions. The
-    label stays at the START of each passage line (unchanged)."""
+    label stays at the START of each passage line (unchanged).
+
+    2026-09-20 follow-up: the original wording ("Cite the sources you use
+    like [S1].") plausibly encouraged the evidence-dump failure (the model
+    citing/copying every passage rather than only the ones that actually
+    support a sentence). The reminder now also forbids dumping and tells
+    the model to say so when nothing answers the question -- re-measurement
+    with eval/run_turn_eval.py is PENDING (see docs/citation_experiment.md)."""
     packet = {
         "passages": [
             {
@@ -231,8 +238,141 @@ def test_render_evidence_appends_citation_reminder_after_non_empty_packet():
     }
     rendered = render_evidence(packet)
     assert rendered.startswith("[S1]")
-    assert rendered.rstrip().endswith("Cite the sources you use like [S1].")
+    reminder = rendered.rstrip().splitlines()[-1]
+    assert "[S1]" in reminder
+    assert "actually supports" in reminder
+    assert "do not list or copy" in reminder.lower()
+    assert "if none of them answers the question" in reminder.lower()
 
 
 def test_render_evidence_no_reminder_appended_for_empty_packet():
     assert render_evidence({"passages": []}).strip() == ""
+
+
+# ---------------------------------------------------------------------------
+# supported (mechanical support check) -- 2026-09-20 evidence-dump follow-up
+#
+# Real failure: "Output the boiling point of helium in celsius and
+# farenheit." Retrieval returned 11 passages about computer "output"
+# devices/logic gates/multiplexers. The model answered from memory (a
+# slightly wrong number), then wrote "Here's the reasoning:" followed by a
+# bullet list that copied out all 11 passages verbatim as "[S1]: ..." ...
+# "[S11]: ...", ending with "[S1][S2]...[S11]" stacked on one sentence.
+# Every label *resolved* (all 11 passages existed in the packet) but none
+# of them *supported* anything the answer actually claimed about helium.
+# ---------------------------------------------------------------------------
+
+from tutor.app.citations import detect_evidence_dump  # noqa: E402
+
+
+def _helium_dump_fixture():
+    """Reconstructs the owner's exact failing turn: 11 off-topic
+    "output"-themed passages, verbatim-copied into the answer as a bullet
+    list, with every label re-stacked on the final sentence."""
+    passages = []
+    bullets = []
+    topics = [
+        "Output devices convert data processed by a computer into a form humans can read.",
+        "A monitor is the most common output device, displaying text and images.",
+        "Printers produce a permanent, physical output of digital documents.",
+        "Speakers are output devices that convert electrical signals into sound.",
+        "A logic gate performs a basic logical function on one or more binary inputs.",
+        "An AND gate outputs true only when all of its inputs are true.",
+        "An OR gate outputs true when at least one of its inputs is true.",
+        "A NOT gate inverts its single input to produce the opposite output.",
+        "A multiplexer selects one of several inputs and forwards it to a single output line.",
+        "A demultiplexer takes a single input and routes it to one of several output lines.",
+        "Output ports on a computer's motherboard connect external output devices.",
+    ]
+    for i, text in enumerate(topics, start=1):
+        label = f"S{i}"
+        passages.append(
+            {
+                "label": label,
+                "id": f"p{i}",
+                "title": f"Output topic {i}",
+                "path": f"Computing/Output{i}",
+                "text": text,
+                "start": 0,
+                "end": len(text),
+                "kind": "article",
+            }
+        )
+        bullets.append(f"[{label}]: {text}")
+    stacked_labels = "".join(f"[S{i}]" for i in range(1, 12))
+    answer_text = (
+        "The boiling point of helium is -268.92°C or -452.04°F.\n\n"
+        "Here's the reasoning:\n"
+        + "\n".join(bullets)
+        + "\nThese sources describe how computers produce output. "
+        + stacked_labels
+    )
+    return answer_text, passages
+
+
+def test_helium_dump_fixture_all_citations_unsupported():
+    answer_text, passages = _helium_dump_fixture()
+    citations = resolve_citations(answer_text, passages)
+    assert len(citations) == 11
+    assert all(not c.unresolved for c in citations)  # every label DID resolve
+    assert all(c.supported is False for c in citations)  # but none SUPPORT the claim
+
+
+def test_helium_dump_fixture_detected_as_evidence_dump():
+    answer_text, passages = _helium_dump_fixture()
+    citations = resolve_citations(answer_text, passages)
+    assert detect_evidence_dump(answer_text, citations, passages) is True
+
+
+def test_supported_true_when_sentence_shares_content_terms_with_passage():
+    passages = [_passage("S1")]
+    passages[0]["text"] = "Water boils at 100 degrees Celsius at sea level."
+    text = "Water boils at 100 degrees Celsius at sea level [S1]."
+    citations = resolve_citations(text, passages)
+    assert citations[0].supported is True
+
+
+def test_supported_false_when_sentence_shares_no_content_terms_with_passage():
+    passages = [_passage("S1")]
+    passages[0]["text"] = "Logic gates process binary signals in a multiplexer."
+    text = "The boiling point of helium is -268.92 celsius [S1]."
+    citations = resolve_citations(text, passages)
+    assert citations[0].supported is False
+
+
+def test_unresolved_citation_is_not_supported():
+    citations = resolve_citations("A claim with no evidence [S9].", [])
+    assert citations[0].unresolved is True
+    assert citations[0].supported is False
+
+
+def test_detect_evidence_dump_false_for_a_normal_short_cited_answer():
+    passages = [_passage("S1")]
+    passages[0]["text"] = "Water boils at 100 degrees Celsius at sea level."
+    text = "Water boils at 100 degrees Celsius at sea level [S1]."
+    citations = resolve_citations(text, passages)
+    assert detect_evidence_dump(text, citations, passages) is False
+
+
+def test_system_prompt_stays_within_approx_800_token_budget():
+    """The system prompt occupies a fixed ~800-token slot of the turn
+    budget (docs/plan/offline_tutor_spec_v0.3.md). Uses the same
+    length/3.5 approximation ``tutor.app.compose._make_count_tokens`` falls
+    back to when the real tokenizer is unreachable -- good enough for a
+    build-time regression guard, not meant to be exact."""
+    import math
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "tutor" / "app" / "system_prompt.txt"
+    text = path.read_text(encoding="utf-8")
+    approx_tokens = math.ceil(len(text) / 3.5)
+    assert approx_tokens <= 800, f"system_prompt.txt is ~{approx_tokens} tokens, over budget"
+
+
+def test_detect_evidence_dump_true_for_label_stacking_on_one_sentence():
+    passages = [_passage(f"S{i}", passage_id=f"p{i}") for i in range(1, 5)]
+    for i, p in enumerate(passages, start=1):
+        p["text"] = f"Topic {i} passage text here."
+    text = "This is supported by everything [S1][S2][S3][S4]."
+    citations = resolve_citations(text, passages)
+    assert detect_evidence_dump(text, citations, passages) is True
