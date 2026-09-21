@@ -664,7 +664,7 @@ def test_needs_search_false_skips_search_and_appends_no_search_result():
     rendered = session.log.render()
     tool_messages = [m for m in rendered if m["role"] == "tool"]
     joined = "\n".join(m.get("content") or "" for m in tool_messages)
-    assert "No library search needed for this message" in joined
+    assert "No library search for this message" in joined
     assert "Searched for:" not in joined
 
 
@@ -733,21 +733,22 @@ def test_model_may_skip_search_off_forces_search_even_with_needs_search_false():
     assert result.evidence["level_after"] != "skipped"
 
 
-def test_needs_search_true_with_empty_queries_falls_back_to_not_found():
-    """needs_search left true (or omitted) but no usable queries -- today's
-    existing fallback behaviour, unaffected by app.model_may_skip_search."""
+def test_needs_search_true_with_empty_queries_and_no_question_uses_raw_backfill():
+    """needs_search left true (or omitted), no usable queries, and no
+    usable ``question`` either -- rather than discarding the turn's own
+    raw pre-search result and running a second LLM search, use that raw
+    result directly (see docs/rewrite_on_weak_evidence.md, "Decision
+    path: search, skip or decline", row 3)."""
     session, budget = _mk_session()
     llm = FakeLlmClient(
         [
             _tool_call("research", {"needs_search": True, "queries": []}),
-            _tool_call("research", {"queries": ["still nothing useful"]}),
-            _final("I could not find that in the library."),
+            _final("Here is what I found [S1]."),
         ]
     )
     research = ScriptedResearchEngine(
         [
-            _strong_response(1, title="Molecule"),
-            _strong_response(2, title="Molecule again"),
+            _strong_response(1, title="Largest molecule"),
         ]
     )
     calc = FakeCalc()
@@ -765,11 +766,60 @@ def test_needs_search_true_with_empty_queries_falls_back_to_not_found():
     )
 
     assert result.status == "ok"
-    assert result.evidence["level_after"] != "skipped"
+    assert result.evidence["level_after"] == "strong"
     rendered = session.log.render()
     tool_messages = [m for m in rendered if m["role"] == "tool"]
     joined = "\n".join(m.get("content") or "" for m in tool_messages)
-    assert "No good match was found" in joined
+    assert "Largest molecule" in joined
+    # No second forced-rewrite round was needed -- only the forced round
+    # + the final answer.
+    assert llm.call_count == 2
+
+
+def test_needs_search_true_with_empty_queries_but_usable_question_searches_with_it():
+    """Zero usable ``queries`` but a usable ``question`` -- search using
+    the question as the single query rather than falling back to the raw
+    pre-search result (decision table row 2)."""
+    session, budget = _mk_session()
+    llm = FakeLlmClient(
+        [
+            _tool_call(
+                "research",
+                {
+                    "needs_search": True,
+                    "question": "What is the fastest a human can run?",
+                    "queries": [],
+                },
+            ),
+            _final("Here is what I found [S1]."),
+        ]
+    )
+    research = ScriptedResearchEngine(
+        [
+            _strong_response(1, title="Molecule"),  # raw pre-search (must NOT be used)
+            _strong_response(2, title="Fastest human run"),  # the model's question as a query
+        ]
+    )
+    calc = FakeCalc()
+
+    result = run_turn(
+        session,
+        _UserInput(kind="text", text="What about humans though?"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+        model_writes_search=True,
+        model_may_skip_search=True,
+    )
+
+    assert result.status == "ok"
+    assert result.evidence["level_after"] == "strong"
+    rendered = session.log.render()
+    tool_messages = [m for m in rendered if m["role"] == "tool"]
+    joined = "\n".join(m.get("content") or "" for m in tool_messages)
+    assert "Fastest human run" in joined
 
 
 def test_weak_evidence_second_round_never_fires_after_skip():

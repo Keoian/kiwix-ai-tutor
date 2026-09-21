@@ -285,8 +285,21 @@ _MODEL_MAY_SKIP_SEARCH_NOTE = (
 # no search ran this turn, so the model must answer conversationally from
 # the lesson so far rather than inventing facts.
 _NO_SEARCH_TOOL_TEXT = (
-    "No library search needed for this message. Reply to the student "
-    "conversationally, using the lesson so far. Do not invent facts."
+    "No library search for this message. Reply to the student directly "
+    "and briefly, following your rules. Do not invent facts."
+)
+
+# Appended to a STRONG-evidence tool result when
+# ``app.no_specifics_without_source`` is True (see docs/rewrite_on_weak_
+# evidence.md, "No specifics without a source" and its live-check
+# addendum): the weak/empty tails already carried a no-specifics
+# reminder, but strong evidence had none at all, and Ling 3.0 Tiny was
+# observed inventing a name and a number even with real, strong sources
+# on the page ("...around -125C ... Vitus Andronicus"). One short line,
+# same wording family as ``_NAMES_NUMBERS_SECTION``.
+_STRONG_EVIDENCE_SPECIFICS_LINE = (
+    "Use only names and numbers that appear in the sources above; if "
+    "they are not there, leave them out."
 )
 
 # Appended to the system prompt when ``app.no_specifics_without_source``
@@ -753,8 +766,9 @@ def _forced_research_tool_call(
             needs_search = validation.arguments.get("needs_search", True)
             if not isinstance(needs_search, bool):
                 needs_search = True
-            if queries or needs_search is False:
-                question = validation.arguments.get("question")
+            question = validation.arguments.get("question")
+            has_question = isinstance(question, str) and question.strip()
+            if queries or needs_search is False or has_question:
                 return tool_call.id, queries, tool_call.arguments_json, question, needs_search
 
         # Validation failed (invalid JSON, or a schema violation e.g. a
@@ -772,9 +786,10 @@ def _forced_research_tool_call(
             needs_search = salvaged.get("needs_search", True)
             if not isinstance(needs_search, bool):
                 needs_search = True
-            if queries or needs_search is False:
-                question = salvaged.get("question")
-                question = question if isinstance(question, str) else None
+            question = salvaged.get("question")
+            question = question if isinstance(question, str) else None
+            has_question = bool(question and question.strip())
+            if queries or needs_search is False or has_question:
                 if diagnostics is not None:
                     diagnostics["truncated"] = True
                 return (
@@ -998,10 +1013,17 @@ def _run_forced_rewrite_round(
     if forced is not None and clip_model_queries and not skip_search:
         tool_call_id, raw_queries, _arguments_json, _raw_question = forced[:4]
         cleaned_queries = _clip_model_written_queries(raw_queries)
+        if not cleaned_queries and model_question:
+            # No usable queries, but the model did give a standalone
+            # question -- search with that question as the single query
+            # rather than discarding it (see docs/rewrite_on_weak_
+            # evidence.md, "Decision path: search, skip or decline").
+            cleaned_queries = [model_question]
         if not cleaned_queries:
-            # Nothing usable after validation/clipping -- fall back to
-            # today's not-found behaviour exactly as if the model had
-            # produced no usable call at all.
+            # Nothing usable after validation/clipping and no question
+            # either -- fall back to today's not-found/raw-backfill
+            # behaviour exactly as if the model had produced no usable
+            # call at all.
             forced = None
             model_question = None
         else:
@@ -1079,15 +1101,18 @@ def _run_forced_rewrite_round(
         )
         return "skipped", [], research_calls_delta
 
-    if forced is None and _diagnostics.get("truncated") and backfill_passages is not None:
-        # The forced call's own output was cut off before it finished its
-        # JSON (see ``_salvage_truncated_research_json``'s caller) and
-        # nothing usable could be salvaged -- rather than reporting a dead
-        # end, fall back to the raw pre-search's own result (the student's
-        # own words), exactly as the host would have used before
-        # ``app.model_writes_search`` existed. No extra LLM/search call is
-        # made here -- ``backfill_passages`` were already fetched earlier
-        # this turn.
+    if forced is None and backfill_passages is not None:
+        # Either the forced call's own output was cut off before it
+        # finished its JSON (see ``_salvage_truncated_research_json``'s
+        # caller), or the model returned zero usable queries and no
+        # usable question -- either way, rather than reporting a dead
+        # end, fall back to the raw pre-search's own result (the
+        # student's own words), exactly as the host would have used
+        # before ``app.model_writes_search`` existed (see docs/rewrite_
+        # on_weak_evidence.md, "Decision path: search, skip or decline").
+        # No extra LLM/search call is made here -- ``backfill_passages``
+        # were already fetched earlier this turn.
+        _truncated = bool(_diagnostics.get("truncated"))
         emit(
             {
                 "kind": "status",
@@ -1095,7 +1120,9 @@ def _run_forced_rewrite_round(
                 "detail": (
                     "Working out what to look up took too long. Searching "
                     "with your own words..."
-                ),
+                )
+                if _truncated
+                else "Nothing new to look up. Using your own words...",
             }
         )
         level_after = assessment.level if assessment is not None else "strong"
@@ -1115,10 +1142,15 @@ def _run_forced_rewrite_round(
             )
         if level_after == "strong":
             evidence_text = render_evidence({"passages": merged_passages})
-            tool_text = (
+            intro = (
                 "Working out what to look up took too long, so this used your "
-                f"raw words instead.\n{evidence_text}"
+                "raw words instead."
+                if _truncated
+                else "This used your own words to search."
             )
+            tool_text = f"{intro}\n{evidence_text}"
+            if no_specifics_without_source:
+                tool_text = f"{tool_text}\n\n{_STRONG_EVIDENCE_SPECIFICS_LINE}"
         else:
             tool_text = _not_found_tool_text(
                 searched_for=[],
@@ -1299,6 +1331,8 @@ def _run_forced_rewrite_round(
         else:
             evidence_text = render_evidence({"passages": merged_passages})
         tool_text = f"{searched_for_line}\n{evidence_text}"
+        if no_specifics_without_source:
+            tool_text = f"{tool_text}\n\n{_STRONG_EVIDENCE_SPECIFICS_LINE}"
         if strong_suffix:
             tool_text = f"{tool_text}\n\n{strong_suffix}"
         if restate_question_text is not None and (
