@@ -187,3 +187,50 @@ def test_fetch_entry_missing_path_raises_entry_not_found(fixture_zim: Path) -> N
     archive = Archive(str(fixture_zim))
     with pytest.raises(EntryNotFound):
         fetch_entry(archive, "this_path_does_not_exist")
+
+
+def test_search_fulltext_snippet_top_n_none_is_byte_identical_default(
+    fixture_zim: Path,
+) -> None:
+    """Baseline v9: default (snippet_top_n=None) must be unchanged."""
+    archive = Archive(str(fixture_zim))
+    default_hits = search_fulltext(archive, "the", limit=10)
+    explicit_none_hits = search_fulltext(archive, "the", limit=10, snippet_top_n=None)
+    assert [h.snippet for h in default_hits] == [h.snippet for h in explicit_none_hits]
+    assert [h.path for h in default_hits] == [h.path for h in explicit_none_hits]
+
+
+def test_search_fulltext_snippet_top_n_limits_real_snippets(fixture_zim: Path) -> None:
+    """Baseline v9 candidate B: only the first N kept hits (by rank) get a
+    non-empty snippet; the rest score with ``""`` -- a ranking-changing
+    knob, so it must be explicitly requested."""
+    archive = Archive(str(fixture_zim))
+    hits = search_fulltext(archive, "the", limit=10, snippet_top_n=2)
+    assert len(hits) > 2
+    non_empty = [h for h in hits if h.snippet]
+    # Real prose (unlike titles) usually yields a non-empty snippet for the
+    # top hits; assert the cutoff shape rather than exact article content.
+    assert len(non_empty) <= 2
+    for hit in hits[2:]:
+        assert hit.snippet == ""
+
+
+def test_search_fulltext_text_cache_is_content_identical_when_enabled(
+    fixture_zim: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Baseline v9 candidate A: enabling the text cache must never change
+    any snippet string -- only whether extraction is repeated."""
+    import tutor.retrieval.zim.search as search_mod
+
+    archive = Archive(str(fixture_zim))
+    baseline_hits = search_fulltext(archive, "Pythagorean theorem", limit=10)
+
+    monkeypatch.setattr(search_mod, "_TEXT_CACHE_ENABLED", True)
+    search_mod._default_text_cache.clear()
+    cached_hits = search_fulltext(archive, "Pythagorean theorem", limit=10)
+    # Run again to exercise an actual cache hit for every path.
+    cached_hits_again = search_fulltext(archive, "Pythagorean theorem", limit=10)
+
+    assert [h.snippet for h in baseline_hits] == [h.snippet for h in cached_hits]
+    assert [h.snippet for h in cached_hits] == [h.snippet for h in cached_hits_again]
+    assert [h.path for h in baseline_hits] == [h.path for h in cached_hits]

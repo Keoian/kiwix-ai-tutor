@@ -11,8 +11,10 @@ hit each, keeping the ranking's relative order.
 from __future__ import annotations
 
 import html as _html
+import os
+from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from bs4 import BeautifulSoup
 from libzim.search import Query, Searcher
@@ -22,6 +24,47 @@ from tutor.retrieval.zim.resolve import resolve_entry
 
 _SNIPPET_MAX_CHARS = 200
 _SNIPPET_CONTEXT_CHARS = 80
+
+# Baseline v9 (docs/retrieval_baseline.md): the ~20 ms/hit snippet cost is
+# almost entirely fetch_entry + bs4 text extraction inside _resolve_hits,
+# repeated per hit even when the same article path is fetched for a
+# different query within (or across) requests. Candidate A: cache the
+# extracted plain text (not the final snippet -- the snippet's match
+# position depends on the query) keyed by (archive identity, path), so a
+# repeat path skips fetch+parse and only re-runs the cheap substring scan.
+# Default ON as of Baseline v9: measured byte-identical output (passages
+# and snippet text) on all 42 tuning questions, mean latency 1.32s -> 1.03s
+# (data/perq_v9_default_run2.json vs data/perq_v9_A_run2.json). Set this env
+# var to "0" to force it off (e.g. to reproduce pre-v9 timings exactly).
+_TEXT_CACHE_ENABLED = os.environ.get("TUTOR_RETRIEVAL_SNIPPET_TEXT_CACHE", "1") != "0"
+_TEXT_CACHE_MAXSIZE = 256
+
+
+class _TextCache:
+    """Tiny per-process LRU cache from (archive identity, path) -> plain text."""
+
+    def __init__(self, maxsize: int = _TEXT_CACHE_MAXSIZE) -> None:
+        self.maxsize = maxsize
+        self._data: OrderedDict[tuple[int, str], str] = OrderedDict()
+
+    def get_or_compute(self, archive: Any, path: str, compute: Callable[[], str]) -> str:
+        key = (id(archive), path)
+        cached = self._data.get(key)
+        if cached is not None:
+            self._data.move_to_end(key)
+            return cached
+        value = compute()
+        self._data[key] = value
+        self._data.move_to_end(key)
+        if len(self._data) > self.maxsize:
+            self._data.popitem(last=False)
+        return value
+
+    def clear(self) -> None:
+        self._data.clear()
+
+
+_default_text_cache = _TextCache()
 
 
 class NoFulltextIndex(Exception):
@@ -54,13 +97,16 @@ def _is_blank(query: str) -> bool:
     return not query or not query.strip()
 
 
-def _build_snippet(html: str, query: str) -> str:
-    """Cheap snippet: plain text around the first query-term match.
+def _extract_text(html: str) -> str:
+    """bs4 plain-text extraction -- the expensive, query-independent half
+    of snippet building (Baseline v9)."""
+    return BeautifulSoup(html, "html.parser").get_text(separator=" ", strip=True)
 
-    libzim's Python binding does not expose Xapian snippets, so this is
-    constructed from the fetched entry's own HTML via bs4 text extraction.
-    """
-    text = BeautifulSoup(html, "html.parser").get_text(separator=" ", strip=True)
+
+def _snippet_from_text(text: str, query: str) -> str:
+    """Cheap, query-dependent half: pick the window around the first term
+    match. Split out of ``_build_snippet`` so the extracted text can be
+    cached and reused across queries that hit the same article path."""
     if not text:
         return ""
     terms = [t for t in query.split() if t]
@@ -82,6 +128,15 @@ def _build_snippet(html: str, query: str) -> str:
     return snippet.strip()
 
 
+def _build_snippet(html: str, query: str) -> str:
+    """Cheap snippet: plain text around the first query-term match.
+
+    libzim's Python binding does not expose Xapian snippets, so this is
+    constructed from the fetched entry's own HTML via bs4 text extraction.
+    """
+    return _snippet_from_text(_extract_text(html), query)
+
+
 def _resolve_hits(
     archive: Any,
     raw_paths: list[str],
@@ -90,7 +145,16 @@ def _resolve_hits(
     source: str,
     query: str,
     with_snippet: bool,
+    snippet_top_n: int | None = None,
 ) -> list[SearchHit]:
+    """
+    ``snippet_top_n`` (Baseline v9, candidate B, ranking-changing, OFF unless
+    passed): when set, only the first ``snippet_top_n`` kept hits (by Xapian
+    rank -- i.e. ``raw_paths`` order, the same order this loop already keeps
+    hits in) get a real snippet; hits beyond it get ``""``. Changing this
+    changes ranking, since ``_score_articles`` reads ``.snippet`` of every
+    hit -- callers must opt in explicitly.
+    """
     hits: list[SearchHit] = []
     seen: set[str] = set()
     for raw_path in raw_paths:
@@ -106,11 +170,26 @@ def _resolve_hits(
         seen.add(final_path)
         entry = resolved.entry
         snippet = ""
-        if with_snippet:
+        want_snippet = with_snippet and (
+            snippet_top_n is None or len(hits) < snippet_top_n
+        )
+        if want_snippet:
             try:
-                item = entry.get_item()
-                content = bytes(item.content).decode("utf-8", errors="replace")
-                snippet = _build_snippet(content, query)
+                if _TEXT_CACHE_ENABLED:
+                    text = _default_text_cache.get_or_compute(
+                        archive,
+                        final_path,
+                        lambda entry=entry: _extract_text(
+                            bytes(entry.get_item().content).decode(
+                                "utf-8", errors="replace"
+                            )
+                        ),
+                    )
+                else:
+                    item = entry.get_item()
+                    content = bytes(item.content).decode("utf-8", errors="replace")
+                    text = _extract_text(content)
+                snippet = _snippet_from_text(text, query)
             except Exception:  # noqa: BLE001 - snippet is best-effort
                 snippet = ""
         hits.append(
@@ -125,12 +204,16 @@ def _resolve_hits(
     return hits
 
 
-def search_fulltext(archive: Any, query: str, *, limit: int = 20) -> list[SearchHit]:
+def search_fulltext(
+    archive: Any, query: str, *, limit: int = 20, snippet_top_n: int | None = None
+) -> list[SearchHit]:
     """Full-text (Xapian) search over ``archive``.
 
     Raises :class:`NoFulltextIndex` if the archive has no full-text index.
     Returns ``[]`` for an empty or whitespace-only ``query`` without
-    touching the index at all.
+    touching the index at all. ``snippet_top_n`` is Baseline v9's
+    ranking-changing candidate B -- see :func:`_resolve_hits`; leaving it
+    ``None`` keeps today's byte-identical behavior.
     """
     if _is_blank(query):
         return []
@@ -144,7 +227,13 @@ def search_fulltext(archive: Any, query: str, *, limit: int = 20) -> list[Search
     fetch_count = max(limit * 3, limit + 10)
     raw_paths = list(search.getResults(0, fetch_count))
     return _resolve_hits(
-        archive, raw_paths, limit=limit, source="fulltext", query=query, with_snippet=True
+        archive,
+        raw_paths,
+        limit=limit,
+        source="fulltext",
+        query=query,
+        with_snippet=True,
+        snippet_top_n=snippet_top_n,
     )
 
 

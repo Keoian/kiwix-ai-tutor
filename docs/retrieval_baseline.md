@@ -1260,3 +1260,68 @@ memo-OFF are within run-to-run noise of each other (~2ms), i.e. this
 question set's real duplicate-call rate is too small relative to the
 96%-share snippet cost (unfixed) to move the mean. Deadlines unaffected
 (memo only removes round-trips on cache hits).
+
+## Baseline v9 -- snippet cost experiment
+
+**Where the 20 ms/hit goes (measured, `data/snippet_cost_v8.py` + code
+read of `tutor/retrieval/zim/search.py`)**: not libzim's own search, and
+not a per-hit libzim snippet API (none exists in this binding). Per hit,
+`_resolve_hits(with_snippet=True)` does `entry.get_item()` +
+`bytes(item.content).decode()` + `BeautifulSoup(html, "html.parser").get_text()`
+over the hit's **entire article HTML**, just to keep a 200-char window.
+This is avoidable, query-independent work: the same path can be fetched
+and parsed repeatedly (different `search_fulltext` calls, entity
+sub-searches, even repeat calls across requests) with no cache. Confirmed
+`_score_articles`/`hit_meta` reads `.snippet` of every hit for ranking
+(v8 finding, unchanged) -- a ranking-preserving fix must not touch which
+hits get real text, only avoid recomputing it.
+
+**Candidate A (ranking-preserving, shipped, now default)**: `tutor/retrieval/zim/search.py`
+splits `_build_snippet` into `_extract_text` (bs4, cacheable, query-independent)
+and `_snippet_from_text` (cheap substring scan, query-dependent); a
+per-worker-process LRU (`_TextCache`, keyed by `(id(archive), path)`,
+maxsize 256) caches extracted text so a repeat path skips fetch+parse and
+only re-runs the cheap scan. Toggle: `TUTOR_RETRIEVAL_SNIPPET_TEXT_CACHE`
+(default ON as of this baseline; `"0"` forces it off). TDD:
+`tests/test_zim_search.py` (cache-enabled output byte-identical to
+disabled, snippet_top_n=None byte-identical to default),
+`tests/test_zim_worker.py` (kwarg reaches the child).
+
+**Candidate B (ranking-changing, NOT shipped)**: `search_fulltext(...,
+snippet_top_n=N)` builds a real snippet only for the first N hits by
+Xapian rank per call; later hits score with `snippet=""`. Threaded through
+`tutor/retrieval/zim/worker.py` and `research.py`'s `_fulltext_kwargs`/
+`_search`, gated by env var `TUTOR_RETRIEVAL_SNIPPET_TOP_N` (unset =
+`None` = today's behavior, byte-identical). Entity sub-searches already
+use `limit=1`, so no separate hit-limit knob was needed there.
+
+Measured (`data/perq_v9_variant.py`, tuning split, real archive at
+`C:\kiwix\`, `config/archives.simplewiki_only.toml`, two runs each,
+run2 reported; run1 in `data/perq_v9_<label>_run1.json`):
+
+| variant | mean (s) | p95 (s) | recall@1/3/5 | MRR | top-5 changed vs default |
+|---|---|---|---|---|---|
+| default | 1.323 | 3.109 | 0.595/0.690/0.762 | 0.645 | -- |
+| A (text cache) | 1.029 | 2.688 | 0.595/0.690/0.762 | 0.645 | **0** |
+| B, N=5 | 0.589 | 1.344 | 0.595/0.643/0.714 | 0.637 | 9 |
+| B, N=8 | 0.808 | 1.984 | 0.595/0.643/0.714 | 0.637 | 8 |
+| B, N=12 | 0.965 | 2.516 | 0.595/0.667/0.714 | 0.640 | 5 |
+
+A's per-question passages **and** snippet text are byte-identical to
+default on all 42 tuning questions (`data/summarize_v9.py`:
+`changed_question_passages=0, changed_passage_text=0`) -- decision rule
+met, so **A is now the default** (`_TEXT_CACHE_ENABLED` default flips to
+ON in this commit). Mean latency drops from 1.32s to 1.03s but the
+<=1.0s target is **still not met** (this question set's cross-call
+duplicate-path rate is the limiting factor, same shape as v8's memo
+finding for duplicate op+kwargs).
+
+B trades recall for latency (recall@5 0.762 -> 0.714 at every N tested,
+5 changed top-5 questions even at N=12) and gets closer to the 1.0s bar
+without reaching it either. Per the task's decision rule, **B is not
+made the default** regardless of this curve -- it is a ranking change
+tuned on the small, already-observed 42-question tuning split.
+**Recommendation**: do not ship B as-is; if latency must go lower than
+what A alone gives, prefer combining A with Baseline v7/v8's batching
+work or a genuinely new signal (e.g. a real corpus-side snippet cache
+across requests) over trading recall on this split.

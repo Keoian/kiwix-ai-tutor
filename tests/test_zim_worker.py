@@ -50,6 +50,24 @@ def test_worker_search_fulltext_matches_inprocess_search(fixture_zim: Path) -> N
     assert result.value == expected
 
 
+def test_worker_search_fulltext_snippet_top_n_reaches_child(fixture_zim: Path) -> None:
+    """Baseline v9 candidate B: the ``snippet_top_n`` kwarg must reach the
+    child's ``search_fulltext`` call, not just live in the parent."""
+    from libzim.reader import Archive
+
+    archive = Archive(str(fixture_zim))
+    expected = search_fulltext(archive, "the", limit=10, snippet_top_n=2)
+
+    with ZimWorker(fixture_zim) as worker:
+        result = worker.request(
+            "search_fulltext", deadline_s=10.0, query="the", limit=10, snippet_top_n=2
+        )
+    assert result.status == "ok"
+    assert result.value == expected
+    non_empty = [h for h in result.value if h.snippet]
+    assert len(non_empty) <= 2
+
+
 def test_worker_search_titles_matches_inprocess_search(fixture_zim: Path) -> None:
     from libzim.reader import Archive
 

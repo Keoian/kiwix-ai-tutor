@@ -111,7 +111,10 @@ def _child_main(archive_path_str: str, conn: Connection) -> None:
                 raise RuntimeError(archive_error or "archive not available")
             if sub_op == "search_fulltext":
                 return search_fulltext(
-                    archive, sub_kwargs["query"], limit=sub_kwargs.get("limit", 20)
+                    archive,
+                    sub_kwargs["query"],
+                    limit=sub_kwargs.get("limit", 20),
+                    snippet_top_n=sub_kwargs.get("snippet_top_n"),
                 )
             if sub_op == "search_titles":
                 return search_titles(

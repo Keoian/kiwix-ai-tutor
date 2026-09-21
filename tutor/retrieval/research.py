@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import queue
 import re
 import threading
@@ -61,6 +62,34 @@ RESPONSE_VERSION = 1
 
 _FULLTEXT_LIMIT = 20
 _TITLE_LIMIT = 10
+
+
+def _env_int(name: str) -> int | None:
+    raw = os.environ.get(name)
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+# Baseline v9 (docs/retrieval_baseline.md), candidate B: only build a real
+# snippet for the top-N hits (by Xapian rank) of each search_fulltext call;
+# remaining hits score with an empty snippet. This CHANGES ranking, since
+# ``_score_articles``/``hit_meta`` reads ``.snippet`` of every hit -- OFF
+# (``None``) unless this env var is set, which keeps today's behavior
+# byte-identical by default.
+_SNIPPET_TOP_N = _env_int("TUTOR_RETRIEVAL_SNIPPET_TOP_N")
+
+
+def _fulltext_kwargs(query: str, limit: int) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {"query": query, "limit": limit}
+    if _SNIPPET_TOP_N is not None:
+        kwargs["snippet_top_n"] = _SNIPPET_TOP_N
+    return kwargs
+
+
 _TOP_N_ARTICLES = 6  # spec §7.2 step 4: "Top 6 articles (cap 10)."
 _TOP_N_ARTICLES_CAP = 10
 _DIVERSITY_CAP = 2
@@ -912,8 +941,19 @@ class ResearchEngine:
             return max(_MIN_OP_DEADLINE_S, min(_PER_OP_DEADLINE_CAP_S, remaining()))
 
         def _search(op: str, joined_query: str, limit: int) -> tuple[list[Any], bool]:
+            extra = (
+                {"snippet_top_n": _SNIPPET_TOP_N}
+                if op == "search_fulltext" and _SNIPPET_TOP_N is not None
+                else {}
+            )
             res = _call_worker(
-                worker, op, deadline_s=_op_deadline(), memo=memo, query=joined_query, limit=limit
+                worker,
+                op,
+                deadline_s=_op_deadline(),
+                memo=memo,
+                query=joined_query,
+                limit=limit,
+                **extra,
             )
             if res is None or res.status != "ok":
                 return [], True
@@ -984,7 +1024,7 @@ class ResearchEngine:
         # the conditional per-token/fallback searches below still depend on
         # these results, so they stay separate calls.
         initial_ops = [
-            ("search_fulltext", {"query": search_query, "limit": _FULLTEXT_LIMIT}),
+            ("search_fulltext", _fulltext_kwargs(search_query, _FULLTEXT_LIMIT)),
             ("search_titles", {"query": search_query, "limit": _TITLE_LIMIT}),
         ]
         initial_res = _call_worker_multi(worker, initial_ops, deadline_s=_op_deadline(), memo=memo)
