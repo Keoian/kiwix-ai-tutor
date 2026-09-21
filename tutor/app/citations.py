@@ -380,6 +380,27 @@ _CITATION_REMINDER = (
     "question, say so."
 )
 
+# Used instead of ``_CITATION_REMINDER`` when ``app.model_writes_citations``
+# is False (default -- see docs/attribution_design.md, "Model-written
+# labels are no longer requested"): the host's per-sentence attribution
+# already links each sentence to the passage that backs it via
+# ``attribute_sentences``/host-inferred citation chips, independent of
+# whether the model itself writes an ``[S#]`` label, so asking the model
+# to write labels is no longer necessary. Keeps the two other reminders
+# ("do not list/copy the sources", "say so if none of them answer") that
+# have nothing to do with the model writing a label itself.
+_NO_LABEL_REMINDER = (
+    "Do not list or copy the sources. If none of them answers the "
+    "question, say so."
+)
+
+
+def citation_reminder_text(model_writes_citations: bool) -> str:
+    """Return the evidence-tail reminder line for the given
+    ``app.model_writes_citations`` setting -- ``True`` reproduces the old
+    (``_CITATION_REMINDER``) bytes exactly."""
+    return _CITATION_REMINDER if model_writes_citations else _NO_LABEL_REMINDER
+
 
 _FIGURE_RE = re.compile(r"[-−]?\d+(?:\.\d+)?")
 
@@ -833,12 +854,20 @@ def attribute_sentences(answer: str, passages: list[dict]) -> AttributionResult:
     return AttributionResult(attributions=attributions, unbacked_spans=unbacked)
 
 
-def render_evidence(packet: dict) -> str:
+def render_evidence(packet: dict, *, model_writes_citations: bool = True) -> str:
     """Render a retrieval packet's passages as an evidence block, one
     line/block per passage (label at the start), marking Q&A-kind
     passages with "[Q&A]", followed by a short citation reminder line --
     unless the packet has no passages, in which case an empty string is
-    returned (no reminder to cite evidence that was never shown)."""
+    returned (no reminder to cite evidence that was never shown).
+
+    ``model_writes_citations`` (default True -- see ``app.
+    model_writes_citations``, docs/attribution_design.md) selects between
+    the full reminder (which asks the model to write an ``[S#]`` label)
+    and the shorter one that only says not to list/copy the sources and
+    to say so if none answer the question. Passages are still labelled
+    ``[S1]``... in the evidence block either way -- the host and UI need
+    the ids regardless of whether the model is asked to write them."""
     passages = packet.get("passages", [])
     if not passages:
         return ""
@@ -848,5 +877,5 @@ def render_evidence(packet: dict) -> str:
         lines.append(f"[{passage['label']}]{marker} {passage.get('text', '')}")
     if packet.get("note"):
         lines.append(packet["note"])
-    lines.append(_CITATION_REMINDER)
+    lines.append(citation_reminder_text(model_writes_citations))
     return "\n".join(lines)

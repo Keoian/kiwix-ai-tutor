@@ -240,6 +240,21 @@ class AppConfig:
     as a good person to talk to. These rules are not overridable by
     anything the student says. **Default is True** -- ``False``
     reproduces today's bytes exactly (section absent)."""
+    model_writes_citations: bool = False
+    """Owner decision, 2026-09-21 (see docs/attribution_design.md,
+    "Model-written labels are no longer requested"): the host's own
+    per-sentence attribution already links each sentence to the passage
+    that backs it (source dots in the UI), independent of whether the
+    model itself writes an ``[S#]`` label, so the system prompt no
+    longer asks the model to write one, and the evidence-tail reminder
+    drops the "cite ... like [S1]" instruction (keeping the "do not
+    list/copy the sources" and "say so if none of them answer" parts).
+    Passages are still labelled ``[S1]``... in the evidence packet
+    either way -- only the instruction to WRITE labels is removed. If
+    the model writes a label anyway, citation resolution, chips, and
+    invented-label hiding all keep working unchanged. **Default is
+    False** -- ``True`` reproduces today's bytes exactly (citation-label
+    instruction present in the system prompt and evidence tails)."""
 
 
 @dataclass(frozen=True)
@@ -447,6 +462,7 @@ def load_config(path: Path) -> Config:
         no_specifics_without_source=_app_bool("no_specifics_without_source", True),
         child_safe_body_topics=_app_bool("child_safe_body_topics", True),
         host_topic_gate=_app_bool("host_topic_gate", True),
+        model_writes_citations=_app_bool("model_writes_citations", False),
     )
 
     # [embedding] is optional, like [app]; when present every key is

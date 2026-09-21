@@ -102,3 +102,33 @@ term overlap with an already-cited passage in the same answer (this module), but
 this inference is UI-visible (`model_cited=False`) and never fabricates or rewrites
 a `[S#]` label in the stored answer text, per §11's "host never fabricates a
 citation" rule already upheld by `agent_loop.TurnResult.uncited`.
+
+## Model-written labels are no longer requested (owner decision, 2026-09-21)
+
+Owner: "I don't think we need the [S1] stuff" -- the host's own per-sentence
+attribution (`attribute_sentences`, amendment 6 above) already links each sentence to
+the passage that backs it, via host-inferred citation independent of whether the model
+itself writes an `[S#]` label. Asking the model to write labels is therefore no longer
+necessary, so `app.model_writes_citations` (default **False**) removes the instruction
+to write one:
+
+- The system prompt's "Sourcing and citations" bullet asking the model to write the
+  numbered label (`e.g. [S1] or [S1, S2]`) is omitted by default; it is still available
+  (`app.model_writes_citations = true`, byte-identical to before) via
+  `tutor.app.agent_loop.build_system_text`.
+- The evidence-tail reminder (`tutor.app.citations.citation_reminder_text`) drops only
+  the "cite ... like [S1]" clause by default, keeping "do not list or copy the
+  sources" and "if none of them answers the question, say so".
+- Passages in the evidence packet are still labelled `[S1]`... either way -- the host
+  and UI (source viewer, chips) need the ids regardless of whether the model is asked
+  to write them.
+- If the model writes an `[S#]` label anyway (nothing stops it), citation resolution,
+  chips, and invented-label hiding all keep working unchanged -- none of that code was
+  removed, only the instruction to write one in the first place.
+- `eval/run_turn_eval.py`, `eval/run_lesson_soak.py`, and
+  `eval/attribution_scoring.py` still score presence of a model `[S#]` label
+  (`cited_rate`/`uncited_rate`); with the setting off by default that metric measures
+  something the model is no longer being asked to do, so it is expected to trend
+  toward the host-inferred-only case. Left as-is (not rewired to score host-inferred
+  attribution instead) -- noted here as a known limitation of those scripts' current
+  metric under the new default, not fixed in this change.

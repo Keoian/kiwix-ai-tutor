@@ -36,7 +36,11 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from tutor.app.citations import _CITATION_REMINDER, extract_labels, render_evidence
+from tutor.app.citations import (
+    citation_reminder_text,
+    extract_labels,
+    render_evidence,
+)
 from tutor.app.llm_client import StreamEvent
 from tutor.app.prompt import PromptOverflow, render_evidence_with_reuse
 from tutor.app.repetition_guard import find_repetition_loop
@@ -90,18 +94,39 @@ def _load_default_system_text() -> str:
     return _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
 
 
+# Spliced back into the "Sourcing and citations" section when
+# ``app.model_writes_citations`` is True (see docs/attribution_design.md,
+# "Model-written labels are no longer requested"). Kept as code, not
+# deleted from ``system_prompt.txt``, so the True path reproduces the
+# old file's bytes exactly: the host's per-sentence source dots already
+# link each sentence to the passage that backs it independently of
+# whether the model writes a label, so asking it to is no longer the
+# default -- but a caller that still wants the model to write ``[S#]``
+# labels itself can turn this back on.
+_CITE_LABEL_SECTION = (
+    "- Cite only a source that actually supports the sentence, with the\n"
+    "  numbered label given to you, e.g. [S1] or [S1, S2]. Never invent a\n"
+    "  label that was not given to you.\n"
+)
+
+_SOURCING_HEADER = "Sourcing and citations\n"
+
+
 def build_system_text(
     *,
     system_text_override: str | None = None,
     no_specifics_without_source: bool = True,
     child_safe_body_topics: bool = True,
+    model_writes_citations: bool = False,
 ) -> str:
     """Assemble the system prompt exactly as ``run_turn`` builds it for a
-    new lesson: the base ``system_prompt.txt`` (or an override), followed
-    by the ``no_specifics_without_source`` and ``child_safe_body_topics``
-    sections when those default-on settings are enabled. Does not include
-    the per-session ``profile_summary`` suffix, which is not a
-    default-on section -- ``run_turn`` appends that separately.
+    new lesson: the base ``system_prompt.txt`` (or an override), with the
+    ``model_writes_citations`` citation-label bullet spliced back in when
+    that setting is True, followed by the ``no_specifics_without_source``
+    and ``child_safe_body_topics`` sections when those default-on
+    settings are enabled. Does not include the per-session
+    ``profile_summary`` suffix, which is not a default-on section --
+    ``run_turn`` appends that separately.
 
     Factored out so a test can measure the fully assembled system prompt
     (the actual token cost of a new lesson) rather than just the base
@@ -111,6 +136,10 @@ def build_system_text(
         if system_text_override is not None
         else _load_default_system_text()
     )
+    if model_writes_citations and _SOURCING_HEADER in system_text:
+        system_text = system_text.replace(
+            _SOURCING_HEADER, _SOURCING_HEADER + _CITE_LABEL_SECTION, 1
+        )
     if no_specifics_without_source:
         system_text = f"{system_text}\n\n{_NAMES_NUMBERS_SECTION}"
     if child_safe_body_topics:
@@ -212,7 +241,9 @@ def _packet_from_response(response) -> dict:
     return {"passages": [_passage_to_dict(p) for p in (passages or [])]}
 
 
-def _to_wire_messages(rendered: list[dict]) -> list[dict]:
+def _to_wire_messages(
+    rendered: list[dict], *, model_writes_citations: bool = False
+) -> list[dict]:
     """Translate ``PromptLog.render()``'s internal message shapes into the
     OpenAI-compatible wire shapes llama-server's ``/v1/chat/completions``
     accepts: evidence's ``{"role": "tool", "passages": [...]}`` becomes a
@@ -223,7 +254,12 @@ def _to_wire_messages(rendered: list[dict]) -> list[dict]:
     for message in rendered:
         if message.get("passages") is not None:
             wire.append(
-                {"role": message["role"], "content": render_evidence(message)}
+                {
+                    "role": message["role"],
+                    "content": render_evidence(
+                        message, model_writes_citations=model_writes_citations
+                    ),
+                }
             )
         elif message.get("role") == "assistant" and "cited_labels" in message:
             wire.append({"role": "assistant", "content": message.get("content")})
@@ -994,6 +1030,7 @@ def _run_forced_rewrite_round(
     timing: dict | None = None,
     allow_skip: bool = False,
     no_specifics_without_source: bool = True,
+    model_writes_citations: bool = False,
 ):
     """Run one forced ``research`` tool-call round (see
     ``_forced_research_tool_call``), append the resulting assistant
@@ -1025,7 +1062,11 @@ def _run_forced_rewrite_round(
             ),
         }
     )
-    wire_messages = _to_wire_messages(log.render()) if use_log else messages
+    wire_messages = (
+        _to_wire_messages(log.render(), model_writes_citations=model_writes_citations)
+        if use_log
+        else messages
+    )
     _t0 = time.monotonic()
     _diagnostics: dict = {}
     forced = _forced_research_tool_call(llm, wire_messages, cancel=cancel, diagnostics=_diagnostics)
@@ -1170,7 +1211,9 @@ def _run_forced_rewrite_round(
                 {"role": "assistant", "content": None, "tool_calls": [tool_call_message]}
             )
         if level_after == "strong":
-            evidence_text = render_evidence({"passages": merged_passages})
+            evidence_text = render_evidence(
+                {"passages": merged_passages}, model_writes_citations=model_writes_citations
+            )
             intro = (
                 "Working out what to look up took too long, so this used your "
                 "raw words instead."
@@ -1354,11 +1397,13 @@ def _run_forced_rewrite_round(
                 merged_passages,
                 log.held_ids(),
                 True,
-                citation_reminder=_CITATION_REMINDER,
+                citation_reminder=citation_reminder_text(model_writes_citations),
             )
             log.mark_held(newly_seen_ids)
         else:
-            evidence_text = render_evidence({"passages": merged_passages})
+            evidence_text = render_evidence(
+                {"passages": merged_passages}, model_writes_citations=model_writes_citations
+            )
         tool_text = f"{searched_for_line}\n{evidence_text}"
         if no_specifics_without_source:
             tool_text = f"{tool_text}\n\n{_STRONG_EVIDENCE_SPECIFICS_LINE}"
@@ -1415,6 +1460,7 @@ def run_turn(
     no_specifics_without_source: bool = True,
     child_safe_body_topics: bool = True,
     host_topic_gate: bool = True,
+    model_writes_citations: bool = False,
 ) -> TurnResult:
     research_calls = 0
     timings = {
@@ -1437,6 +1483,7 @@ def run_turn(
         system_text_override=system_text_override,
         no_specifics_without_source=no_specifics_without_source,
         child_safe_body_topics=child_safe_body_topics,
+        model_writes_citations=model_writes_citations,
     )
     profile_summary = getattr(session, "profile_summary", None)
     if profile_summary:
@@ -1635,6 +1682,7 @@ def run_turn(
                 timing=timings,
                 allow_skip=do_model_writes_search and model_may_skip_search,
                 no_specifics_without_source=no_specifics_without_source,
+                model_writes_citations=model_writes_citations,
             )
             research_calls += delta
             # _run_forced_rewrite_round always leaves the log in a valid,
@@ -1668,7 +1716,9 @@ def run_turn(
                     reuse_prior_passages=reuse_prior_passages,
                 )
             else:
-                evidence_text = render_evidence(packet)
+                evidence_text = render_evidence(
+                    packet, model_writes_citations=model_writes_citations
+                )
                 messages.append(
                     {"role": "tool", "content": f"[research results]\n{evidence_text}"}
                 )
@@ -1696,6 +1746,7 @@ def run_turn(
                 second_round=True,
                 timing=second_round_timing,
                 no_specifics_without_source=no_specifics_without_source,
+                model_writes_citations=model_writes_citations,
             )
             timings["second_round"] = time.monotonic() - _t_second0
             research_calls += delta
@@ -1749,7 +1800,9 @@ def run_turn(
                         "dropped_uncited_tokens": eviction_event.dropped_uncited_tokens,
                     }
                 )
-            messages = _to_wire_messages(log.render())
+            messages = _to_wire_messages(
+                log.render(), model_writes_citations=model_writes_citations
+            )
 
         answer_text_parts: list[str] = []
         tool_calls: list = []
@@ -1946,7 +1999,9 @@ def run_turn(
                                 reuse_prior_passages=reuse_prior_passages,
                             )
                         else:
-                            evidence_text = render_evidence(packet)
+                            evidence_text = render_evidence(
+                    packet, model_writes_citations=model_writes_citations
+                )
                             messages.append(
                                 {
                                     "role": "tool",

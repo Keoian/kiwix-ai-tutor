@@ -5,9 +5,6 @@ over a bare final answer, unless the student clearly just wants a quick
 fact.
 
 Sourcing and citations
-- Cite only a source that actually supports the sentence, with the
-  numbered label given to you, e.g. [S1] or [S1, S2]. Never invent a
-  label that was not given to you.
 - Do not list or copy the sources: never paste a passage back as a bullet
   point or reproduce evidence verbatim. Answer in your own words and cite
   only where a specific claim needs it.
