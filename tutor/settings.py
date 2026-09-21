@@ -173,6 +173,19 @@ class AppConfig:
     still selectable (``True``) for further experimentation, but
     **default is False**: reproduces the plain, pre-existing
     ``_FOLLOWUP_DIRECTNESS_NOTE`` wording byte-for-byte."""
+    model_writes_search: bool = False
+    """Force a model-written ``research`` tool call BEFORE answering on
+    EVERY turn, including turn 1, rather than only on weak evidence
+    (``rewrite_on_weak_evidence``) or turn >= 2 (``rewrite_on_followup``,
+    which this replaces for that turn rather than adding to). Owner
+    decision (see docs/rewrite_on_weak_evidence.md, "Model writes every
+    search"): the deterministic pre-search word-matches the student's RAW
+    text, which on turn 1 already produces wrong-topic hits no rewrite
+    ever gets a chance to fix (e.g. "What's the largest molecule?" ->
+    "Molecule Man"; "What's the biggest animal?" -> "The Biggest Loser").
+    The model is told to write short, article-title-like queries, not
+    full sentences. **Default is False** -- not yet measured against a
+    live model; the measuring agent decides whether to flip it."""
 
 
 @dataclass(frozen=True)
@@ -375,6 +388,7 @@ def load_config(path: Path) -> Config:
         concise_followup_note=_app_bool("concise_followup_note", False),
         restate_question_last=_app_bool("restate_question_last", True),
         restate_question_instruction=_app_bool("restate_question_instruction", False),
+        model_writes_search=_app_bool("model_writes_search", False),
     )
 
     # [embedding] is optional, like [app]; when present every key is

@@ -306,6 +306,7 @@ def _make_turn_runner(
     concise_followup_note: bool = False,
     restate_question_last: bool = True,
     restate_question_instruction: bool = False,
+    model_writes_search: bool = False,
 ):
     from tutor.app.agent_loop import run_turn
 
@@ -374,6 +375,7 @@ def _make_turn_runner(
                 concise_followup_note=concise_followup_note,
                 restate_question_last=restate_question_last,
                 restate_question_instruction=restate_question_instruction,
+                model_writes_search=model_writes_search,
             )
         except Exception:  # noqa: BLE001 - never leak a traceback to the student
             emit("error", {"message": _STUDENT_SAFE_ERROR})
@@ -696,6 +698,7 @@ def build_deps(cfg: Any, *, llm: Any = None, research_engine: Any = None) -> App
         concise_followup_note=getattr(cfg.app, "concise_followup_note", False),
         restate_question_last=getattr(cfg.app, "restate_question_last", True),
         restate_question_instruction=getattr(cfg.app, "restate_question_instruction", False),
+        model_writes_search=getattr(cfg.app, "model_writes_search", False),
     )
     status_provider = _make_status_provider(
         llm=llm,

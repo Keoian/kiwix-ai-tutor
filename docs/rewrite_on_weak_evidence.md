@@ -390,3 +390,98 @@ second round specifically when it was already reached via the forced
 follow-up round (i.e., treat the forced round's own weak result as
 terminal rather than triggering a further escalation), since the forced
 round was itself already the escalation.
+
+## Model writes every search
+
+**Setting**: `app.model_writes_search` (default `False` -- not yet
+measured against a live model; a separate agent measures and decides).
+
+**What**: when on, the host forces a model-written `research` tool-call
+round (reusing `_run_forced_rewrite_round`) BEFORE answering on EVERY
+turn, including turn 1 -- not just on weak evidence
+(`rewrite_on_weak_evidence`) or on turn >= 2 (`rewrite_on_followup`). On
+turn >= 2 this REPLACES the follow-up round for that turn rather than
+running both (never two forced rounds back to back for the same turn).
+The raw deterministic pre-search still always runs first and its
+passages are kept only as backfill behind the model's own queries'
+results, merged exactly as the follow-up path already does
+(`_merge_dedupe_passages` to rank the model's own queries against each
+other, `_lead_with_backfill` to let the raw pre-search only fill unused
+slots, then `_relabel_sequential` for collision-free `[S#]` labels).
+
+The host note used only in this mode (`_MODEL_WRITES_SEARCH_HOST_NOTE`,
+`tutor/app/agent_loop.py`) tells the model to write 1-3 SHORT queries
+that look like encyclopedia article titles or key terms, not full
+sentences or questions; to resolve "it"/"that"/"they" from the lesson so
+far; to fix spelling; to leave out describing words ("biggest",
+"longest", "fastest", "how long") unless part of a real title; and, if
+it already knows the likely answer, to make that one of the queries. The
+existing `_FOLLOWUP_HOST_NOTE` and `_REWRITE_HOST_NOTE` are unchanged
+(byte-identical) and still used exactly as before when this setting is
+off.
+
+Multiple queries are passed the same way the existing follow-up/weak-
+evidence rewrite already does: the `research` tool's `queries` array
+(1-3 short strings, `tutor/tools/schemas.py`, `query` still accepted for
+back-compat), searched via `research_engine.research_many` when
+available (falls back to one `research()` call per query otherwise).
+That plumbing was not new to this feature -- it already existed for
+`rewrite_on_followup`/`rewrite_on_weak_evidence`; the only wiring built
+here is making it fire unconditionally, including turn 1, under its own
+setting.
+
+**Host-side validation/clipping** of the model's own queries
+(`_clip_model_written_queries`, `tutor/app/agent_loop.py`), applied only
+in this mode: at most 3 queries (the tool schema itself already rejects
+a 4-item call before this even runs); each stripped of surrounding
+quotes and a trailing `?`; each clipped to 8 words. If nothing usable
+survives cleaning, the turn falls back to today's not-found behaviour
+for that round (as if the model had produced no usable tool call at
+all) -- it does not search on empty/garbage queries, and the existing
+`rewrite_on_weak_evidence` mechanism still gets its own, separate, one
+further round afterward if that not-found result is weak/empty (this
+setting does not change that cap; see `run_turn`'s `do_rewrite` branch).
+
+On turn 1, the restated-question line (`restate_question_last`) and the
+follow-up directness/concise note are both skipped: there is no prior
+turn's own answer for the model to be anchored on or need re-pointed
+away from, so `strong_suffix=""` and `restate_question_text=None` when
+`model_writes_search` is on and this is the lesson's first turn. From
+turn 2 onward, both behave exactly as they already do for
+`rewrite_on_followup`, using the model's OWN queries from this round.
+
+**Why** (root cause, measured 2026-09-21, owner-observed failures against
+the live app on `:8420`, not from a controlled A/B): the deterministic
+pre-search word-matches the student's RAW text. This produces wrong-
+topic hits that no later rewrite ever gets a chance to fix, because
+turn 1 has no follow-up round today:
+
+- "What's the largest molecule?" -> `Molecule`, `Water`, `Molecule Man`
+  (a comic-book character) -- never `Titin` (the actual largest known
+  protein/molecule commonly covered).
+- "Is DNA the longest molecule?" -> cited the movie *The Longest Ride*.
+- "What's the biggest animal?" -> `The Biggest Loser` (a TV show).
+- "How long is DNA?" -> `Long Island`.
+
+On turn >= 2 the model already writes the query today
+(`rewrite_on_followup`), but two gaps remain that this setting closes:
+(a) turn 1 still only ever used the raw pre-search text, and (b) even on
+turn >= 2 the model was only ever asked to write a full-sentence
+STANDALONE QUESTION (e.g. "What is the length of DNA in a human cell?"),
+which the deterministic word-matcher then matches on generic words like
+"length"/"cell" -> `Length`, `Stem cell` -- the new host note instead
+asks for short, title-like queries specifically to avoid feeding the
+word-matcher another sentence to mis-match on.
+
+**What is NOT yet measured**: this build is TDD-only against fake-LLM
+doubles (per the owner's instruction, no live LLM runs from this task).
+Nothing here has been measured against the real model/library for:
+whether the model reliably produces good title-like queries instead of
+sentences when asked; whether firing a forced round on every single turn
+(not just weak evidence/follow-ups) meaningfully slows down turn 1 and
+every subsequent turn (see the "Measured overhead" section above for the
+per-round cost profile of the existing follow-up mechanism, which this
+adds unconditionally to turn 1 as well); whether real answer quality on
+the failure cases above (titin/DNA/blue whale) actually improves; and
+whether the turn-1-skips-restatement design choice made here is the
+right one. The setting defaults to `False` pending that measurement.

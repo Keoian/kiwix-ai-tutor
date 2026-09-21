@@ -218,6 +218,29 @@ _FOLLOWUP_HOST_NOTE = (
     "it is a yes/no question), then explain.]"
 )
 
+# Host note for ``app.model_writes_search`` (default False; see
+# docs/rewrite_on_weak_evidence.md, "Model writes every search"): fires on
+# EVERY turn, including turn 1, replacing both the weak-evidence rewrite
+# and the follow-up rewrite for that turn. Root cause this targets: the
+# deterministic pre-search word-matches the student's RAW text, so
+# "What's the largest molecule?" retrieves "Molecule Man" (a comic
+# character) and "What's the biggest animal?" retrieves "The Biggest
+# Loser" (a TV show) -- describing words and full sentences are exactly
+# what trip up the word-matcher. Tells the model to write short,
+# title-like queries instead of sentences/questions.
+_MODEL_WRITES_SEARCH_HOST_NOTE = (
+    " [Host note: call research with 1-3 short library search queries for "
+    "this question. Write them like encyclopedia article titles or key "
+    "terms, NOT full sentences or questions. Resolve any pronoun/reference "
+    "(\"it\", \"that\", \"they\", ...) using the lesson so far, and fix "
+    "spelling. Leave out describing words like \"biggest\", \"longest\", "
+    "\"fastest\", or \"how long\" unless they are part of a real title. If "
+    "you already know the likely answer, make that one of the queries. "
+    "For example: student asks \"What's the biggest animal?\" -> queries "
+    "\"Blue whale\", \"Largest animals\"; student asks \"How long is "
+    "DNA?\" -> queries \"DNA\", \"Chromosome\", \"Base pair\".]"
+)
+
 # Small cap on the forced rewrite call's own output -- it only needs to
 # emit one tool call, never prose.
 _FORCED_REWRITE_MAX_TOKENS = 96
@@ -434,6 +457,33 @@ def _not_found_tool_text(*, searched_for: list[str], level_after: str) -> str:
     )
 
 
+_MODEL_QUERY_MAX_WORDS = 8
+
+
+def _clip_model_written_queries(queries: list[str]) -> list[str]:
+    """Validate/clip queries the MODEL wrote (``app.model_writes_search``):
+    at most 3 queries, each stripped of surrounding quotes and a trailing
+    "?", clipped to ``_MODEL_QUERY_MAX_WORDS`` words. Anything that becomes
+    empty after cleaning is dropped. Callers fall back to today's
+    behaviour when this returns an empty list."""
+    cleaned: list[str] = []
+    for raw in (queries or [])[:3]:
+        if not isinstance(raw, str):
+            continue
+        q = raw.strip()
+        q = q.strip("\"'").strip()
+        if q.endswith("?"):
+            q = q[:-1].strip()
+        if not q:
+            continue
+        words = q.split()
+        if len(words) > _MODEL_QUERY_MAX_WORDS:
+            q = " ".join(words[:_MODEL_QUERY_MAX_WORDS])
+        if q:
+            cleaned.append(q)
+    return cleaned
+
+
 def _forced_research_tool_call(llm, messages: list[dict], *, cancel):
     """Force the model to answer this turn's next completion with exactly
     one ``research`` tool call, primarily via the OpenAI-compatible
@@ -612,6 +662,7 @@ def _run_forced_rewrite_round(
     reuse_prior_passages: bool = True,
     restate_question_text: str | None = None,
     restate_question_instruction: bool = False,
+    clip_model_queries: bool = False,
 ):
     """Run one forced ``research`` tool-call round (see
     ``_forced_research_tool_call``), append the resulting assistant
@@ -629,6 +680,16 @@ def _run_forced_rewrite_round(
     research_calls_delta = 0
     wire_messages = _to_wire_messages(log.render()) if use_log else messages
     forced = _forced_research_tool_call(llm, wire_messages, cancel=cancel)
+    if forced is not None and clip_model_queries:
+        tool_call_id, raw_queries, _arguments_json = forced
+        cleaned_queries = _clip_model_written_queries(raw_queries)
+        if not cleaned_queries:
+            # Nothing usable after validation/clipping -- fall back to
+            # today's not-found behaviour exactly as if the model had
+            # produced no usable call at all.
+            forced = None
+        else:
+            forced = (tool_call_id, cleaned_queries, json.dumps({"queries": cleaned_queries}))
 
     if forced is None:
         merged_response = _MergedResult([])
@@ -811,6 +872,7 @@ def run_turn(
     concise_followup_note: bool = False,
     restate_question_last: bool = True,
     restate_question_instruction: bool = False,
+    model_writes_search: bool = False,
 ) -> TurnResult:
     research_calls = 0
     calc_calls = 0
@@ -866,9 +928,16 @@ def run_turn(
         # reference, so this is NOT gated by any word-list/pronoun
         # detector. The raw pre-search still always runs (above) and its
         # passages are kept as backfill only.
-        do_followup = rewrite_on_followup and has_prior_turns
+        # ``model_writes_search`` (docs/rewrite_on_weak_evidence.md, "Model
+        # writes every search") fires unconditionally on EVERY turn,
+        # including turn 1, and replaces the follow-up rewrite on turn
+        # >= 2 rather than running both.
+        do_model_writes_search = model_writes_search
+        do_followup = rewrite_on_followup and has_prior_turns and not do_model_writes_search
 
-        if do_followup:
+        if do_model_writes_search:
+            user_text = user_input.text + _MODEL_WRITES_SEARCH_HOST_NOTE
+        elif do_followup:
             user_text = user_input.text + _FOLLOWUP_HOST_NOTE
         elif rewrite_on_weak_evidence and level_before in ("weak", "empty"):
             user_text = user_input.text + _REWRITE_HOST_NOTE
@@ -883,12 +952,15 @@ def run_turn(
         rewritten_queries: list[str] = []
         followup_ran = False
 
-        if do_followup:
+        if do_model_writes_search or do_followup:
             # The raw pre-search's evidence is never appended directly on
-            # a follow-up turn -- it ran on the question's literal text,
-            # which for a follow-up can be about the wrong topic entirely
-            # (e.g. "Is it a molecule?" -> "Molecule"). It is only ever
-            # used as backfill inside the forced round's own merge.
+            # a turn where the model writes its own search -- either it
+            # ran on the question's literal text (turn 1) or on a
+            # follow-up's literal, possibly wrong-topic text. It is only
+            # ever used as backfill inside the forced round's own merge.
+            # On turn 1 there is no prior turn to restate a question
+            # against, so the restatement line only ever applies when
+            # there ARE prior turns (matches the follow-up path).
             followup_level, followup_queries, delta = _run_forced_rewrite_round(
                 llm=llm,
                 log=log,
@@ -903,15 +975,22 @@ def run_turn(
                 emit=emit,
                 backfill_passages=packet["passages"],
                 strong_suffix=(
-                    _FOLLOWUP_CONCISE_NOTE
-                    if concise_followup_note
-                    else _FOLLOWUP_DIRECTNESS_NOTE
+                    ""
+                    if do_model_writes_search and not has_prior_turns
+                    else (
+                        _FOLLOWUP_CONCISE_NOTE
+                        if concise_followup_note
+                        else _FOLLOWUP_DIRECTNESS_NOTE
+                    )
                 ),
                 reuse_prior_passages=reuse_prior_passages,
                 restate_question_text=(
-                    user_input.text if restate_question_last else None
+                    user_input.text
+                    if restate_question_last and has_prior_turns
+                    else None
                 ),
                 restate_question_instruction=restate_question_instruction,
+                clip_model_queries=do_model_writes_search,
             )
             research_calls += delta
             # _run_forced_rewrite_round always leaves the log in a valid,
