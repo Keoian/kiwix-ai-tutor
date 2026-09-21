@@ -102,6 +102,50 @@ def test_falls_back_to_delete_journal_when_wal_pragma_fails(
         assert store.get("p1").text == "abc"
 
 
+def test_retries_through_a_transient_disk_io_error(tmp_path: Path, monkeypatch):
+    """A single transient "disk I/O error" (observed on ubuntu-latest CI,
+    consistent with a runner disk burst-credit throttle rather than a real
+    fault) must not fail store construction -- it should retry and succeed.
+    """
+    import sqlite3
+
+    calls = {"n": 0}
+    real_execute = sqlite3.Connection.execute
+
+    class _FlakyOnceConnection(sqlite3.Connection):
+        def execute(self, sql, *args, **kwargs):
+            if sql.strip().upper().startswith("CREATE TABLE"):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise sqlite3.OperationalError("disk I/O error")
+            return real_execute(self, sql, *args, **kwargs)
+
+    real_connect = sqlite3.connect
+
+    def _connect(*args, **kwargs):
+        kwargs["factory"] = _FlakyOnceConnection
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", _connect)
+    monkeypatch.setattr("tutor.retrieval.snapshots.time.sleep", lambda _seconds: None)
+
+    db_path = tmp_path / "snapshots.sqlite3"
+    with SnapshotStore(db_path) as store:
+        assert calls["n"] == 2
+        passage = _FakePassage(
+            passage_id="p1",
+            archive_id="a1",
+            path="A/x",
+            title="T",
+            heading_path=("H",),
+            start=0,
+            end=3,
+            text="abc",
+        )
+        store.put(passage, fingerprint_digest=FINGERPRINT)
+        assert store.get("p1").text == "abc"
+
+
 def test_put_then_get_round_trips(tmp_path: Path):
     db_path = tmp_path / "snapshots.sqlite3"
     passage = _make_passage()
