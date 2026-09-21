@@ -204,11 +204,19 @@ improving by ≥ 0.15 without raising `evidence_dump_rate`.
 resolvable to a real evidence passage. An implementation may seed a new lesson's prompt
 history with a fixed synthetic example exchange using `[S0]`, to demonstrate correct
 per-sentence citation placement; it is part of the append-only prefix, never re-rendered
-or altered within a lesson. Adopted 2026-09-20 as the default (`current`, unseeded,
-stays selectable): pooled n=54 measurement met the adoption gate --
-cited-and-supported 0.09 -> 0.35 (+0.259), evidence_dump_rate tied at 0.04, paired
-19 wins / 5 losses / 30 ties (docs/citation_experiment.md, "Seed exchange A/B")."
+or altered within a lesson. Available, off by default; adopted then reverted the same
+day -- see citation_experiment.md. Adopted 2026-09-20 on the single-turn A/B (pooled
+n=54: cited-and-supported 0.09 -> 0.35 (+0.259), evidence_dump_rate tied at 0.04,
+paired 19 wins / 5 losses / 30 ties), then reverted the same day when paired 6-minute
+in-lesson soaks contradicted it (current: 34 turns, median answer 332 chars, cited_rate
+1.000; seed: 32 turns, median answer 512 chars, cited_rate 0.000 -- 0 labels in the
+whole lesson). `current` (unseeded) is the default again; `seed_exchange_s0` stays
+selectable and tested."
 
-**Why adopted:** measured against the 18-question tuning set (3 runs, pooled n=54) and
-met the task brief's gate (>= 0.15 `supported_citation_rate` improvement, no
-`evidence_dump_rate` increase); see docs/citation_experiment.md for the full numbers.
+**Why adopted, then reverted:** the single-turn A/B on the 18-question tuning set (3
+runs, pooled n=54) met the task brief's gate (>= 0.15 `supported_citation_rate`
+improvement, no `evidence_dump_rate` increase), so the seed was adopted as the default.
+The same day, paired in-lesson soaks (same script, current vs seed) showed the seed
+lengthens answers and does not make lesson citation placement reliable, so the default
+was reverted to `current`; see docs/citation_experiment.md, "Seed exchange A/B" and
+"In-lesson check and reversal", for the full numbers.

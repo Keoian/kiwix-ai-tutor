@@ -322,9 +322,9 @@ def test_session_store_create_for_lesson_seeds_when_enabled(tmp_path):
 
 
 def test_build_deps_reads_prompt_variant_current_disables_seed(tmp_path, monkeypatch):
-    """``prompt_variant = "current"`` (still selectable) must run WITHOUT
-    the seed, so old rows stay comparable -- only the default changed
-    (2026-09-20 adoption), not what "current" means."""
+    """``prompt_variant = "current"`` (the default again, reverted 2026-09-20
+    -- see docs/citation_experiment.md "In-lesson check and reversal") must
+    run WITHOUT the seed."""
     from tutor.app import compose as compose_mod
 
     class _FakeAppCfg:
@@ -361,10 +361,11 @@ def test_build_deps_reads_prompt_variant_current_disables_seed(tmp_path, monkeyp
     deps.lessons.close()
 
 
-def test_build_deps_reads_prompt_variant_default_enables_seed(tmp_path, monkeypatch):
-    """Adopted 2026-09-20: ``seed_exchange_s0`` is now the default prompt
-    variant, so a config that never sets ``prompt_variant`` at all (using
-    ``AppConfig``'s own default) must seed new sessions."""
+def test_build_deps_reads_prompt_variant_default_disables_seed(tmp_path, monkeypatch):
+    """Adopted 2026-09-20, then reverted the same day (docs/citation_experiment.md,
+    "In-lesson check and reversal"): in-lesson soaks contradicted the
+    single-turn A/B, so a config that never sets ``prompt_variant`` at all
+    (using ``AppConfig``'s own default) must NOT seed new sessions."""
     from tutor.app import compose as compose_mod
     from tutor.settings import AppConfig
 
@@ -398,5 +399,5 @@ def test_build_deps_reads_prompt_variant_default_enables_seed(tmp_path, monkeypa
         pass
 
     deps = compose_mod.build_deps(_FakeCfg(), llm=_FakeLLM(), research_engine=_FakeResearchEngine())
-    assert deps.sessions._seed_exchange is True
+    assert deps.sessions._seed_exchange is False
     deps.lessons.close()

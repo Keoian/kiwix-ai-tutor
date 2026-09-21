@@ -458,3 +458,27 @@ cited-and-supported 0.09 -> 0.35 (+0.259, gate is >= 0.15), evidence_dump_rate t
 per-question 19 wins / 5 losses / 30 ties. `current` (no seed) stays selectable via
 `[app] prompt_variant = "current"` in config, and `eval.run_turn_eval --variants
 current,seed_exchange_s0` still runs `current` WITHOUT the seed so old rows stay comparable.
+
+### In-lesson check and reversal (2026-09-20)
+
+Paired 6-minute Granite lesson soaks, same script, back to back (`data/soak6_current.*`,
+`data/soak6_seed.*`), contradicted the single-turn A/B, so the default was **reverted
+to `current`** the same day.
+
+| Metric | current | seed | M/I |
+|---|---|---|---|
+| Turns / median chars (max) / wall | 34 / 332 (723) / 5.2s | 32 / 512 (1199) / 6.0s | measured |
+| cited_rate (labels) / supported | 1.000 (34) / 0.000 | 0.000 (0) / 0.000 | measured |
+| backed_sentence / unbacked_number | 0.711 / 0.042 | 0.684 / 0.087 | measured |
+| calc correct | 4/5 | 3/4 | measured |
+
+Corroborating: seeded 10-min soak (`data/granite_soak10_v3.*`) showed median 1065 chars
+vs 384 unseeded (v2), loops to label S89, p50 9.0s vs 3.0s. Single-turn A/B (n=54) still
+stands: cited-and-supported 0.09 -> 0.35 (measured).
+
+**Inference:** the seed helps cold single questions but in-lesson it lengthens answers
+without reliable citation placement; host-side attribution (~0.70 both) is the
+dependable mechanism.
+
+**Decision:** `AppConfig.prompt_variant` default reverted to `"current"`;
+`seed_exchange_s0` stays selectable and tested.

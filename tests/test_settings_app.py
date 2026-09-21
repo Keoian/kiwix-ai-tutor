@@ -69,10 +69,11 @@ def test_app_table_defaults_when_missing(tmp_path):
     # Answer/output token cap defaults to 2000, matching
     # tutor.app.prompt.Budget.generation (see settings.py docstring).
     assert cfg.app.answer_max_tokens == 2000
-    # Adopted 2026-09-20 (docs/citation_experiment.md, "Seed exchange A/B"):
-    # seed_exchange_s0 is now the default prompt variant. "current" (no
-    # seed) stays selectable for comparability with old rows.
-    assert cfg.app.prompt_variant == "seed_exchange_s0"
+    # Adopted 2026-09-20, then reverted the same day (docs/citation_experiment.md,
+    # "Seed exchange A/B" / "In-lesson check and reversal"): in-lesson soaks
+    # contradicted the single-turn A/B, so the default is "current" again.
+    # "seed_exchange_s0" stays fully selectable and tested.
+    assert cfg.app.prompt_variant == "current"
 
 
 def test_app_table_answer_max_tokens_is_configurable(tmp_path):
