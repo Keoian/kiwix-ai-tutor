@@ -12,6 +12,23 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
+# A SINGLE ``research`` tool schema, used for EVERY LLM call in a turn --
+# the forced call (``app.model_writes_search``), any second/weak-evidence
+# round, voluntary follow-up calls, AND the plain answer round. This
+# schema object (and the ``TOOLS`` list built from it) must never differ
+# byte-for-byte between calls within -- or across -- a turn: llama-server
+# renders the ``tools`` block near the TOP of the prompt, so two different
+# ``tools`` payloads give the two calls different prefixes and the whole
+# lesson has to be re-read from scratch on every call (2026-09-21 live
+# measurement: every forced/answer call in a turn re-reading the full
+# lesson instead of reusing the KV cache). Property order (``needs_search``,
+# ``question``, ``queries``, then ``query``/``keywords``) is a hint to a
+# grammar-constrained server, which tends to fill fields in schema order --
+# but nothing here is ``required``, so a voluntary call is free to omit any
+# of them; the actual "you must give X" requirements live in
+# ``validate_tool_call`` below (host-side, never part of the prompt) and in
+# the host notes ``tutor/app/agent_loop.py`` puts in front of the forced
+# call's own messages.
 RESEARCH_TOOL: dict = {
     "type": "function",
     "function": {
@@ -25,6 +42,39 @@ RESEARCH_TOOL: dict = {
             "additionalProperties": False,
             "required": [],
             "properties": {
+                "needs_search": {
+                    "type": "boolean",
+                    "description": (
+                        "Optional: false when the student is chatting, talking "
+                        "about themselves, thanking you, or asking you to "
+                        "explain/rephrase/simplify something already covered, "
+                        "or the sources already shown above in this lesson "
+                        "already answer it; otherwise true/omit. When false, "
+                        "leave 'queries' empty."
+                    ),
+                },
+                "question": {
+                    "type": "string",
+                    "description": (
+                        "Optional: the student's latest message rewritten as one "
+                        "complete standalone question, with every pronoun/"
+                        "reference ('it', 'that', 'they', 'the other ones', ...) "
+                        "replaced by what it refers to in the lesson so far."
+                    ),
+                    "maxLength": 300,
+                },
+                "queries": {
+                    "type": "array",
+                    "description": (
+                        "1-3 short library search queries to try instead of a "
+                        "single 'query': fix spelling, split/join fused words, "
+                        "use the standard name of the topic, and resolve "
+                        "'it'/'that' from the lesson so far."
+                    ),
+                    "items": {"type": "string", "maxLength": 80},
+                    "minItems": 0,
+                    "maxItems": 3,
+                },
                 "query": {
                     "type": "string",
                     "description": "The natural-language question or topic to look up.",
@@ -38,101 +88,20 @@ RESEARCH_TOOL: dict = {
                     "items": {"type": "string", "maxLength": 40},
                     "maxItems": 3,
                 },
-                "queries": {
-                    "type": "array",
-                    "description": (
-                        "1-3 short library search queries to try instead of a "
-                        "single 'query': fix spelling, split/join fused words, "
-                        "use the standard name of the topic, and resolve "
-                        "'it'/'that' from the lesson so far."
-                    ),
-                    "items": {"type": "string", "maxLength": 80},
-                    "minItems": 1,
-                    "maxItems": 3,
-                },
-                "question": {
-                    "type": "string",
-                    "description": (
-                        "Optional: the student's latest message rewritten as one "
-                        "complete standalone question, with every pronoun/"
-                        "reference ('it', 'that', 'they', 'the other ones', ...) "
-                        "replaced by what it refers to in the lesson so far."
-                    ),
-                    "maxLength": 300,
-                },
-                "needs_search": {
-                    "type": "boolean",
-                    "description": (
-                        "Optional: false when no library search is needed for "
-                        "this message."
-                    ),
-                },
             },
         },
     },
 }
 
-
-# Schema used ONLY for the forced ``research`` call under
-# ``app.model_writes_search`` (see ``tutor/app/agent_loop.py``,
-# ``_forced_research_tool_call``) -- NOT shown to the model for a
-# voluntary ``research`` call, and NOT used by ``validate_tool_call``
-# (host-side validation of any actual call, forced or voluntary, still
-# treats ``question`` as optional; see ``RESEARCH_TOOL`` above). Unlike
-# ``RESEARCH_TOOL``, ``question`` is REQUIRED and listed FIRST in
-# ``properties`` so a grammar-constrained server (llama-server's
-# tool-call/json-schema grammar generates object fields in schema order)
-# produces the standalone question before the keyword queries, rather
-# than the model being free to skip it. ``query``/``keywords`` are
-# dropped entirely here -- the forced round only ever wants
-# question+queries.
-FORCED_RESEARCH_TOOL: dict = {
-    "type": "function",
-    "function": {
-        "name": "research",
-        "description": RESEARCH_TOOL["function"]["description"],
-        "parameters": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["needs_search", "question", "queries"],
-            "properties": {
-                "needs_search": {
-                    "type": "boolean",
-                    "description": (
-                        "False when the student is chatting, talking about "
-                        "themselves, thanking you, or asking you to explain/"
-                        "rephrase/simplify something already covered, or the "
-                        "sources already shown above in this lesson already "
-                        "answer it; otherwise true. When false, leave "
-                        "'queries' empty."
-                    ),
-                },
-                "question": {
-                    "type": "string",
-                    "description": (
-                        "The student's latest message rewritten as one complete "
-                        "standalone question, with every pronoun/reference "
-                        "('it', 'that', 'they', 'the other ones', ...) replaced "
-                        "by what it refers to in the lesson so far."
-                    ),
-                    "maxLength": 300,
-                },
-                "queries": {
-                    "type": "array",
-                    "description": (
-                        "1-3 short library search queries for that question: "
-                        "title-like terms, not full sentences. Fix spelling, "
-                        "split/join fused words, use the standard name of the "
-                        "topic."
-                    ),
-                    "items": {"type": "string", "maxLength": 80},
-                    "minItems": 0,
-                    "maxItems": 3,
-                },
-            },
-        },
-    },
-}
+# Historical alias: the forced ``research`` call under
+# ``app.model_writes_search`` used to be sent a separate, narrower
+# schema (``needs_search``/``question``/``queries`` only, all required).
+# That schema differed from the one the answer round and voluntary calls
+# saw, so llama-server rendered a different ``tools`` prefix for the
+# forced call than for every other call in the turn, defeating the KV
+# cache for the rest of the turn (see ``RESEARCH_TOOL``'s docstring
+# above). Now a plain alias so every caller sends the exact same object.
+FORCED_RESEARCH_TOOL: dict = RESEARCH_TOOL
 
 CALC_TOOL: dict = {
     "type": "function",

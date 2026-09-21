@@ -40,7 +40,7 @@ from tutor.app.prompt import PromptOverflow, render_evidence_with_reuse
 from tutor.app.repetition_guard import find_repetition_loop
 from tutor.retrieval.assessment import assess_evidence
 from tutor.retrieval.hybrid.lexical import singularize, tokenize
-from tutor.tools.schemas import FORCED_RESEARCH_TOOL, TOOLS, validate_tool_call
+from tutor.tools.schemas import TOOLS, validate_tool_call
 
 RESEARCH_CAP = 2
 CALC_CAP = 4
@@ -632,7 +632,7 @@ def _forced_research_tool_call(
     finish_reason: str | None = None
     for evt in llm.stream_chat(
         messages,
-        tools=[FORCED_RESEARCH_TOOL],
+        tools=TOOLS,
         tool_choice=forced_tool_choice,
         cancel=cancel,
         max_tokens=_FORCED_REWRITE_MAX_TOKENS,
@@ -907,10 +907,14 @@ def _run_forced_rewrite_round(
             forced = None
             model_question = None
         else:
+            # Keep ``needs_search`` in the persisted arguments (even though
+            # it is True here -- ``skip_search`` above already took the
+            # False branch) so the logged tool call reflects what the
+            # model actually decided, not just the cleaned queries.
             forced = (
                 tool_call_id,
                 cleaned_queries,
-                json.dumps({"queries": cleaned_queries}),
+                json.dumps({"needs_search": needs_search, "queries": cleaned_queries}),
                 _raw_question,
             )
     elif forced is not None and not skip_search:

@@ -555,37 +555,40 @@ def test_clip_model_written_question_clips_to_30_words_and_single_line():
     assert _clip_model_written_question("   ") is None
 
 
-def test_forced_call_schema_requires_question_first_queries_bounded():
-    """The forced round's own request must send a tools schema (NOT the
-    default RESEARCH_TOOL shown for voluntary calls) where ``question`` is
-    REQUIRED and listed first in ``properties`` -- so a grammar-constrained
-    server generates it before ``queries`` -- and ``queries`` keeps its
-    1-3 item bound. Host-side validation of a voluntary call (the plain
-    ``RESEARCH_TOOL``) must still accept a missing ``question``."""
+def test_forced_call_schema_has_needs_search_first_queries_bounded():
+    """2026-09-21 cache fix: the forced round's own request must send the
+    EXACT SAME ``tools`` list as every other call in the turn (the answer
+    round, voluntary rounds) -- a different ``tools`` payload gives
+    llama-server a different prompt prefix and defeats the KV cache for
+    the rest of the turn. So there is no longer a separate
+    ``FORCED_RESEARCH_TOOL`` schema; ``FORCED_RESEARCH_TOOL`` is now just
+    an alias for the single ``RESEARCH_TOOL`` used everywhere, with
+    ``needs_search`` first (a hint for a grammar-constrained server),
+    nothing ``required`` (so a voluntary call can still omit it), and
+    ``queries`` bounded 0-3."""
     from tutor.tools.schemas import FORCED_RESEARCH_TOOL, RESEARCH_TOOL, validate_tool_call
 
-    forced_params = FORCED_RESEARCH_TOOL["function"]["parameters"]
-    assert forced_params["required"] == ["needs_search", "question", "queries"]
-    prop_names = list(forced_params["properties"].keys())
+    assert FORCED_RESEARCH_TOOL is RESEARCH_TOOL
+    params = RESEARCH_TOOL["function"]["parameters"]
+    prop_names = list(params["properties"].keys())
     assert prop_names.index("needs_search") < prop_names.index("question")
     assert prop_names.index("question") < prop_names.index("queries")
-    assert forced_params["properties"]["needs_search"]["type"] == "boolean"
-    assert forced_params["properties"]["queries"]["minItems"] == 0
-    assert forced_params["properties"]["queries"]["maxItems"] == 3
+    assert params["properties"]["needs_search"]["type"] == "boolean"
+    assert params["properties"]["queries"]["minItems"] == 0
+    assert params["properties"]["queries"]["maxItems"] == 3
 
-    # Voluntary-call schema is untouched: question still optional.
-    assert "question" not in RESEARCH_TOOL["function"]["parameters"]["required"]
+    # Nothing is schema-``required``: a voluntary call can still omit
+    # ``question``/``needs_search`` entirely.
+    assert params["required"] == []
     result = validate_tool_call("research", json.dumps({"queries": ["Titin"]}))
     assert result.ok is True
 
 
-def test_forced_call_sends_forced_schema_to_llm():
-    """End-to-end: the actual request the forced round issues to the LLM
-    (the ``tools`` kwarg on ``stream_chat``) is ``[FORCED_RESEARCH_TOOL]``,
-    not the full ``TOOLS`` list -- i.e. the required/minItems constraints
-    on this call really do reach the request payload the server's grammar
-    is built from."""
-    from tutor.tools.schemas import FORCED_RESEARCH_TOOL
+def test_forced_call_sends_the_same_tools_list_as_the_answer_round():
+    """End-to-end: the ``tools`` kwarg on the forced round's own
+    ``stream_chat`` call is byte-identical (same object) to the one the
+    final answer round sends -- the cache-defeating bug this fixes."""
+    from tutor.tools.schemas import TOOLS
 
     session, budget = _mk_session()
     llm = FakeLlmClient(
@@ -617,7 +620,9 @@ def test_forced_call_sends_forced_schema_to_llm():
     )
 
     forced_call_tools = llm.tools_calls[0]
-    assert forced_call_tools == [FORCED_RESEARCH_TOOL]
+    answer_call_tools = llm.tools_calls[1]
+    assert forced_call_tools == TOOLS
+    assert forced_call_tools is answer_call_tools
 
 
 # ---------------------------------------------------------------------------
@@ -899,3 +904,80 @@ def test_truncated_forced_json_with_nothing_salvageable_falls_back_to_raw_presea
     assert result.evidence["level_after"] == "strong"
     details = [s.get("detail") for s in statuses]
     assert any(d and "took too long" in d for d in details)
+
+
+def test_every_llm_call_in_a_turn_gets_byte_identical_tools():
+    """2026-09-21 cache-defeating bug: llama-server renders the ``tools``
+    block near the top of the prompt, so if the forced round's call and
+    the answer round's call carry different ``tools`` payloads, the whole
+    lesson gets re-read from scratch on every call. Every ``stream_chat``
+    call within one turn -- forced round, second (weak-evidence) round,
+    answer round, and any voluntary follow-up round -- must send the
+    exact same ``tools`` list."""
+    session, budget = _mk_session()
+    llm = FakeLlmClient(
+        [
+            _tool_call("research", {"queries": ["Titin"]}),
+            _tool_call("research", {"query": "Titin details"}, call_id="call_2"),
+            _final("Titin is the largest known protein [S1]."),
+        ]
+    )
+    research = ScriptedResearchEngine(
+        [
+            _strong_response(1, title="Molecule"),
+            _strong_response(2, title="Titin"),
+            _strong_response(3, title="Titin"),
+        ]
+    )
+    calc = FakeCalc()
+
+    run_turn(
+        session,
+        _UserInput(kind="text", text="What's the largest molecule?"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+        model_writes_search=True,
+    )
+
+    dumped = [json.dumps(t, sort_keys=True) for t in llm.tools_calls]
+    assert len(dumped) >= 2
+    assert len(set(dumped)) == 1
+
+
+def test_forced_call_prefix_is_an_append_only_subset_of_the_answer_call():
+    """The messages sent to the forced round's ``stream_chat`` call must be
+    an exact prefix of the messages sent to the answer round's call
+    (append-only, cache-safe): nothing in the earlier messages is edited
+    or removed before the answer round."""
+    session, budget = _mk_session()
+    llm = FakeLlmClient(
+        [
+            _tool_call("research", {"queries": ["Titin"]}),
+            _final("Titin is the largest known protein [S1]."),
+        ]
+    )
+    research = ScriptedResearchEngine(
+        [
+            _strong_response(1, title="Molecule"),
+            _strong_response(2, title="Titin"),
+        ]
+    )
+    calc = FakeCalc()
+
+    run_turn(
+        session,
+        _UserInput(kind="text", text="What's the largest molecule?"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+        model_writes_search=True,
+    )
+
+    forced_messages = llm.calls[0]
+    answer_messages = llm.calls[1]
+    assert answer_messages[: len(forced_messages)] == forced_messages
