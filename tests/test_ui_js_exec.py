@@ -185,6 +185,73 @@ def test_inline_tokenizer_roundtrips_raw_text(ctx, text):
     assert _reconstruct(tokens) == text
 
 
+# ---------------------------------------------------------------------------
+# (b2) invented citation-label stripping (owner-reported live bug: the model
+# invents source labels like "[Q&A]"/"[Cite: [Q&A]]" that are not real [S#]
+# passages, and the UI must never show them as literal text). Mirrors
+# tutor/app/citations.py's _INVENTED_LABEL_RE pattern list.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text,stripped_token",
+    [
+        ("This is the coldest known point [Cite: [Q&A]]", "[Cite: [Q&A]]"),
+        ("... found in interstellar space. [Q&A]", "[Q&A]"),
+        ("Some claim here. [Source]", "[Source]"),
+        ("Some claim here. [Sources: S1, S2]", "[Sources: S1, S2]"),
+        ("Some claim here. [citation needed]", "[citation needed]"),
+        ("Some claim here. [Cite: S1]", "[Cite: S1]"),
+    ],
+)
+def test_invented_citation_labels_are_stripped_from_rendered_text(ctx, text, stripped_token):
+    tokens = call(ctx, f"_inlineTokens({js_str(text)})")
+    reconstructed = _reconstruct(tokens)
+    assert stripped_token not in reconstructed
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The formula for water is [H2O].",
+        "The winning numbers were [1, 2, 3].",
+        "See the [full report](https://example.com/report) for details.",
+        "The array is [S1, S2] indexed from zero.",  # real [S#] group, not invented
+    ],
+)
+def test_ordinary_bracketed_text_is_never_stripped(ctx, text):
+    tokens = call(ctx, f"_inlineTokens({js_str(text)})")
+    reconstructed = _reconstruct(tokens)
+    assert reconstructed == text
+
+
+def test_sentence_made_only_of_invented_label_renders_no_orphan_marker(ctx):
+    # The real owner example: a trailing "[Cite: [Q&A]]" line that used to
+    # get its own spurious "not found" marker.
+    answer = "Neptune is the eighth planet from the Sun. [S1]\n[Cite: [Q&A]]"
+    attributions = {
+        "attributions": [
+            {
+                "sentence_span": [0, len("Neptune is the eighth planet from the Sun.")],
+                "model_cited": True,
+                "passage_id": "p1",
+            }
+        ],
+        "unbacked": [],
+    }
+    citations = {"citations": [{"label": "S1", "passage_id": "p1"}]}
+    ctx.eval("var _c2 = document.createElement('div');")
+    ctx.eval(
+        "module.exports.renderAnswerWithAttribution(_c2, "
+        f"{js_str(answer)}, {js_str(attributions)}, {js_str(citations)});"
+    )
+    reconstructed = call(ctx, "_c2.textContent")
+    assert "[Cite:" not in reconstructed
+    assert "[Q&A]" not in reconstructed
+    found = call(ctx, "_walkCollect(_c2)")
+    assert len(found["markers"]) == 0
+
+
 def test_inline_tokenizer_does_not_treat_math_asterisks_as_italic(ctx):
     # Regression: "3 * 4 * 5" used to render " 4 " as <em> because the
     # italic regex allowed whitespace right inside the delimiters.

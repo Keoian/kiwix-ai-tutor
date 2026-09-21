@@ -164,12 +164,43 @@
   // after/before the asterisks and must stay plain text.
   const MARKDOWN_RE = /(\*\*([^*\n]+)\*\*)|(\*(\S(?:[^*\n]*\S)?)\*)|(`([^`\n]+)`)|(<br\s*\/?>)|(\n)/gi;
 
+  // Invented, non-[S#] "citation-shaped" tokens the model sometimes tacks
+  // on that are NOT real evidence labels (owner-reported live bug: a
+  // trailing "[Cite: [Q&A]]" line, and "... [Q&A]" shown as literal text).
+  // Mirrors tutor/app/citations.py's `_INVENTED_LABEL_RE` -- keep the two
+  // in sync. A short, explicit, case-insensitive list only -- never a
+  // broad "any bracket" match -- so ordinary bracketed text ("[H2O]",
+  // "[1, 2, 3]", a markdown link, a real "[S1, S2]" group) is never
+  // touched. "[Cite: ...]" allows one level of nesting so
+  // "[Cite: [Q&A]]" matches as a whole.
+  const INVENTED_LABEL_RE = new RegExp(
+    "\\[\\s*Q\\s*&\\s*A\\s*\\]" +
+      "|\\[\\s*Cite\\s*:\\s*(?:\\[[^\\[\\]]*\\]|[^\\[\\]]*)\\]" +
+      "|\\[\\s*Source\\s*\\]" +
+      "|\\[\\s*Sources\\s*:[^\\[\\]]*\\]" +
+      "|\\[\\s*citation\\s+needed\\s*\\]",
+    "gi"
+  );
+
+  // Strips invented citation-like tokens from a raw text slice before it
+  // is turned into DOM text nodes. Only ever changes what is DISPLAYED --
+  // never the raw answer text used for offset math elsewhere (offsets are
+  // computed against the untouched raw string before any slice reaches
+  // here; this only affects the leaf text that actually gets rendered).
+  function stripInventedLabels(text) {
+    if (!text) return text;
+    INVENTED_LABEL_RE.lastIndex = 0;
+    return text.replace(INVENTED_LABEL_RE, "");
+  }
+
   // Inline-only tokenizer: bold/italic/code plus a literal "<br>" token
   // (some model answers put a literal <br> inside a table cell) both
   // rendered as a real <br> element. No block-level splitting here --
   // used for the text inside a single paragraph line, heading, list item
   // or table cell.
   function appendInlineMarkdown(container, text) {
+    if (!text) return;
+    text = stripInventedLabels(text);
     if (!text) return;
     let lastIndex = 0;
     let match;

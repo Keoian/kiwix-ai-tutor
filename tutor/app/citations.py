@@ -281,6 +281,25 @@ _LEADING_LIST_NUMBER_RE = re.compile(r"^\s*\d+[.)](?:\s+|$)")
 # left standing alone after sentence splitting.
 _BRACKET_ONLY_RE = re.compile(r"^(?:\[[^\[\]]*\]\s*)+$")
 
+# Invented, non-[S#] "citation-shaped" tokens the model sometimes tacks on
+# that are NOT real evidence labels (2026-09-20 owner-reported live bug:
+# a trailing "[Cite: [Q&A]]" line even got its own spurious "not found"
+# marker in the UI, and "... found in interstellar space. [Q&A]" showed
+# the bogus label as literal text). This is the single source of truth for
+# the pattern; tutor/ui/app.js mirrors it (see the comment there) since the
+# UI must not display these either. Kept as a short, explicit, case-
+# insensitive list -- never a broad "any bracket" match -- so ordinary
+# bracketed text ("[H2O]", "[1, 2, 3]") is never touched. "[Cite: ...]"
+# allows one level of nesting so "[Cite: [Q&A]]" matches as a whole.
+_INVENTED_LABEL_RE = re.compile(
+    r"\[\s*Q\s*&\s*A\s*\]"
+    r"|\[\s*Cite\s*:\s*(?:\[[^\[\]]*\]|[^\[\]]*)\]"
+    r"|\[\s*Source\s*\]"
+    r"|\[\s*Sources\s*:[^\[\]]*\]"
+    r"|\[\s*citation\s+needed\s*\]",
+    re.IGNORECASE,
+)
+
 
 def _strip_label_noise(text: str) -> str:
     """Strip ``[S123]``-style citation labels and a leading list-numbering
@@ -409,6 +428,12 @@ def _is_short_non_claim(sentence: str) -> bool:
     # alone -- that is a legitimate citation, handled by `_labels_in`
     # below, not noise.
     if _BRACKET_ONLY_RE.match(s) and not _LABEL_RE.search(s):
+        return True
+    # A fragment made of nothing but invented, non-[S#] "citation-shaped"
+    # tokens (see _INVENTED_LABEL_RE) once those are stripped away -- e.g.
+    # a bogus trailing "[Cite: [Q&A]]" line -- carries no claim either,
+    # even when it does not parse as _BRACKET_ONLY_RE (nested brackets).
+    if _INVENTED_LABEL_RE.sub("", s).strip() == "":
         return True
     return False
 

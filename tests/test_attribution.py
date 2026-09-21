@@ -392,3 +392,33 @@ def test_trailing_bare_citation_label_fragment_is_still_a_real_citation():
     result = attribute_sentences(answer, [passage])
 
     assert any(a.model_cited and a.label == "S1" for a in result.attributions)
+
+
+def test_nested_cite_qa_fragment_is_ignored_not_flagged_unbacked():
+    # Owner-reported live bug: the model emitted a bogus, nested
+    # "[Cite: [Q&A]]" label as its own trailing line -- it even got its own
+    # "not found" (unbacked) marker in the UI. Neither "[Cite: ...]" nor a
+    # bracket-only fragment made of one is a real claim.
+    answer = (
+        "Neptune is the eighth planet from the Sun. [S1]\n[Cite: [Q&A]]"
+    )
+    passage = _passage("S1", "p1", "Neptune is the eighth planet from the Sun.")
+    result = attribute_sentences(answer, [passage])
+
+    all_spans = [a.sentence_span for a in result.attributions] + [
+        u.span for u in result.unbacked_spans
+    ]
+    covered = "".join(answer[s:e] for s, e in all_spans)
+    assert "[Cite:" not in covered
+
+
+def test_other_invented_label_fragments_are_ignored_not_flagged_unbacked():
+    passages: list[dict] = []
+    for invented in ("[Source]", "[Sources: S1, S2]", "[citation needed]", "[Cite: S1]"):
+        answer = f"The sky appears blue due to Rayleigh scattering. {invented}"
+        result = attribute_sentences(answer, passages)
+        all_spans = [a.sentence_span for a in result.attributions] + [
+            u.span for u in result.unbacked_spans
+        ]
+        covered = "".join(answer[s:e] for s, e in all_spans)
+        assert invented not in covered, invented
