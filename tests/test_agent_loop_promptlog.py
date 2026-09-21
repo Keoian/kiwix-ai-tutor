@@ -38,7 +38,17 @@ class FakeLlmClient:
         self._scripts = list(scripts)
         self.calls: list[list[dict]] = []
 
-    def stream_chat(self, messages, *, max_tokens=None, tools=None, cancel=None, temperature=None):
+    def stream_chat(
+        self,
+        messages,
+        *,
+        max_tokens=None,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        cancel=None,
+        temperature=None,
+    ):
         self.calls.append([dict(m) for m in messages])
         script = self._scripts.pop(0)
         yield from script
@@ -117,6 +127,7 @@ def test_run_turn_log_order_user_evidence_assistant():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        rewrite_on_followup=False,
     )
 
     rendered = session.log.render()
@@ -141,6 +152,7 @@ def test_turn_two_messages_start_with_turn_one_messages_byte_for_byte_when_no_ev
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        rewrite_on_followup=False,
     )
     call1_messages = llm.calls[0]
 
@@ -152,6 +164,7 @@ def test_turn_two_messages_start_with_turn_one_messages_byte_for_byte_when_no_ev
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        rewrite_on_followup=False,
     )
     call2_messages = llm.calls[1]
 
@@ -177,6 +190,7 @@ def test_small_ceiling_forces_eviction_before_model_call_and_reports_event():
             calc=calc,
             budget=budget,
             emit=lambda e: None,
+        rewrite_on_followup=False,
         )
         assert result.status == "ok"
         if result.events:
@@ -207,6 +221,7 @@ def test_evicted_evidence_still_cited_is_protected_in_next_model_call():
             calc=calc,
             budget=budget,
             emit=lambda e: None,
+        rewrite_on_followup=False,
         )
 
     rendered = session.log.render()
@@ -250,6 +265,7 @@ def test_evidence_not_resent_duplicate_across_turns_when_same_passage():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        rewrite_on_followup=False,
     )
     run_turn(
         session,
@@ -259,6 +275,7 @@ def test_evidence_not_resent_duplicate_across_turns_when_same_passage():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        rewrite_on_followup=False,
     )
 
     full_text = json.dumps(session.log.render())
@@ -279,6 +296,7 @@ def test_action_appends_user_entry_and_no_evidence():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        rewrite_on_followup=False,
     )
 
     assert research.calls == 0
@@ -326,6 +344,7 @@ def test_oversized_newest_packet_is_trimmed_not_crashed():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        rewrite_on_followup=False,
     )
 
     assert result.status == "ok"
@@ -350,6 +369,7 @@ def test_turn_logger_receives_eviction_events(tmp_path):
             calc=calc,
             budget=budget,
             emit=lambda e: None,
+        rewrite_on_followup=False,
         )
         logger.log_turn(
             lesson_id="lesson-1",

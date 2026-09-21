@@ -189,6 +189,25 @@ _REWRITE_HOST_NOTE = (
     "resolve any \"it\"/\"that\" from the lesson so far.]"
 )
 
+# Host note used on every turn after the first (see
+# docs/rewrite_on_weak_evidence.md, "Follow-up rewrite"): the raw
+# pre-search ran on the literal words of the question, which for a
+# follow-up turn can retrieve the wrong topic entirely (e.g. "Is it a
+# molecule?" retrieves the "Molecule" article, when the lesson has been
+# about DNA). Fires unconditionally on turn >= 2 -- deliberately NOT
+# gated by any word-list/pronoun detector, since a student's own grammar
+# or spelling can't be relied on to signal a reference.
+_FOLLOWUP_HOST_NOTE = (
+    " [Host note: call research with 1-3 short standalone rewritten "
+    "queries for this question: resolve any pronoun/reference (\"it\", "
+    "\"that\", \"they\", ...) using the lesson so far, and fix spelling. "
+    "For example if the lesson has been about DNA and the student asks "
+    "\"Is it a molecule?\", search for \"Is DNA a molecule\", not "
+    "\"molecule\". Then answer the student's actual question as it "
+    "relates to the lesson so far: answer directly first (yes or no, if "
+    "it is a yes/no question), then explain.]"
+)
+
 # Small cap on the forced rewrite call's own output -- it only needs to
 # emit one tool call, never prose.
 _FORCED_REWRITE_MAX_TOKENS = 96
@@ -338,6 +357,35 @@ def _merge_dedupe_passages(
     return [by_id[pid] for pid in ordered_ids[:cap]]
 
 
+def _lead_with_backfill(
+    lead_passages: list[dict], backfill_passages: list[dict], cap: int
+) -> list[dict]:
+    """Merge a follow-up-rewrite query's passages (``lead_passages``, kept
+    in their own rank order) ahead of the raw pre-search's passages
+    (``backfill_passages``), rather than an equal reciprocal-rank-fusion
+    blend: for a follow-up turn the raw pre-search ran on the literal
+    (possibly wrong-topic) question text, so it only ever fills in
+    remaining slots the rewrite's own results didn't use, never
+    outranks them. De-duplicated by passage id; capped to ``cap``."""
+    seen: set[str] = set()
+    merged: list[dict] = []
+    for passage in lead_passages:
+        pid = passage.get("id")
+        if pid is None or pid in seen:
+            continue
+        seen.add(pid)
+        merged.append(passage)
+    for passage in backfill_passages:
+        if len(merged) >= cap:
+            break
+        pid = passage.get("id")
+        if pid is None or pid in seen:
+            continue
+        seen.add(pid)
+        merged.append(passage)
+    return merged[:cap]
+
+
 @dataclass
 class _MergedResult:
     """Minimal ``.passages`` holder so ``assess_evidence`` (which only
@@ -465,6 +513,188 @@ def _forced_research_tool_call(llm, messages: list[dict], *, cancel):
     return "forced-rewrite-fallback", queries, arguments_json
 
 
+# Short instruction appended after strong merged evidence on a follow-up
+# turn's forced-rewrite round: answer the student's actual question
+# directly first, then explain. Kept separate from ``_FOLLOWUP_HOST_NOTE``
+# (which the model reads before it searches) so it lands right next to
+# the evidence the model is about to answer from.
+_FOLLOWUP_DIRECTNESS_NOTE = (
+    "Answer the student's question as it relates to the lesson so far: "
+    "give a direct answer first (yes or no, if it is a yes/no question), "
+    "then explain using the sources above."
+)
+
+
+def _has_prior_turns(session, use_log: bool, log, messages: list[dict] | None) -> bool:
+    """True when the lesson already has at least one earlier turn, i.e.
+    this is not the student's first message. Checked BEFORE this turn's
+    own user message is appended."""
+    if use_log:
+        rendered = log.render()
+        return any(m.get("role") == "user" for m in rendered)
+    return any(m.get("role") == "user" for m in (messages or []))
+
+
+def _run_forced_rewrite_round(
+    *,
+    llm,
+    log,
+    messages: list[dict],
+    use_log: bool,
+    cancel,
+    user_input,
+    session,
+    research_engine,
+    assessment,
+    corrected_terms: dict,
+    emit,
+    backfill_passages: list[dict] | None = None,
+    strong_suffix: str = "",
+):
+    """Run one forced ``research`` tool-call round (see
+    ``_forced_research_tool_call``), append the resulting assistant
+    tool-call + tool-result messages to the log/messages (append-only),
+    and return ``(level_after, rewritten_queries, research_calls_delta)``.
+
+    When ``backfill_passages`` is given, the rewrite's own passages LEAD
+    the merged evidence and ``backfill_passages`` only fill remaining
+    slots (``_lead_with_backfill``) -- used for a follow-up turn, where
+    the raw pre-search ran on the question's literal (possibly
+    wrong-topic) text. Otherwise the rewrite's own queries are merged
+    against each other by RRF only (``_merge_dedupe_passages``), matching
+    the original weak-evidence rewrite behaviour.
+    """
+    research_calls_delta = 0
+    wire_messages = _to_wire_messages(log.render()) if use_log else messages
+    forced = _forced_research_tool_call(llm, wire_messages, cancel=cancel)
+
+    if forced is None:
+        merged_response = _MergedResult([])
+        new_assessment = assess_evidence(user_input.text, merged_response)
+        level_after = new_assessment.level
+        synth_id = "forced-rewrite-none"
+        tool_call_message = {
+            "id": synth_id,
+            "type": "function",
+            "function": {"name": "research", "arguments": json.dumps({"queries": []})},
+        }
+        if use_log:
+            log.append_assistant_tool_calls([tool_call_message])
+        else:
+            messages.append(
+                {"role": "assistant", "content": None, "tool_calls": [tool_call_message]}
+            )
+        tool_text = _not_found_tool_text(searched_for=[], level_after=level_after)
+        if use_log:
+            log.append_tool_result(tool_call_id=synth_id, content=tool_text)
+        else:
+            messages.append({"role": "tool", "tool_call_id": synth_id, "content": tool_text})
+        emit({"kind": "tool_result", "name": "research", "ok": False})
+        return level_after, [], research_calls_delta
+
+    tool_call_id, rewritten_queries, arguments_json = forced
+    emit(
+        {
+            "kind": "status",
+            "stage": "tool",
+            "detail": f"Searching again: {', '.join(rewritten_queries)}",
+        }
+    )
+    if use_log:
+        log.append_assistant_tool_calls(
+            [
+                {
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {"name": "research", "arguments": arguments_json},
+                }
+            ]
+        )
+    else:
+        messages.append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {"name": "research", "arguments": arguments_json},
+                    }
+                ],
+            }
+        )
+
+    many_fn = getattr(research_engine, "research_many", None)
+    if many_fn is not None:
+        batch_results = many_fn(
+            rewritten_queries, topic_hint=getattr(session, "subject_hint", None)
+        )
+    else:
+        batch_results = [
+            {
+                "query": q,
+                "status": "ok",
+                "response": research_engine.research(
+                    q, topic_hint=getattr(session, "subject_hint", None)
+                ),
+                "error": None,
+            }
+            for q in rewritten_queries
+        ]
+
+    passage_lists = []
+    for item in batch_results:
+        sub_response = item.get("response")
+        if item.get("status") != "ok" or sub_response is None:
+            continue
+        research_calls_delta += 1
+        sub_packet = _packet_from_response(sub_response)
+        passage_lists.append(sub_packet["passages"])
+        sub_corrected = getattr(sub_response, "corrected_terms", None) or {}
+        corrected_terms.update(dict(sub_corrected))
+
+    lead_passages = _merge_dedupe_passages(
+        passage_lists, _MERGE_CAP, rewritten_queries=rewritten_queries
+    )
+    if backfill_passages is not None:
+        merged_passages = _lead_with_backfill(lead_passages, backfill_passages, _MERGE_CAP)
+    else:
+        merged_passages = lead_passages
+    merged_response = _MergedResult(merged_passages)
+    healthy_terms = {
+        t: True for t in getattr(assessment, "covered_terms", frozenset()) or []
+    }
+    new_assessment = assess_evidence(
+        user_input.text,
+        merged_response,
+        rewritten_queries=rewritten_queries,
+        healthy_terms=healthy_terms,
+        corrected_terms=corrected_terms,
+    )
+    level_after = new_assessment.level
+
+    _retain_passages(session, {"passages": merged_passages})
+    searched_for_line = f"Searched for: {', '.join(rewritten_queries)}"
+    if level_after == "strong":
+        evidence_text = render_evidence({"passages": merged_passages})
+        tool_text = f"{searched_for_line}\n{evidence_text}"
+        if strong_suffix:
+            tool_text = f"{tool_text}\n\n{strong_suffix}"
+    else:
+        tool_text = (
+            f"{searched_for_line}\n"
+            + _not_found_tool_text(searched_for=rewritten_queries, level_after=level_after)
+        )
+    if use_log:
+        log.append_tool_result(tool_call_id=tool_call_id, content=tool_text)
+    else:
+        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_text})
+    emit({"kind": "tool_result", "name": "research", "ok": level_after == "strong"})
+
+    return level_after, rewritten_queries, research_calls_delta
+
+
 def run_turn(
     session,
     user_input,
@@ -478,6 +708,7 @@ def run_turn(
     system_text_override: str | None = None,
     temperature: float | None = None,
     rewrite_on_weak_evidence: bool = True,
+    rewrite_on_followup: bool = True,
 ) -> TurnResult:
     research_calls = 0
     calc_calls = 0
@@ -513,6 +744,9 @@ def run_turn(
             messages.append({"role": "user", "content": f"[action:{user_input.action}]"})
     else:
         route = "preretrieve"
+        has_prior_turns = _has_prior_turns(
+            session, use_log, log, None if use_log else messages
+        )
         emit({"kind": "status", "stage": "searching", "detail": "Looking in the library..."})
         response = research_engine.research(
             user_input.text, topic_hint=getattr(session, "subject_hint", None)
@@ -522,9 +756,22 @@ def run_turn(
         assessment = getattr(response, "assessment", None)
         level_before = assessment.level if assessment is not None else "strong"
         corrected_terms = dict(getattr(response, "corrected_terms", None) or {})
-        do_rewrite = rewrite_on_weak_evidence and level_before in ("weak", "empty")
 
-        user_text = user_input.text + _REWRITE_HOST_NOTE if do_rewrite else user_input.text
+        # Follow-up rewrite (docs/rewrite_on_weak_evidence.md, "Follow-up
+        # rewrite"): fires unconditionally on any turn after the first,
+        # regardless of how strong the raw pre-search looks -- a student's
+        # own grammar/spelling can't be relied on to signal an unresolved
+        # reference, so this is NOT gated by any word-list/pronoun
+        # detector. The raw pre-search still always runs (above) and its
+        # passages are kept as backfill only.
+        do_followup = rewrite_on_followup and has_prior_turns
+
+        if do_followup:
+            user_text = user_input.text + _FOLLOWUP_HOST_NOTE
+        elif rewrite_on_weak_evidence and level_before in ("weak", "empty"):
+            user_text = user_input.text + _REWRITE_HOST_NOTE
+        else:
+            user_text = user_input.text
         if use_log:
             log.append_user(user_text)
         else:
@@ -532,8 +779,45 @@ def run_turn(
 
         level_after = level_before
         rewritten_queries: list[str] = []
+        followup_ran = False
 
-        if not do_rewrite:
+        if do_followup:
+            # The raw pre-search's evidence is never appended directly on
+            # a follow-up turn -- it ran on the question's literal text,
+            # which for a follow-up can be about the wrong topic entirely
+            # (e.g. "Is it a molecule?" -> "Molecule"). It is only ever
+            # used as backfill inside the forced round's own merge.
+            followup_level, followup_queries, delta = _run_forced_rewrite_round(
+                llm=llm,
+                log=log,
+                messages=messages if not use_log else None,
+                use_log=use_log,
+                cancel=cancel,
+                user_input=user_input,
+                session=session,
+                research_engine=research_engine,
+                assessment=assessment,
+                corrected_terms=corrected_terms,
+                emit=emit,
+                backfill_passages=packet["passages"],
+                strong_suffix=_FOLLOWUP_DIRECTNESS_NOTE,
+            )
+            research_calls += delta
+            # _run_forced_rewrite_round always leaves the log in a valid,
+            # fully-closed state (assistant tool_calls + matching tool
+            # result) even when the model produced no usable queries --
+            # so once attempted, this turn's evidence has already been
+            # decided one way or another; never fall through to a plain
+            # packet append afterwards, only possibly a second (weak-
+            # evidence) round below.
+            followup_ran = True
+            level_before = followup_level
+            level_after = followup_level
+            rewritten_queries = followup_queries
+
+        do_rewrite = rewrite_on_weak_evidence and level_before in ("weak", "empty")
+
+        if not followup_ran and not do_rewrite:
             _retain_passages(session, packet)
             emit(
                 {
@@ -550,168 +834,27 @@ def run_turn(
                     {"role": "tool", "content": f"[research results]\n{evidence_text}"}
                 )
             emit({"kind": "tool_result", "name": "research"})
-        else:
-            # Forced rewrite round: the weak/empty evidence found above is
-            # deliberately never appended to the log (spec: don't feed the
-            # model off-topic evidence) -- only the student message (with
-            # the host note) has been appended so far.
-            wire_messages = _to_wire_messages(log.render()) if use_log else messages
-            forced = _forced_research_tool_call(llm, wire_messages, cancel=cancel)
-
-            if forced is None:
-                rewritten_queries = []
-                merged_response = _MergedResult([])
-                new_assessment = assess_evidence(user_input.text, merged_response)
-                level_after = new_assessment.level
-                # No forced call succeeded at all -- still tell the model
-                # (via a synthetic tool round) that the search came back
-                # empty, so downstream behaviour (not-found instruction)
-                # is uniform regardless of which fallback path failed.
-                synth_id = "forced-rewrite-none"
-                if use_log:
-                    log.append_assistant_tool_calls(
-                        [
-                            {
-                                "id": synth_id,
-                                "type": "function",
-                                "function": {
-                                    "name": "research",
-                                    "arguments": json.dumps({"queries": []}),
-                                },
-                            }
-                        ]
-                    )
-                else:
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": None,
-                            "tool_calls": [
-                                {
-                                    "id": synth_id,
-                                    "type": "function",
-                                    "function": {
-                                        "name": "research",
-                                        "arguments": json.dumps({"queries": []}),
-                                    },
-                                }
-                            ],
-                        }
-                    )
-                tool_text = _not_found_tool_text(
-                    searched_for=[], level_after=level_after
-                )
-                if use_log:
-                    log.append_tool_result(tool_call_id=synth_id, content=tool_text)
-                else:
-                    messages.append(
-                        {"role": "tool", "tool_call_id": synth_id, "content": tool_text}
-                    )
-                emit({"kind": "tool_result", "name": "research", "ok": False})
-            else:
-                tool_call_id, rewritten_queries, arguments_json = forced
-                emit(
-                    {
-                        "kind": "status",
-                        "stage": "tool",
-                        "detail": f"Searching again: {', '.join(rewritten_queries)}",
-                    }
-                )
-                if use_log:
-                    log.append_assistant_tool_calls(
-                        [
-                            {
-                                "id": tool_call_id,
-                                "type": "function",
-                                "function": {"name": "research", "arguments": arguments_json},
-                            }
-                        ]
-                    )
-                else:
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": None,
-                            "tool_calls": [
-                                {
-                                    "id": tool_call_id,
-                                    "type": "function",
-                                    "function": {
-                                        "name": "research",
-                                        "arguments": arguments_json,
-                                    },
-                                }
-                            ],
-                        }
-                    )
-
-                many_fn = getattr(research_engine, "research_many", None)
-                if many_fn is not None:
-                    batch_results = many_fn(
-                        rewritten_queries, topic_hint=getattr(session, "subject_hint", None)
-                    )
-                else:
-                    # Fallback for a research engine fake without
-                    # research_many: sequential single-query calls, same
-                    # shape as the batched path below.
-                    batch_results = [
-                        {
-                            "query": q,
-                            "status": "ok",
-                            "response": research_engine.research(
-                                q, topic_hint=getattr(session, "subject_hint", None)
-                            ),
-                            "error": None,
-                        }
-                        for q in rewritten_queries
-                    ]
-
-                passage_lists = []
-                for item in batch_results:
-                    sub_response = item.get("response")
-                    if item.get("status") != "ok" or sub_response is None:
-                        continue
-                    research_calls += 1
-                    sub_packet = _packet_from_response(sub_response)
-                    passage_lists.append(sub_packet["passages"])
-                    sub_corrected = getattr(sub_response, "corrected_terms", None) or {}
-                    corrected_terms.update(dict(sub_corrected))
-
-                merged_passages = _merge_dedupe_passages(
-                    passage_lists, _MERGE_CAP, rewritten_queries=rewritten_queries
-                )
-                merged_response = _MergedResult(merged_passages)
-                healthy_terms = {
-                    t: True for t in getattr(assessment, "covered_terms", frozenset()) or []
-                }
-                new_assessment = assess_evidence(
-                    user_input.text,
-                    merged_response,
-                    rewritten_queries=rewritten_queries,
-                    healthy_terms=healthy_terms,
-                    corrected_terms=corrected_terms,
-                )
-                level_after = new_assessment.level
-
-                _retain_passages(session, {"passages": merged_passages})
-                searched_for_line = f"Searched for: {', '.join(rewritten_queries)}"
-                if level_after == "strong":
-                    evidence_text = render_evidence({"passages": merged_passages})
-                    tool_text = f"{searched_for_line}\n{evidence_text}"
-                else:
-                    tool_text = (
-                        f"{searched_for_line}\n"
-                        + _not_found_tool_text(
-                            searched_for=rewritten_queries, level_after=level_after
-                        )
-                    )
-                if use_log:
-                    log.append_tool_result(tool_call_id=tool_call_id, content=tool_text)
-                else:
-                    messages.append(
-                        {"role": "tool", "tool_call_id": tool_call_id, "content": tool_text}
-                    )
-                emit({"kind": "tool_result", "name": "research", "ok": level_after == "strong"})
+        elif do_rewrite:
+            # One extra forced-rewrite round -- the original weak-evidence
+            # mechanism, capped at one extra round even after a follow-up
+            # round already ran (append-only, cache-safe: this is just
+            # another tool round appended after whatever came before).
+            level_after, rewritten_queries, delta = _run_forced_rewrite_round(
+                llm=llm,
+                log=log,
+                messages=messages if not use_log else None,
+                use_log=use_log,
+                cancel=cancel,
+                user_input=user_input,
+                session=session,
+                research_engine=research_engine,
+                assessment=assessment,
+                corrected_terms=corrected_terms,
+                emit=emit,
+            )
+            research_calls += delta
+        # else: followup_ran and not do_rewrite -- the follow-up round's
+        # own strong result already fully handled this turn's evidence.
 
         evidence_summary = {
             "level_before": level_before,

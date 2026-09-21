@@ -63,7 +63,17 @@ class _FakeLLM:
     completes in one pass per turn -- fast enough for a 60-turn
     simulation to stay well under the `slow` marker's 20s cutoff."""
 
-    def stream_chat(self, messages, *, tools=None, cancel=None, max_tokens=None, temperature=None):
+    def stream_chat(
+        self,
+        messages,
+        *,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        cancel=None,
+        max_tokens=None,
+        temperature=None,
+    ):
         yield StreamEvent(kind="token", text="The answer is short [S1].")
         yield StreamEvent(kind="done", finish_reason="stop")
 

@@ -75,7 +75,17 @@ class FakeLlmClient:
         self.calls: list[list[dict]] = []
         self.max_tokens_calls: list[int | None] = []
 
-    def stream_chat(self, messages, *, max_tokens=None, tools=None, cancel=None, temperature=None):
+    def stream_chat(
+        self,
+        messages,
+        *,
+        max_tokens=None,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        cancel=None,
+        temperature=None,
+    ):
         self.calls.append(list(messages))
         self.max_tokens_calls.append(max_tokens)
         if not self._scripts:
@@ -868,7 +878,15 @@ def test_repetition_guard_sets_a_cancel_event_the_fake_llm_can_observe():
             self.stopped_early = False
 
         def stream_chat(
-            self, messages, *, max_tokens=None, tools=None, cancel=None, temperature=None
+            self,
+            messages,
+            *,
+            max_tokens=None,
+            tools=None,
+            tool_choice=None,
+            response_format=None,
+            cancel=None,
+            temperature=None,
         ):
             for evt in repeated:
                 if cancel is not None and cancel.is_set():

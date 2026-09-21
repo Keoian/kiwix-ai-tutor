@@ -112,6 +112,17 @@ class AppConfig:
     to volunteer a search on its own. ``False`` reproduces today's
     behaviour byte-for-byte (see
     tests/test_agent_loop_rewrite.py::test_setting_off_is_byte_identical)."""
+    rewrite_on_followup: bool = True
+    """On every turn after the lesson's first, force a model-written
+    query-rewrite round BEFORE trusting the raw pre-search (see
+    docs/rewrite_on_weak_evidence.md, "Follow-up rewrite"), regardless of
+    how strong the raw pre-search looks -- deliberately unconditional
+    (never gated by a word-list/pronoun detector: a student's own
+    grammar/spelling can't be relied on to signal an unresolved
+    reference like "it"/"that"). The raw pre-search still always runs and
+    its passages are kept only as backfill behind the rewrite's own
+    results. ``False`` reproduces today's behaviour (no follow-up
+    rewrite; the existing weak/empty-evidence rewrite still applies)."""
 
 
 @dataclass(frozen=True)
@@ -309,6 +320,7 @@ def load_config(path: Path) -> Config:
         prompt_variant=_app_str("prompt_variant", "current"),
         answer_max_tokens=_app_int("answer_max_tokens", 2000),
         rewrite_on_weak_evidence=_app_bool("rewrite_on_weak_evidence", True),
+        rewrite_on_followup=_app_bool("rewrite_on_followup", True),
     )
 
     # [embedding] is optional, like [app]; when present every key is

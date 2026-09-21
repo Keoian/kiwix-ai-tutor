@@ -75,6 +75,7 @@ def test_app_table_defaults_when_missing(tmp_path):
     # "seed_exchange_s0" stays fully selectable and tested.
     assert cfg.app.prompt_variant == "current"
     assert cfg.app.rewrite_on_weak_evidence is True
+    assert cfg.app.rewrite_on_followup is True
 
 
 def test_app_table_rewrite_on_weak_evidence_is_configurable(tmp_path):
@@ -89,6 +90,20 @@ rewrite_on_weak_evidence = false
     cfg = load_config(config_path)
 
     assert cfg.app.rewrite_on_weak_evidence is False
+
+
+def test_app_table_rewrite_on_followup_is_configurable(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    text = _BASE + """
+[app]
+rewrite_on_followup = false
+"""
+    config_path = _write_toml(config_dir / "dev.toml", text)
+
+    cfg = load_config(config_path)
+
+    assert cfg.app.rewrite_on_followup is False
 
 
 def test_app_table_answer_max_tokens_is_configurable(tmp_path):

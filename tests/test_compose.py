@@ -118,7 +118,17 @@ class _FakeLlm:
     def health(self) -> bool:
         return True
 
-    def stream_chat(self, messages, *, max_tokens=None, tools=None, cancel=None, temperature=None):
+    def stream_chat(
+        self,
+        messages,
+        *,
+        max_tokens=None,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        cancel=None,
+        temperature=None,
+    ):
         yield from self._events
 
 

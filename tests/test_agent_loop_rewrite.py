@@ -352,6 +352,7 @@ def test_rewritten_evidence_is_evictable_and_prefix_stable():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        rewrite_on_followup=False,
     )
     turn1_final_prompt = serialize_messages(llm.calls[-1] + [
         {"role": "assistant", "content": "The solar system has eight planets [S1]."}
@@ -365,6 +366,7 @@ def test_rewritten_evidence_is_evictable_and_prefix_stable():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        rewrite_on_followup=False,
     )
     turn2_first_prompt = serialize_messages(llm.calls[-1])
 

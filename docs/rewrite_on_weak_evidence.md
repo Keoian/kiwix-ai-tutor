@@ -210,7 +210,110 @@ see `test_setting_off_is_byte_identical_to_no_rewrite_support`.
 
 ## Limits
 
-At most one forced rewrite round per turn; never on `action` routes; never
-when pre-search is already `strong`; bounded by the existing retrieval
-deadline. `research` schema keeps `query` working unchanged and adds
-`queries: string[]` (1-3, max 80 chars each) additively.
+At most one forced rewrite round per turn on the weak-evidence path (see
+"Follow-up rewrite" below for the separate, additional follow-up round);
+never on `action` routes; never when pre-search is already `strong`
+(except on a follow-up turn -- see below); bounded by the existing
+retrieval deadline. `research` schema keeps `query` working unchanged and
+adds `queries: string[]` (1-3, max 80 chars each) additively.
+
+## Follow-up rewrite
+
+Motivating transcript: in a lesson about DNA, Q1 "What's the largest
+molecule?", Q2 "What about DNA?", Q3 "Is it a molecule?" -- the tutor
+answered a generic "what is a molecule" essay for Q3, because the
+deterministic pre-search ran on the raw text "Is it a molecule?" and
+retrieved the "Molecule" article with `strong` evidence, so the
+weak-evidence mechanism above never even looked at it: the evidence was
+strong, just about the wrong thing.
+
+**Design choice: no detector gates this.** An earlier version of this
+fix (`tutor.app.followup.is_elliptical_followup`, still present as a
+pure, tested helper but no longer wired into `agent_loop`) tried to
+detect "this question only makes sense in context" via pronouns
+("it"/"that"/...), bare openers ("what about", "why"), and a low
+content-term count. It was dropped as the gate: a real student's own
+grammar or spelling can't be relied on to signal an unresolved reference
+reliably enough to gate a correctness fix on. Instead, **every turn after
+the lesson's first** forces a follow-up rewrite round, unconditionally
+(`[app] rewrite_on_followup`, default `True`), regardless of how strong
+the raw pre-search looks.
+
+**Mechanism.** The raw pre-search (on the literal question text) still
+always runs first, exactly as before -- its passages are never discarded,
+only demoted. Before the model ever sees that raw evidence, the host
+forces one `research` tool call (`_run_forced_rewrite_round`, the same
+`_forced_research_tool_call` primitive as the weak-evidence path above)
+using a follow-up-specific host note (`_FOLLOWUP_HOST_NOTE`): write 1-3
+short standalone queries that resolve any pronoun/reference using the
+lesson so far, and fix spelling. The rewrite's own query results are
+merged via `_lead_with_backfill` -- the rewrite's own passages LEAD in
+rank order, and the raw pre-search's passages only fill remaining slots
+behind them (never RRF-blended as equals, unlike the weak-evidence path's
+own-query merge): the raw pre-search is demoted to backfill, not
+discarded, since it can still be a correct answer to a question that
+happens not to be elliptical (e.g. turn 2 asking a brand new, fully
+standalone question). If the merged result is still `weak`/`empty`, the
+existing weak-evidence mechanism gets exactly one more forced round on
+top (capped: never a third round) -- otherwise the merged evidence is
+used directly, with a short instruction appended after it
+(`_FOLLOWUP_DIRECTNESS_NOTE`): answer the student's actual question
+directly first (yes/no, if it's a yes/no question), then explain.
+
+Turn 1 is unaffected (no prior turns to reference): the raw pre-search
+and the existing weak-evidence mechanism run exactly as documented above,
+byte-for-byte.
+
+**Cost.** One extra forced tool-call round (append-only, prompt-cache
+preserving, same mechanism/latency profile as the weak-evidence round)
+plus one extra batched `research_many` call, on every turn after the
+first, not only "weak" ones -- see the live smoke measurement below for
+the added wall-clock cost this trades for correctness on a follow-up
+turn.
+
+**Setting.** `[app] rewrite_on_followup` (`AppConfig.rewrite_on_followup`),
+default `True`. `False` disables only this mechanism; the weak-evidence
+rewrite above is unaffected and still applies to every turn including the
+first.
+
+**Tests.** `tests/test_agent_loop_followup.py`: fires on turn 2 even when
+the raw pre-search is independently `strong` (asserting the rewrite's own
+passage leads the raw pre-search's passage in the rendered evidence
+text); never fires on turn 1; disabled cleanly by the setting. Detector
+unit tests for the retained-but-unused `is_elliptical_followup` helper
+are in `tests/test_followup.py`.
+
+### Live smoke (`data/rewrite_followup_smoke.py`)
+
+Run in-process (build_deps + TestClient, `config/archives.simplewiki_only.toml`)
+against the real dev llama-server already running on :8080, comparing
+`rewrite_on_followup` ON vs OFF for the exact motivating 3-turn lesson
+(Q1 "What's the largest molecule?", Q2 "What about DNA?", Q3 "Is it a
+molecule?"):
+
+- **ON**: turn 3 forced a rewrite round every time, rewriting to `"Is DNA
+  a molecule?"` (turns 2 and 3 both rewrote to this same query); turn 3
+  answer's first sentence: "Yes, DNA (Deoxyribonucleic Acid) is a
+  molecule." -- direct yes/no first, as instructed.
+- **OFF**: turn 3's raw pre-search on "Is it a molecule?" happened, on
+  this particular archive/model run, to still land on DNA-relevant
+  evidence (no rewrite fired at all, `rewritten_queries: []`), giving a
+  similarly correct first sentence ("Yes, DNA is a molecule."). This
+  does **not** contradict the original bug report -- the original
+  failure (a generic "what is a molecule" essay) depended on the raw
+  pre-search retrieving the wrong article, which is exactly the failure
+  mode this mechanism removes reliance on, not one guaranteed to
+  reproduce identically on every run/archive/model sampling.
+- **Added wall-clock cost, turn 3, ON vs OFF (single run, this
+  archive/model)**: ON 16.30 s vs OFF 5.56 s -- **+10.74 s** for the
+  extra forced tool-call round plus its `research_many` batch. This is a
+  single measurement, not an average; expect run-to-run variance similar
+  to the weak-evidence path's own measured 9-17 s range for a rewrite
+  round (see "Follow-up: latency and merged-order fixes" above).
+
+**Not verified live**: a case where the raw pre-search's `strong`
+evidence is demonstrably WRONG-TOPIC on this exact archive/model
+combination (to directly reproduce the original bug's wrong-answer
+outcome end-to-end); the cascade into a second (weak-evidence) round
+after a weak follow-up-rewrite merge; behaviour with `rewrite_on_followup`
+default (ON) against a longer, multi-topic lesson.
