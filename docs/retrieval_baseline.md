@@ -1527,3 +1527,50 @@ Xapian AND query ("garden" vs "gardening"), and the per-term
 entity-search window is crowded out by generic stems. JOIN never engages
 when both halves already look common (e.g. "sun flower"). Residual
 classes for the follow-up model-rewrite step to catch.
+
+## Baseline v14 -- morphological variants on weak evidence
+
+**Measured** (`_expand_morph_variants` in `research.py`, toggle
+`TUTOR_RETRIEVAL_MORPH_VARIANTS`, default ON; `data/morph_v14_tuning.py`,
+`data/morph_v14_probes.py`, real archive, `config/archives.simplewiki_only.toml`).
+
+**Tuning split (n=42, 2 runs each)**:
+
+| metric | OFF | ON |
+|---|---|---|
+| recall@1/3/5 | 0.595/0.690/0.762 | 0.595/0.690/0.762 |
+| MRR | 0.645 | 0.645 |
+| mean latency (s) | 0.997/1.003 | 1.003/1.010 |
+| p95 latency (s) | 2.625/2.937 | 2.953/2.453 |
+
+Expansion fired on 2/42 questions; 0/42 top-5 changed. Mean latency delta
+~+0.006-0.007s, well under the +0.05s acceptance bar. No recall/MRR
+regression -- **acceptance met**.
+
+**Probes, gold-in-top5 OFF->ON**: kid_phrasing_probes.jsonl (n=18)
+2/18=0.111 -> 2/18=0.111 unchanged; misspelling_probes.jsonl (n=10)
+5/10=0.500 -> 5/10=0.500 unchanged. Expansion fired on several probe
+questions (kid07 `work`, kid10 `vulcano`/`erupt`, kid18 `way`, msp02
+`freezing`, msp03 `work`/`plants`) but in every fired case the top-5 was
+byte-identical OFF vs ON -- expansion never changed a ranking in this
+sample, for better or worse.
+
+**"how to squarefoot garden the right way?"** (kid01): top-5 ON is empty
+(`status=empty`, `corrected_terms={'squarefoot': 'square foot'}`,
+`expanded_terms={}`) -- "Square foot gardening" does **not** appear in the
+top-5; the compound-split correction fires (v13 behavior) but the morph
+expander does not engage for "garden"/"garden the" here, so no variant
+search occurs.
+
+**False expansions**: none observed with real effect -- every fired
+expansion above left the top-5 unchanged, so no case of a rule making
+results worse or pulling in an unrelated sense (e.g. "new"->"news") was
+seen in the tuning + probe sets. Note (inferred, not tested): the
+generated variant lists include implausible forms (`workly`, `erupter`,
+`erupment`, `vulcanoment`) that never mattered here only because they
+never won a match; no fix made since no harmful case was measured and
+the task scopes a fix to a one-line change with a test, which isn't
+warranted absent evidence of harm.
+
+**Conclusion**: ships as default -- no tuning regression, latency within
+budget, no probe regression or improvement, no observed false expansion.
