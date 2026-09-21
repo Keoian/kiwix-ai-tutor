@@ -374,3 +374,67 @@ def test_percent_item_is_tagged_kind_percent():
     answer = "12.5% of 640 is calculated by multiplying, which equals 80."
     item = _one(check_computed_statements(answer, evaluate=_stub_evaluate), status="verified")
     assert item["kind"] == "percent"
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-21 owner-reported LIVE crash (Ling, "What is puberty?"): a Unicode
+# minus sign (U+2212, "−") or en dash used as a minus ("–") in the model's
+# text must never raise out of check_computed_statements and fail the
+# turn. Also: check_computed_statements itself must be exception-proof --
+# a checker crashing must never break an answered turn.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "It got as low as −70°C (−94°F).",
+        "The pH dropped by –5 over the week.",
+        "10−3 is seven.",
+        "Kids usually grow 1–2 years apart.",
+        "A healthy blood pH is 7.4–7.8.",
+    ],
+)
+def test_unicode_minus_and_en_dash_inputs_never_raise(answer):
+    # Real evaluator (subprocess), not the stub -- exercises the actual
+    # production path end to end. Must not raise, whatever it returns.
+    check_computed_statements(answer)
+
+
+def test_unicode_minus_temperature_still_verifies_correctly():
+    answer = "It got as low as −70°C (−94°F)."
+    items = check_computed_statements(answer, evaluate=_stub_evaluate)
+    item = _one(items, status="verified")
+    assert item["kind"] == "temp"
+    assert item["computed"] == pytest.approx(-94.0, abs=1e-2)
+
+
+def test_unicode_minus_temperature_mismatch_does_not_raise():
+    # Regression for the exact live crash: a MISMATCHING temperature pair
+    # (forcing _within_tolerance's decimal-rounding fallback branch) whose
+    # stated value is written with a Unicode minus sign must not raise.
+    answer = "It got as low as −70°C (−90°F)."
+    items = check_computed_statements(answer, evaluate=_stub_evaluate)
+    item = _one(items, status="mismatch")
+    assert item["stated"] == pytest.approx(-90.0)
+
+
+def test_digit_en_dash_digit_range_produces_no_chain_item():
+    # "1–2 years" is a range, not a computation -- must not be
+    # misread as chain arithmetic.
+    answer = "Kids usually grow 1–2 years apart."
+    items = check_computed_statements(answer, evaluate=_stub_evaluate)
+    assert items == []
+
+
+def test_check_computed_statements_never_propagates_a_raising_evaluator():
+    """A checker must never break an answered turn: if the evaluator
+    itself raises (or anything else inside the scan blows up), the
+    function swallows it and returns "no computed items" rather than
+    propagating."""
+
+    def _boom(expr: str) -> dict:
+        raise RuntimeError("evaluator exploded")
+
+    answer = "12.5% of 640 is 80."
+    assert check_computed_statements(answer, evaluate=_boom) == []

@@ -37,10 +37,13 @@ item is emitted with ``span=None``.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable
 
 from tutor.tools.calc_tool import evaluate as _default_evaluate
+
+_logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Shared number/operator vocabulary
@@ -117,7 +120,13 @@ def _within_tolerance(stated: float, computed: float, stated_str: str) -> bool:
     decimals = 0
     if "." in stated_str:
         decimals = len(stated_str.split(".")[-1])
-    return round(computed, decimals) == round(float(stated_str.replace(",", "")), decimals)
+    # 2026-09-21 owner-reported LIVE crash (Ling, "What is puberty?"): a
+    # Unicode minus sign (U+2212, "−") in ``stated_str`` made a bare
+    # ``float()`` here raise ValueError and fail the whole turn. Reuse
+    # ``_to_float`` (normalizes both the thousands separator and the
+    # Unicode minus) instead of a raw ``float()`` call, same as every
+    # other numeric-string-to-float conversion in this module.
+    return round(computed, decimals) == round(_to_float(stated_str), decimals)
 
 
 def _run_evaluate(evaluate: EvaluateFn, expr: str) -> float | None:
@@ -362,20 +371,11 @@ def _question_gap_items(
     return items
 
 
-def check_computed_statements(
+def _scan_computed_statements(
     answer_text: str,
-    question_text: str | None = None,
-    *,
-    evaluate: EvaluateFn | None = None,
+    question_text: str | None,
+    evaluate: EvaluateFn,
 ) -> list[dict]:
-    """Scan ``answer_text`` (and, for the "the answer skipped the number
-    entirely" case, ``question_text``) for explicit arithmetic claims and
-    verify each against ``evaluate`` (defaults to
-    ``tutor.tools.calc_tool.evaluate``). Returns a list of items,
-    ``{"span", "expression", "stated", "computed", "status"}``, in the
-    order found. Never raises for malformed input; a candidate expression
-    the evaluator itself rejects is simply dropped, not reported."""
-    evaluate = evaluate or _default_evaluate
     items: list[dict] = []
     items.extend(_percent_items(answer_text, evaluate))
 
@@ -396,3 +396,37 @@ def check_computed_statements(
     )
     items.sort(key=lambda it: (it["span"] is None, it["span"] or (0, 0)))
     return items
+
+
+def check_computed_statements(
+    answer_text: str,
+    question_text: str | None = None,
+    *,
+    evaluate: EvaluateFn | None = None,
+) -> list[dict]:
+    """Scan ``answer_text`` (and, for the "the answer skipped the number
+    entirely" case, ``question_text``) for explicit arithmetic claims and
+    verify each against ``evaluate`` (defaults to
+    ``tutor.tools.calc_tool.evaluate``). Returns a list of items,
+    ``{"span", "expression", "stated", "computed", "status", "kind"}``, in
+    the order found. Never raises for malformed input; a candidate
+    expression the evaluator itself rejects is simply dropped, not
+    reported.
+
+    2026-09-21 owner-reported LIVE crash (Ling, "What is puberty?"): an
+    uncaught exception inside this scan (a Unicode-minus float() crash,
+    see ``_within_tolerance``, was the one that actually happened live)
+    failed the WHOLE turn -- the student never got an answer at all. A
+    checker must never break an answered turn, so the entire scan is
+    wrapped here: any exception, from any cause including a raising
+    ``evaluate``, is caught, logged, and yields "no computed items"
+    instead of propagating. This is this function's own boundary --
+    tutor/app/compose.py (owned by another agent) already wraps its call
+    site the same way, but that must not be this module's only safety
+    net."""
+    evaluate = evaluate or _default_evaluate
+    try:
+        return _scan_computed_statements(answer_text, question_text, evaluate)
+    except Exception:  # noqa: BLE001 - a checker must never break an answered turn
+        _logger.exception("check_computed_statements failed; treating as no computed items")
+        return []
