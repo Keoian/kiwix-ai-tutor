@@ -23,7 +23,15 @@ Contract decisions made here (spec silent):
 
 from __future__ import annotations
 
-from tutor.app.citations import Citation, extract_labels, render_evidence, resolve_citations
+from pathlib import Path as _Path
+
+from tutor.app.citations import (
+    Citation,
+    _sentence_spans,
+    extract_labels,
+    render_evidence,
+    resolve_citations,
+)
 
 
 def _passage(
@@ -376,3 +384,68 @@ def test_detect_evidence_dump_true_for_label_stacking_on_one_sentence():
     text = "This is supported by everything [S1][S2][S3][S4]."
     citations = resolve_citations(text, passages)
     assert detect_evidence_dump(text, citations, passages) is True
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-20 tables feedback: `_sentence_spans` treats a markdown table ROW
+# and a list item as one unit rather than splitting at "1." or inside a
+# cell. Fixture reconstructs the owner's real square-foot-garden answer
+# (4-row table with the same syntax quirks: a bold step cell, `<br>*`
+# bullets inside cells, a row whose bold spans two cells) plus a heading
+# and a `- ` list.
+# ---------------------------------------------------------------------------
+
+def _load_table_answer() -> str:
+    path = _Path(__file__).resolve().parent / "fixtures" / "table_answer.md"
+    return path.read_text(encoding="utf-8")
+
+
+def test_table_row_units_never_split_inside_list_numbering_or_table_syntax():
+    text = _load_table_answer()
+    spans = _sentence_spans(text)
+    for start, end in spans:
+        unit = text[start:end]
+        # Never a span that IS (or ends inside) a bare list-numbering marker
+        # like "1." with nothing else -- covered by _is_short_non_claim for
+        # bona fide bare markers, but the span itself must also never START
+        # or END strictly inside a "\d+\." run split off mid-token.
+        assert not unit.rstrip().endswith("<br>")
+        assert unit.strip() not in {"|", "---", "<br>"}
+        # A span must never be pure table/list syntax with no content.
+        stripped_syntax = unit.strip().strip("|-: ")
+        assert stripped_syntax != "" or "\n" in unit
+
+
+def test_table_body_row_count_matches_unit_count_for_rows():
+    text = _load_table_answer()
+    spans = _sentence_spans(text)
+    units = [text[s:e] for s, e in spans]
+    row_units = [u for u in units if u.strip().startswith("|") and u.strip().endswith("|")]
+    # 4 body rows in the fixture table (header + separator excluded as
+    # non-claims and produce no span at all).
+    assert len(row_units) == 4
+
+
+def test_table_header_and_separator_rows_produce_no_span():
+    text = _load_table_answer()
+    spans = _sentence_spans(text)
+    units = [text[s:e] for s, e in spans]
+    assert not any("Step" in u and "What to Do" in u for u in units)
+    assert not any(set(u.strip()) <= set("|- :") for u in units)
+
+
+def test_list_item_unit_keeps_its_number_intact():
+    text = "1. Choose a bed size.\n2. Pick a sunny spot."
+    spans = _sentence_spans(text)
+    units = [text[s:e] for s, e in spans]
+    assert "1. Choose a bed size." in units
+    assert "2. Pick a sunny spot." in units
+
+
+def test_quick_tips_list_items_are_their_own_units():
+    text = _load_table_answer()
+    spans = _sentence_spans(text)
+    units = [text[s:e] for s, e in spans]
+    assert any(u.startswith("- Water consistently") for u in units)
+    assert any(u.startswith("- Rotate crops") for u in units)
+    assert any(u.startswith("- Thin seedlings") for u in units)

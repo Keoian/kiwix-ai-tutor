@@ -289,24 +289,86 @@ def _figures(text: str) -> set[str]:
     return set(_FIGURE_RE.findall(_normalize_minus(_strip_label_noise(text))))
 
 
+# Markdown table row / separator (2026-09-20 structure-aware attribution
+# follow-up, tables feedback): a pipe-delimited row, and the "|---|---|"
+# style separator row that follows a header. A list item line ("- foo" or
+# "1. foo").
+_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_SEP_RE = re.compile(r"^\s*\|?(\s*:?-+:?\s*\|)+\s*:?-*:?\s*\|?\s*$")
+_LIST_ITEM_LINE_RE = re.compile(r"^\s*(?:[-*]|\d+[.)])\s+")
+
+
+def _trimmed_span(text: str, s: int, e: int) -> tuple[int, int] | None:
+    chunk = text[s:e]
+    lstrip = len(chunk) - len(chunk.lstrip())
+    rstrip = len(chunk) - len(chunk.rstrip())
+    ns, ne = s + lstrip, e - rstrip
+    return (ns, ne) if ns < ne else None
+
+
 def _sentence_spans(text: str) -> list[tuple[int, int]]:
-    """Sentence/bullet-line spans into the ORIGINAL ``text``, split at the
-    same points as ``_sentences`` but keeping character offsets (leading
-    and trailing whitespace trimmed from each span)."""
-    bounds = []
-    start = 0
-    for m in _SENTENCE_SPLIT_RE.finditer(text):
-        bounds.append((start, m.start()))
-        start = m.end()
-    bounds.append((start, len(text)))
-    spans = []
-    for s, e in bounds:
-        chunk = text[s:e]
-        lstrip = len(chunk) - len(chunk.lstrip())
-        rstrip = len(chunk) - len(chunk.rstrip())
-        ns, ne = s + lstrip, e - rstrip
-        if ns < ne:
-            spans.append((ns, ne))
+    """Sentence/bullet-line/table-row spans into the ORIGINAL ``text``.
+
+    A markdown table ROW and a list item are each treated as ONE unit --
+    never split at "1." or inside a cell -- so no span boundary can fall
+    inside list numbering or land on pipe/``<br>`` table syntax alone. A
+    table's header row and its ``---`` separator row are non-claims and
+    produce no span at all. Everything else (plain paragraph text) is
+    split the same way ``_sentences`` always has been, on sentence
+    terminators or blank lines, keeping character offsets (leading/
+    trailing whitespace trimmed from each span)."""
+    lines = text.split("\n")
+    line_starts: list[int] = []
+    pos = 0
+    for line in lines:
+        line_starts.append(pos)
+        pos += len(line) + 1
+
+    spans: list[tuple[int, int]] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        if _TABLE_ROW_RE.match(line) and i + 1 < n and _TABLE_SEP_RE.match(lines[i + 1]):
+            # Header row + separator row: both non-claims, no span at all.
+            i += 2
+            while i < n and _TABLE_ROW_RE.match(lines[i]):
+                row_span = _trimmed_span(text, line_starts[i], line_starts[i] + len(lines[i]))
+                if row_span is not None:
+                    spans.append(row_span)
+                i += 1
+            continue
+        if _LIST_ITEM_LINE_RE.match(line):
+            item_span = _trimmed_span(text, line_starts[i], line_starts[i] + len(line))
+            if item_span is not None:
+                spans.append(item_span)
+            i += 1
+            continue
+
+        # Paragraph: gather consecutive non-table/non-list lines and split
+        # them the old punctuation-based way, preserving offsets.
+        j = i
+        while j < n:
+            nxt = lines[j]
+            if _LIST_ITEM_LINE_RE.match(nxt):
+                break
+            if _TABLE_ROW_RE.match(nxt) and j + 1 < n and _TABLE_SEP_RE.match(lines[j + 1]):
+                break
+            j += 1
+        para_start = line_starts[i]
+        para_end = line_starts[j - 1] + len(lines[j - 1]) if j > i else para_start
+        para_text = text[para_start:para_end]
+        bounds = []
+        start = 0
+        for m in _SENTENCE_SPLIT_RE.finditer(para_text):
+            bounds.append((start, m.start()))
+            start = m.end()
+        bounds.append((start, len(para_text)))
+        for s, e in bounds:
+            span = _trimmed_span(para_text, s, e)
+            if span is not None:
+                spans.append((para_start + span[0], para_start + span[1]))
+        i = j if j > i else i + 1
     return spans
 
 
