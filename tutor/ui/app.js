@@ -1222,7 +1222,15 @@
     // the same (or another) passage. Only when nothing was backed at all,
     // and nothing was verified by the calculator, do we tell the student
     // this answer came from the model's own knowledge.
-    if (!hasHostBackedContent(attributionsEvent)) {
+    // "skipped" (app.model_may_skip_search): the model decided no library
+    // search was needed for this message (student chatting, talking about
+    // themselves, thanking the tutor, etc) -- no search ran, so there is
+    // nothing to report as "not found in the library"; that note would be
+    // actively wrong here.
+    var evidenceSkipped = !!(
+      doneData && doneData.evidence && doneData.evidence.level_after === "skipped"
+    );
+    if (!evidenceSkipped && !hasHostBackedContent(attributionsEvent)) {
       appendUnsupportedSourcesNote(attributionsEvent);
     }
     if (doneData && doneData.truncated) {
@@ -1496,6 +1504,17 @@
       // there. Here it drives the working bubble's live status line until
       // the first token arrives.
       if (working) working.setStatus(data.stage, data.detail);
+      return;
+    }
+
+    if (eventName === "tool") {
+      // A tool event (the forced search call, a voluntary search, calc) arrives
+      // BEFORE the answer starts. It must not touch the tutor node: fetching it
+      // removes the working bubble, which left the student with no status for
+      // the whole search-and-read phase (owner report, 2026-09-21).
+      if (data.kind === "calc" || data.name === "calc") {
+        appendCalcResult(data.result !== undefined ? String(data.result) : JSON.stringify(data));
+      }
       return;
     }
 
@@ -1900,6 +1919,8 @@
       stripModelSourceBlocks: stripModelSourceBlocks,
       collapseInventedLinks: collapseInventedLinks,
       collapseInventedLinksWithTranslate: collapseInventedLinksWithTranslate,
+      appendSearchedForLine: appendSearchedForLine,
+      applyCitationQuality: applyCitationQuality,
     };
   }
 })();
