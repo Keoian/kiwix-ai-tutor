@@ -1490,3 +1490,40 @@ cold-cache mean was not separately re-run here, inferred comparable to the
 measures).
 
 Target (<= 1.0s mean, warm cache) met: 0.824-0.927s.
+
+## Baseline v13 -- evidence assessment + compound-word variants
+
+**assess_evidence** (`tutor/retrieval/assessment.py`, additive
+`ResearchResponse.assessment`): coverage = fraction of the question's own
+key terms (minus question fillers right/way/kind/best/...) whose
+`singularize`d stem appears in the top-3 passages' title+text. `empty` =
+no passages; `weak` = coverage < 0.5; else `strong`. 0.5 measured on the
+42-question tuning split: every gold-in-top-5 case scored strong, every
+observed miss scored weak/empty (0 misses called strong -- the costly
+error). No absolute score floor: BM25/RRF scores are not comparable in
+magnitude across differently-shaped queries (checked), so per the task's
+own instruction that signal is unused.
+
+**Compound variants** (`_correct_compounds` in `research.py`): SPLIT a
+near-zero term (<=5 matches, looser than the spelling fallback's strict
+zero since a fused word like "solarsystem" can carry incidental matches)
+at cuts where both halves clear 200 matches (not the spelling fallback's
+3 -- a junk fragment from splitting a real misspelling, e.g.
+"dinasors"->"dina"/"sors", showed inflated counts under 3, measured on
+the tuning misspelling probes). JOIN adjacent pairs into fused/hyphenated
+form when the pair-phrase is near-zero and the joined form has matches.
+Batched via `multi`; corrected words merge into `term_matches` (existing
+rarest-term search) and the joined query is re-issued, recorded in
+`corrected_terms`. Gated on weak signal only (no initial hits, or a
+zero/near-zero term) -- never on strong.
+
+**No regression**: tuning recall@1/3/5/MRR identical to v12
+(0.595/0.690/0.762/0.645), latency 0.826s mean (was 0.839s), 0 changed
+top-5. **kid_phrasing_probes.jsonl (n=18, new)**: recall@5 0.167 -> 0.167
+unchanged; `corrected_terms` fires for "squarefoot"->"square foot" and
+"solarsystem"->"solar system" (silently-wrong "ok" becomes
+"empty"+correction), but neither reaches top-5: no stemming in the
+Xapian AND query ("garden" vs "gardening"), and the per-term
+entity-search window is crowded out by generic stems. JOIN never engages
+when both halves already look common (e.g. "sun flower"). Residual
+classes for the follow-up model-rewrite step to catch.

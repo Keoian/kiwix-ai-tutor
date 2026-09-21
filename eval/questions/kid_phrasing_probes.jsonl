@@ -1,0 +1,18 @@
+{"id": "kid01", "question": "how to squarefoot garden the right way?", "expected_paths": ["Square_foot_gardening"], "category": "kid_phrasing_probe", "split": "tuning"}
+{"id": "kid02", "question": "how do you do square foot gardening the right way?", "expected_paths": ["Square_foot_gardening"], "category": "kid_phrasing_probe", "split": "tuning"}
+{"id": "kid03", "question": "what animals live in the rainforest?", "expected_paths": ["Rainforest"], "category": "kid_phrasing_probe", "split": "tuning"}
+{"id": "kid04", "question": "what animals live in the rain forest?", "expected_paths": ["Rainforest"], "category": "kid_phrasing_probe", "split": "tuning"}
+{"id": "kid05", "question": "how big is the solarsystem?", "expected_paths": ["Solar_System"], "category": "kid_phrasing_probe", "split": "tuning"}
+{"id": "kid06", "question": "how does photo synthesis work in plants?", "expected_paths": ["Photosynthesis"], "category": "kid_phrasing_probe", "split": "tuning"}
+{"id": "kid07", "question": "how does fotosinthesis work?", "expected_paths": ["Photosynthesis"], "category": "kid_phrasing_probe", "split": "tuning"}
+{"id": "kid08", "question": "what causes an earth quake?", "expected_paths": ["Earthquake"], "category": "kid_phrasing_probe", "split": "tuning"}
+{"id": "kid09", "question": "what causes an earthquake the right way to understand it?", "expected_paths": ["Earthquake"], "category": "kid_phrasing_probe", "split": "tuning"}
+{"id": "kid10", "question": "why does a vulcano erupt?", "expected_paths": ["Volcano"], "category": "kid_phrasing_probe", "split": "tuning"}
+{"id": "kid11", "question": "what were dinasors like a long time ago?", "expected_paths": ["Dinosaur"], "category": "kid_phrasing_probe", "split": "tuning"}
+{"id": "kid12", "question": "how does a sun flower grow towards the light?", "expected_paths": ["Sunflower"], "category": "kid_phrasing_probe", "split": "tuning"}
+{"id": "kid13", "question": "how does a butterfly change from a caterpiller the right way?", "expected_paths": ["Butterfly"], "category": "kid_phrasing_probe", "split": "tuning"}
+{"id": "kid14", "question": "what is the best way to ride a skate board?", "expected_paths": ["Skateboard"], "category": "kid_phrasing_probe", "split": "tuning"}
+{"id": "kid15", "question": "how do you build a snow man the right way?", "expected_paths": ["Snowman"], "category": "kid_phrasing_probe", "split": "tuning"}
+{"id": "kid16", "question": "what makes a thunder storm happen?", "expected_paths": ["Thunderstorm"], "category": "kid_phrasing_probe", "split": "tuning"}
+{"id": "kid17", "question": "how do you make compost the right way for a garden?", "expected_paths": ["Compost"], "category": "kid_phrasing_probe", "split": "tuning"}
+{"id": "kid18", "question": "what is the right way to do recyckling at home?", "expected_paths": ["Recycling"], "category": "kid_phrasing_probe", "split": "tuning"}

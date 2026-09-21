@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from tutor.retrieval.assessment import assess_evidence
 from tutor.retrieval.hybrid.dense import DenseIndex
 from tutor.retrieval.hybrid.diversity import cap_per_article
 from tutor.retrieval.hybrid.lexical import (
@@ -150,6 +151,40 @@ _SPELL_MIN_CORRECTED_MATCHES = 3
 # Set to "0" to force the fallback off entirely (e.g. to reproduce pre-v11
 # behavior exactly for an A/B comparison).
 _SPELL_FALLBACK_ENABLED = os.environ.get("TUTOR_RETRIEVAL_SPELLING_FALLBACK", "1") != "0"
+
+# Baseline v13 (docs/retrieval_baseline.md "Baseline v13"): kids fuse
+# ("squarefoot", "solarsystem") or split ("photo synthesis", "earth
+# quake") compound words. Both directions are tried ONLY when this
+# archive's first pass already looks weak (see the call site: no fulltext/
+# title hits at all, or a term has ~zero corpus-wide matches) -- never on
+# an otherwise-strong result. A SPLIT candidate is accepted only when BOTH
+# halves individually clear this many corpus-wide matches (otherwise a
+# split of a genuinely rare-but-real term into two meaningless fragments
+# would look "healthy" by accident); among qualifying splits the one whose
+# phrase query has the most matches wins. A JOIN candidate (adjacent-word
+# pair) is accepted only when the two words together, as an exact phrase,
+# have (near) zero matches -- i.e. that literal pairing basically never
+# occurs -- while the fused or hyphenated form does.
+_COMPOUND_MIN_HALF_LEN = 4
+# Measured on the tuning split (docs/retrieval_baseline.md "Baseline v13"):
+# a short (3-4 char) junk fragment from splitting a genuine misspelling
+# (e.g. "dinasors" -> "dina"/"sors") can still show a deceptively large
+# raw estimated_matches count (Xapian's query parser treats a very short
+# term almost like a stopword/substring match), so a low bar like the
+# spelling fallback's ``_SPELL_MIN_CORRECTED_MATCHES`` (3) let false
+# splits through. 200 was the smallest threshold that rejected every
+# false split found on the tuning split's misspelling probes while still
+# accepting every real compound half (e.g. "square"/8109, "foot"/2515,
+# "solar"/"system").
+_COMPOUND_MIN_HALF_MATCHES = 200
+_COMPOUND_JOIN_PHRASE_CEILING = 0
+_MAX_COMPOUND_TERMS = 2
+# A fused compound word ("solarsystem") is a real, if unusual, index
+# token and can carry a small number of incidental matches (measured on
+# the tuning split: "solarsystem" -> 3) even though it is not the genuine
+# term -- looser than the spelling fallback's strict-zero
+# ``_SPELL_ZERO_MATCH_CEILING`` so this case is still tried for a split.
+_COMPOUND_NEAR_ZERO_CEILING = 5
 
 # Reuse plan §7.2 "Dense article top 16": the dense sidecar's own
 # candidate list, fused at article level with the lexical/title rankings
@@ -631,6 +666,12 @@ class ResearchResponse:
     dense_used: bool = False
     dense_note: str | None = None
     corrected_terms: dict[str, str] = field(default_factory=dict)
+    # Baseline v13 (docs/retrieval_baseline.md "Baseline v13"): additive
+    # evidence-strength signal (see tutor.retrieval.assessment) for the app
+    # layer to branch on later (weak/empty -> ask the model to rewrite the
+    # query). Never changes status/passages above; None only if assessment
+    # was skipped (e.g. a cached/legacy response built without it).
+    assessment: Any = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -643,6 +684,7 @@ class ResearchResponse:
             "dense_used": self.dense_used,
             "dense_note": self.dense_note,
             "corrected_terms": self.corrected_terms,
+            "assessment": self.assessment.to_dict() if self.assessment is not None else None,
         }
 
 
@@ -1093,6 +1135,142 @@ class ResearchEngine:
                 corrections[term] = (best_word, best_matches)
         return corrections
 
+    def _batch_estimated_matches(
+        self,
+        worker: Any,
+        queries: list[str],
+        *,
+        deadline_s: float,
+        memo: dict[tuple[Any, ...], dict[str, Any]] | None,
+    ) -> dict[str, int]:
+        """One ``multi`` round-trip of ``estimated_matches`` for each
+        distinct query string in ``queries`` (order-preserving dedupe).
+        Missing/failed sub-results degrade to ``0`` ("no signal"), same as
+        every other estimated-matches use in this module.
+        """
+        uniq = list(dict.fromkeys(queries))
+        if not uniq:
+            return {}
+        res = _call_worker_multi(
+            worker,
+            [("estimated_matches", {"term": q}) for q in uniq],
+            deadline_s=deadline_s,
+            memo=memo,
+        )
+        out: dict[str, int] = {}
+        for i, q in enumerate(uniq):
+            sub_result = (
+                res.value[i] if res is not None and res.status in ("ok", "partial") else None
+            )
+            if (
+                sub_result is not None
+                and sub_result["status"] == "ok"
+                and sub_result["value"] is not None
+            ):
+                out[q] = int(sub_result["value"])
+            else:
+                out[q] = 0
+        return out
+
+    def _correct_compounds(
+        self,
+        worker: Any,
+        entry: ArchiveEntry,
+        zero_terms: list[str],
+        ordered_tokens: list[str],
+        *,
+        deadline_s: float,
+        memo: dict[tuple[Any, ...], dict[str, Any]] | None,
+    ) -> tuple[dict[str, str], dict[str, int]]:
+        """Baseline v13: deterministic compound-word query variants for a
+        weak/empty first pass -- see the constants above for the exact
+        acceptance rule for each direction. Returns ``(corrected_terms,
+        term_matches)`` where ``corrected_terms`` maps the original
+        fused/split text to the corrected phrase/word (for
+        ``ResearchResponse.corrected_terms``, so the UI/model can say
+        "Searching for: square foot gardening"), and ``term_matches`` maps
+        each real word surfaced (both halves of a winning split, or the
+        winning joined/hyphenated form) to its own corpus-wide
+        ``estimated_matches`` -- merged by the caller into the normal
+        per-request ``term_matches`` so these real words flow through the
+        existing rarest-term title/full-text search machinery unchanged.
+        """
+        corrections: dict[str, str] = {}
+        match_counts: dict[str, int] = {}
+
+        # SPLITS: e.g. "squarefoot" -> ("square", "foot").
+        split_plan: dict[str, list[tuple[str, str]]] = {}
+        split_queries: list[str] = []
+        for term in zero_terms[:_MAX_COMPOUND_TERMS]:
+            if len(term) < 2 * _COMPOUND_MIN_HALF_LEN:
+                continue
+            cands = [
+                (term[:i], term[i:])
+                for i in range(_COMPOUND_MIN_HALF_LEN, len(term) - _COMPOUND_MIN_HALF_LEN + 1)
+            ]
+            if cands:
+                split_plan[term] = cands
+                for left, right in cands:
+                    split_queries.extend([left, right, f'"{left} {right}"'])
+        if split_plan and deadline_s > 0:
+            counts = self._batch_estimated_matches(
+                worker, split_queries, deadline_s=deadline_s, memo=memo
+            )
+            for term, cands in split_plan.items():
+                best: tuple[str, str] | None = None
+                best_phrase_matches = -1
+                for left, right in cands:
+                    if (
+                        counts.get(left, 0) >= _COMPOUND_MIN_HALF_MATCHES
+                        and counts.get(right, 0) >= _COMPOUND_MIN_HALF_MATCHES
+                    ):
+                        phrase_matches = counts.get(f'"{left} {right}"', 0)
+                        if phrase_matches > best_phrase_matches:
+                            best_phrase_matches = phrase_matches
+                            best = (left, right)
+                if best is not None:
+                    left, right = best
+                    corrections[term] = f"{left} {right}"
+                    match_counts[left] = counts.get(left, 0)
+                    match_counts[right] = counts.get(right, 0)
+
+        # JOINS: e.g. "sun" + "flower" -> "sunflower" (also tries the
+        # hyphenated form, "photo-synthesis"-style).
+        seen_pairs: set[tuple[str, str]] = set()
+        pairs: list[tuple[str, str]] = []
+        for a, b in zip(ordered_tokens, ordered_tokens[1:], strict=False):
+            if len(a) < _COMPOUND_MIN_HALF_LEN or len(b) < _COMPOUND_MIN_HALF_LEN:
+                continue
+            if (a, b) in seen_pairs:
+                continue
+            seen_pairs.add((a, b))
+            pairs.append((a, b))
+        pairs = pairs[:_MAX_COMPOUND_TERMS]
+        if pairs and deadline_s > 0:
+            join_queries: list[str] = []
+            for a, b in pairs:
+                join_queries.extend([f"{a}{b}", f'"{a} {b}"', f"{a}-{b}"])
+            counts = self._batch_estimated_matches(
+                worker, join_queries, deadline_s=deadline_s, memo=memo
+            )
+            for a, b in pairs:
+                joined, phrase, hyphen = f"{a}{b}", f'"{a} {b}"', f"{a}-{b}"
+                phrase_matches = counts.get(phrase, 0)
+                joined_matches = counts.get(joined, 0)
+                hyphen_matches = counts.get(hyphen, 0)
+                if phrase_matches <= _COMPOUND_JOIN_PHRASE_CEILING and (
+                    joined_matches > 0 or hyphen_matches > 0
+                ):
+                    key = f"{a} {b}"
+                    if joined_matches >= hyphen_matches:
+                        corrections[key] = joined
+                        match_counts[joined] = joined_matches
+                    else:
+                        corrections[key] = hyphen
+                        match_counts[hyphen] = hyphen_matches
+
+        return corrections, match_counts
+
     def _process_archive(
         self,
         entry: ArchiveEntry,
@@ -1360,6 +1538,101 @@ class ResearchEngine:
                     correction_terms.add(fixed)
                     if corrected_terms_out is not None:
                         corrected_terms_out[orig] = fixed
+            # A fused compound word ("solarsystem") is still a real (if
+            # unusual) token to the archive's search index -- it can have a
+            # handful of incidental corpus-wide matches (e.g. 3, from
+            # running-text typos elsewhere) even though it is NOT the
+            # genuine, common term. Splitting therefore uses a looser
+            # near-zero ceiling than the spelling fallback's strict-zero
+            # one; a term the spelling fallback already fixed (e.g.
+            # "dinasors" -> "dinosaurs") is a genuine misspelling, not a
+            # fused compound, so it is excluded from the split candidate
+            # list (trying to also SPLIT it risks a spurious accidental
+            # split of two short, individually-real-but-unrelated fragments
+            # overwriting a correct spelling fix).
+            near_zero_terms = [
+                t
+                for t in candidate_terms
+                if term_matches.get(t, 0) <= _COMPOUND_NEAR_ZERO_CEILING
+                and len(t) >= 2 * _COMPOUND_MIN_HALF_LEN
+                and t not in spelling_corrections
+            ]
+            # Baseline v13: compound-word (fused/split) variants -- only
+            # tried when this archive's first pass already looks weak
+            # (literally no fulltext/title hits from the joined query), a
+            # term has ~zero matches, or a term is a near-zero-match fused
+            # candidate, exactly like the spelling fallback above; never on
+            # an otherwise-strong result. The join direction (adjacent
+            # word pairs -- see ``_correct_compounds``) still needs at
+            # least one weak signal to engage too, even though neither
+            # half of a bad pairing is itself near-zero (both "sun" and
+            # "flower" are common) -- gated the same way rather than
+            # unconditionally, to bound worker calls to weak requests only.
+            compound_weak_signal = (
+                bool(zero_terms) or bool(near_zero_terms) or (not fulltext_hits and not title_hits)
+            )
+            if _SPELL_FALLBACK_ENABLED and compound_weak_signal and remaining() > 0:
+                compound_corrections, compound_matches = self._correct_compounds(
+                    worker,
+                    entry,
+                    near_zero_terms[:_MAX_COMPOUND_TERMS],
+                    tokens,
+                    deadline_s=_op_deadline(),
+                    memo=memo,
+                )
+                for word, matches in compound_matches.items():
+                    if matches > 0:
+                        term_matches[word] = matches
+                        correction_terms.add(word)
+                if compound_corrections and corrected_terms_out is not None:
+                    for orig, fixed in compound_corrections.items():
+                        corrected_terms_out[orig] = fixed
+                if compound_corrections and remaining() > 0:
+                    # Rebuild the joined query with each fused/split token
+                    # swapped for its corrected phrase/word (e.g.
+                    # "squarefoot garden right way" ->
+                    # "square foot garden right way") and re-issue the same
+                    # fulltext+title search the normal path already does --
+                    # this is what actually lets the AND-style joined query
+                    # find "Square foot gardening" (a single-term entity
+                    # title search for "square" or "foot" alone does not).
+                    corrected_tokens: list[str] = []
+                    for tok in tokens:
+                        if tok in compound_corrections:
+                            corrected_tokens.extend(compound_corrections[tok].split())
+                        else:
+                            corrected_tokens.append(tok)
+                    for orig_pair, fixed in compound_corrections.items():
+                        if " " in orig_pair:
+                            a, b = orig_pair.split(" ", 1)
+                            for i in range(len(corrected_tokens) - 1):
+                                if corrected_tokens[i] == a and corrected_tokens[i + 1] == b:
+                                    corrected_tokens[i : i + 2] = [fixed]
+                                    break
+                    corrected_query = " ".join(corrected_tokens)
+                    if corrected_query and corrected_query != search_query:
+                        compound_res = _call_worker_multi(
+                            worker,
+                            [
+                                (
+                                    "search_fulltext",
+                                    _fulltext_kwargs(corrected_query, _FULLTEXT_LIMIT),
+                                ),
+                                (
+                                    "search_titles",
+                                    {"query": corrected_query, "limit": _TITLE_LIMIT},
+                                ),
+                            ],
+                            deadline_s=_op_deadline(),
+                            memo=memo,
+                        )
+                        if compound_res is not None and compound_res.status in ("ok", "partial"):
+                            ft_sub = compound_res.value[0]
+                            ti_sub = compound_res.value[1]
+                            if ft_sub["status"] == "ok" and ft_sub["value"]:
+                                fulltext_hits = _dedupe_by_path([*fulltext_hits, *ft_sub["value"]])
+                            if ti_sub["status"] == "ok" and ti_sub["value"]:
+                                title_hits = _dedupe_by_path([*title_hits, *ti_sub["value"]])
             # Rarest (fewest corpus-wide matches) first; a term with zero
             # matches anywhere in the archive (a misspelling) carries no
             # rarity signal and is dropped, same rationale as
@@ -1937,6 +2210,7 @@ class ResearchEngine:
             dense_note="; ".join(dense_notes) if dense_notes else None,
             corrected_terms=dict(corrected_terms_out),
         )
+        response.assessment = assess_evidence(query, response)
         self._response_cache[cache_key] = response
         self._response_cache.move_to_end(cache_key)
         while len(self._response_cache) > _RESPONSE_CACHE_MAXSIZE:
