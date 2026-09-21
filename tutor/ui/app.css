@@ -385,6 +385,38 @@ button.attribution-marker {
   padding: 0 0.1rem;
 }
 
+.source-context-toggle,
+.source-context-page {
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.85rem;
+  margin: 0.25rem 0.25rem 0.25rem 0;
+  padding: 0.25rem 0.6rem;
+}
+
+.source-context {
+  border-top: 1px dashed var(--border);
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+}
+
+.source-context-text {
+  white-space: pre-wrap;
+}
+
+.source-context-label {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.source-context-error {
+  color: var(--muted);
+  font-style: italic;
+}
+
 #status-panel-body {
   margin: 0;
 }

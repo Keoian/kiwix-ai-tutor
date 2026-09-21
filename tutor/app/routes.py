@@ -16,7 +16,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from tutor.app.source_view import build_source_view
+from tutor.app.source_view import build_context_view, build_source_view
+from tutor.retrieval.research import ArticleUnavailable
 
 _ALLOWED_ACTIONS = {"simpler", "deeper", "hint", "research_this"}
 
@@ -143,6 +144,28 @@ def build_router(deps: Any) -> APIRouter:
         payload = asdict(view) if hasattr(view, "__dataclass_fields__") else dict(view.__dict__)
         payload["heading_path"] = list(view.heading_path)
         payload["highlight"] = {"start": view.highlight[0], "end": view.highlight[1]}
+        return JSONResponse(payload)
+
+    @router.get("/api/source/{passage_id}/context")
+    def source_context(passage_id: str, before: int = 1500, after: int = 1500):
+        snapshot = deps.snapshot_store.get(passage_id)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="unknown passage")
+        if deps.research_engine is None:
+            raise HTTPException(status_code=404, detail="article context not configured")
+        try:
+            article_text = deps.research_engine.fetch_article_text(
+                snapshot.archive_id, snapshot.path
+            )
+        except ArticleUnavailable:
+            return JSONResponse(
+                {
+                    "error": "archive_unavailable",
+                    "message": "The book is not available right now.",
+                },
+                status_code=503,
+            )
+        payload = build_context_view(snapshot, article_text, before=before, after=after)
         return JSONResponse(payload)
 
     @router.get("/api/status")

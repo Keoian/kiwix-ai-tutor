@@ -753,9 +753,17 @@
   // Source viewer
   // ---------------------------------------------------------------------
 
+  // "Show more of the article" state for the source panel currently open.
+  // Reset on every openSourceViewer call; before/after are cumulative char
+  // counts sent to the /context endpoint, growing by _CONTEXT_PAGE_CHARS
+  // each time "Show earlier"/"Show later" is used.
+  const _CONTEXT_PAGE_CHARS = 1500;
+  let currentContextState = null;
+
   async function openSourceViewer(passageId, answerSentence) {
     sourceViewerBody.textContent = "";
     sourceViewerBody.appendChild(el("p", { text: "Loading..." }));
+    currentContextState = null;
     try {
       const resp = await fetch("/api/source/" + encodeURIComponent(passageId));
       if (!resp.ok) {
@@ -764,11 +772,96 @@
         return;
       }
       const body = await resp.json();
-      renderSourceView(body, answerSentence);
+      renderSourceView(body, answerSentence, passageId);
     } catch (err) {
       sourceViewerBody.textContent = "";
       sourceViewerBody.appendChild(el("p", { text: "Could not load source." }));
     }
+  }
+
+  async function fetchArticleContext(passageId, before, after) {
+    const resp = await fetch(
+      "/api/source/" +
+        encodeURIComponent(passageId) +
+        "/context?before=" +
+        encodeURIComponent(before) +
+        "&after=" +
+        encodeURIComponent(after)
+    );
+    if (resp.status === 503) {
+      const body = await resp.json().catch(function () {
+        return {};
+      });
+      return { unavailable: true, message: body.message || "The book is not available right now." };
+    }
+    if (!resp.ok) {
+      return { unavailable: true, message: "Could not load more of the article." };
+    }
+    return await resp.json();
+  }
+
+  function renderExpandedContext(container, data, answerSentence) {
+    container.textContent = "";
+    if (data.unavailable) {
+      container.appendChild(el("p", { className: "source-context-error", text: data.message }));
+      return;
+    }
+    const text = data.text || "";
+    const passage = data.passage || { start: 0, end: 0 };
+    const sentenceSpan = findBestSentenceSpan(text, passage.start, passage.end, answerSentence);
+    const start = sentenceSpan ? sentenceSpan.start : passage.start;
+    const end = sentenceSpan ? sentenceSpan.end : passage.end;
+
+    const p = el("p", { className: "source-context-text" });
+    p.appendChild(document.createTextNode(text.slice(0, start)));
+    const highlight = el("span", {
+      className: "source-highlight",
+      attrs: { title: "What the tutor saw" },
+      text: text.slice(start, end),
+    });
+    p.appendChild(highlight);
+    p.appendChild(document.createTextNode(text.slice(end)));
+    container.appendChild(p);
+
+    const label = el("p", { className: "source-context-label", text: "What the tutor saw is highlighted above." });
+    container.appendChild(label);
+
+    const pagingRow = el("div", { className: "source-context-paging" });
+    if (data.more_before) {
+      const earlierBtn = el("button", { className: "source-context-page", text: "Show earlier" });
+      earlierBtn.type = "button";
+      earlierBtn.addEventListener("click", function () {
+        expandContext(answerSentence, { before: true });
+      });
+      pagingRow.appendChild(earlierBtn);
+    }
+    if (data.more_after) {
+      const laterBtn = el("button", { className: "source-context-page", text: "Show later" });
+      laterBtn.type = "button";
+      laterBtn.addEventListener("click", function () {
+        expandContext(answerSentence, { after: true });
+      });
+      pagingRow.appendChild(laterBtn);
+    }
+    if (pagingRow.childNodes.length) {
+      container.appendChild(pagingRow);
+    }
+  }
+
+  async function expandContext(answerSentence, grow) {
+    if (!currentContextState) return;
+    if (grow && grow.before) {
+      currentContextState.before += _CONTEXT_PAGE_CHARS;
+    }
+    if (grow && grow.after) {
+      currentContextState.after += _CONTEXT_PAGE_CHARS;
+    }
+    const data = await fetchArticleContext(
+      currentContextState.passageId,
+      currentContextState.before,
+      currentContextState.after
+    );
+    renderExpandedContext(currentContextState.container, data, answerSentence);
   }
 
   // 2026-09-20 sentence-level highlight (bug #5): the server highlight
@@ -806,7 +899,7 @@
     return bestScore > 0 ? best : null;
   }
 
-  function renderSourceView(body, answerSentence) {
+  function renderSourceView(body, answerSentence, passageId) {
     sourceViewerBody.textContent = "";
 
     const heading = el("h3", { text: body.title || "" });
@@ -842,6 +935,46 @@
 
     passage.appendChild(document.createTextNode(contextAfter));
     sourceViewerBody.appendChild(passage);
+
+    // "Show more of the article" (owner-requested reader affordance): the
+    // stored passage is a 400-char word-packed chunk that starts/ends
+    // mid-sentence; this expands it to surrounding article text fetched
+    // fresh from /api/source/{id}/context, keeping the model-received
+    // passage highlighted inside the longer text.
+    const expandContainer = el("div", { className: "source-context" });
+    expandContainer.style.display = "none";
+    const toggleBtn = el("button", {
+      className: "source-context-toggle",
+      text: "Show more of the article ▾",
+    });
+    toggleBtn.type = "button";
+    toggleBtn.setAttribute("aria-expanded", "false");
+    toggleBtn.addEventListener("click", async function () {
+      const expanded = toggleBtn.getAttribute("aria-expanded") === "true";
+      if (expanded) {
+        expandContainer.style.display = "none";
+        expandContainer.textContent = "";
+        toggleBtn.setAttribute("aria-expanded", "false");
+        toggleBtn.textContent = "Show more of the article ▾";
+        currentContextState = null;
+        return;
+      }
+      toggleBtn.setAttribute("aria-expanded", "true");
+      toggleBtn.textContent = "▴ Show less";
+      expandContainer.style.display = "";
+      expandContainer.textContent = "";
+      expandContainer.appendChild(el("p", { text: "Loading more of the article..." }));
+      currentContextState = {
+        passageId: passageId,
+        container: expandContainer,
+        before: _CONTEXT_PAGE_CHARS,
+        after: _CONTEXT_PAGE_CHARS,
+      };
+      const data = await fetchArticleContext(passageId, _CONTEXT_PAGE_CHARS, _CONTEXT_PAGE_CHARS);
+      renderExpandedContext(expandContainer, data, answerSentence);
+    });
+    sourceViewerBody.appendChild(toggleBtn);
+    sourceViewerBody.appendChild(expandContainer);
   }
 
   // ---------------------------------------------------------------------

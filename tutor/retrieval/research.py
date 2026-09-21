@@ -50,7 +50,7 @@ from tutor.retrieval.hybrid.ranking import (
     apply_title_boost,
 )
 from tutor.retrieval.hybrid.rrf import rrf_fuse
-from tutor.retrieval.registry import ArchiveEntry, Registry
+from tutor.retrieval.registry import ArchiveEntry, Registry, RegistryError
 from tutor.retrieval.snapshots import SnapshotStore
 from tutor.retrieval.zim.archive import fingerprint as fingerprint_archive
 from tutor.retrieval.zim.bundle import build_bundle
@@ -827,6 +827,14 @@ def _call_bounded(
     return value, None
 
 
+class ArticleUnavailable(Exception):
+    """Raised by :meth:`ResearchEngine.fetch_article_text` when the archive
+    or entry backing a stored passage cannot be read right now (archive
+    missing/unavailable, worker timeout/crash, or the entry no longer
+    resolves). Never carries a filesystem path -- the caller (a route)
+    turns this into a clean 503 for the UI."""
+
+
 class ResearchEngine:
     """The single research() entry point over a :class:`Registry` of archives."""
 
@@ -891,6 +899,35 @@ class ResearchEngine:
             worker = self._worker_factory(entry.path)
             self._workers[entry.id] = worker
         return worker
+
+    def fetch_article_text(
+        self, archive_id: str, path: str, *, deadline_s: float = 5.0
+    ) -> str:
+        """Re-render the article at ``path`` in ``archive_id`` to plain text
+        via the SAME extraction (``tutor.retrieval.zim.bundle.build_bundle``,
+        which calls ``content.render_text``) that produced the passages cut
+        from it, so a stored passage's ``text`` is guaranteed to be an exact
+        substring of the returned text at the same offsets.
+
+        Goes through this engine's own worker pool (``_get_worker``), so it
+        shares deadline handling and process reuse with ``research()``.
+        Raises :class:`ArticleUnavailable` -- never a lower-level exception
+        -- for an unknown archive id, a dead/timed-out worker, or a missing
+        entry, so callers (routes) can map this uniformly to a 503.
+        """
+        from tutor.retrieval.zim.bundle import build_bundle
+
+        try:
+            entry = self._registry.get(archive_id)
+        except RegistryError as exc:
+            raise ArticleUnavailable(str(exc)) from exc
+        worker = self._get_worker(entry)
+        result = worker.request("fetch_entry", deadline_s=deadline_s, path=path)
+        if result.status != "ok" or result.value is None:
+            raise ArticleUnavailable(result.error or f"fetch_entry status={result.status}")
+        fetched = result.value
+        bundle = build_bundle(fetched.html, path=fetched.path, title=fetched.title)
+        return bundle.text
 
     def _fingerprint_digest(self, entry: ArchiveEntry) -> str:
         digest = self._fingerprints.get(entry.id)

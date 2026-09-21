@@ -682,4 +682,5 @@ def build_deps(cfg: Any, *, llm: Any = None, research_engine: Any = None) -> App
         lessons=lessons,
         turn_logger=turn_logger,
         resource_monitor=resource_monitor,
+        research_engine=research_engine,
     )

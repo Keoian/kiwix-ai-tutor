@@ -30,7 +30,12 @@ Contract decisions made here (spec silent on exact function shapes):
 
 from __future__ import annotations
 
-from tutor.app.source_view import SourceView, build_source_view, sentence_span
+from tutor.app.source_view import (
+    SourceView,
+    build_context_view,
+    build_source_view,
+    sentence_span,
+)
 
 
 def _snapshot(
@@ -161,3 +166,103 @@ def test_sentence_span_unicode_safe():
     end = start + len("Café is nice")
     s, e = sentence_span(text, start, end)
     assert text[s:e].strip() == "Café is nice."
+
+
+# ---------------------------------------------------------------------------
+# build_context_view
+# ---------------------------------------------------------------------------
+
+
+def _long_article(passage_text="It boils at 100C at sea level."):
+    sentences = [f"Sentence number {i} goes here." for i in range(80)]
+    before = " ".join(sentences[:40])
+    after = " ".join(sentences[40:])
+    text = f"{before} {passage_text} {after}"
+    start = text.index(passage_text)
+    end = start + len(passage_text)
+    return text, start, end
+
+
+def test_context_view_passage_is_exact_substring_of_returned_text():
+    text, start, end = _long_article()
+    snap = _snapshot(text=text[start:end], start=start, end=end)
+    view = build_context_view(snap, text)
+    p = view["passage"]
+    assert view["text"][p["start"] : p["end"]] == text[start:end]
+
+
+def test_context_view_default_window_snaps_to_sentence_boundaries():
+    text, start, end = _long_article()
+    snap = _snapshot(text=text[start:end], start=start, end=end)
+    view = build_context_view(snap, text)
+    assert view["text"].strip().endswith(".")
+    assert view["text"].lstrip()[0:1].isupper() or view["text"].strip() == ""
+
+
+def test_context_view_more_before_and_after_flags():
+    text, start, end = _long_article()
+    snap = _snapshot(text=text[start:end], start=start, end=end)
+    view = build_context_view(snap, text, before=50, after=50)
+    assert view["more_before"] is True
+    assert view["more_after"] is True
+
+
+def test_context_view_paging_grows_window():
+    text, start, end = _long_article()
+    snap = _snapshot(text=text[start:end], start=start, end=end)
+    small = build_context_view(snap, text, before=20, after=20)
+    big = build_context_view(snap, text, before=500, after=500)
+    assert len(big["text"]) > len(small["text"])
+
+
+def test_context_view_hard_cap():
+    text, start, end = _long_article()
+    snap = _snapshot(text=text[start:end], start=start, end=end)
+    view = build_context_view(snap, text, before=100_000, after=100_000)
+    assert len(view["text"]) <= 8000
+    p = view["passage"]
+    assert view["text"][p["start"] : p["end"]] == text[start:end]
+
+
+def test_context_view_no_flags_at_article_edges():
+    text = "Short article. It boils at 100C at sea level. The end."
+    start = text.index("It boils")
+    end = start + len("It boils at 100C at sea level.")
+    snap = _snapshot(text=text[start:end], start=start, end=end)
+    view = build_context_view(snap, text, before=1000, after=1000)
+    assert view["more_before"] is False
+    assert view["more_after"] is False
+    assert view["text"] == text
+
+
+def test_context_view_owner_example_expands_to_complete_sentences():
+    """Regression for the owner's report: a 400-char word-packed passage
+    that starts/ends mid-sentence (e.g. "...the Great Pyramid of Giza in
+    Egypt , which held the") must expand, via /context, to whole sentences
+    on both edges."""
+    article = (
+        "Ancient Egypt built many monuments. For over 3,800 years, "
+        "the tallest man-made structure in the world was the Great "
+        "Pyramid of Giza in Egypt , which held the record until Lincoln "
+        "Cathedral was completed around 1311 . Many other structures "
+        "were built later. The pyramids remain famous today."
+    )
+    mid_sentence_passage = (
+        "the Great Pyramid of Giza in Egypt , which held the"
+    )
+    start = article.index(mid_sentence_passage)
+    end = start + len(mid_sentence_passage)
+    snap = _snapshot(text=mid_sentence_passage, start=start, end=end)
+    view = build_context_view(snap, article)
+    text = view["text"]
+    assert text.strip()[0:1].isupper()
+    assert text.strip().endswith(".")
+    p = view["passage"]
+    assert text[p["start"] : p["end"]] == mid_sentence_passage
+
+
+def test_context_view_title_passed_through():
+    text, start, end = _long_article()
+    snap = _snapshot(text=text[start:end], start=start, end=end)
+    view = build_context_view(snap, text)
+    assert view["title"] == "Water"

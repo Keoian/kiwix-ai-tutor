@@ -44,6 +44,28 @@ class AppDeps:
     lessons: Any = None
     turn_logger: Any = None
     resource_monitor: Any = None
+    # Optional: the ResearchEngine, exposed so routes can re-fetch article
+    # text for the source-viewer "show more" context endpoint. None for any
+    # deps built before this was added; the route guards on its presence.
+    research_engine: Any = None
+
+    def close(self) -> None:
+        """Release resources opened by ``build_deps`` (SQLite connections).
+
+        Idempotent-ish best-effort: each store's ``close`` is independent,
+        so one failing doesn't stop the others from closing. Safe to call
+        on deps built with fakes that lack a ``close`` method.
+        """
+        for store in (self.snapshot_store, self.profiles, self.lessons, self.research_engine):
+            close = getattr(store, "close", None)
+            if callable(close):
+                close()
+
+    def __enter__(self) -> AppDeps:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
 
 
 class _CSPMiddleware(BaseHTTPMiddleware):

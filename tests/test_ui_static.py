@@ -372,6 +372,43 @@ def test_index_html_status_panel_is_collapsible():
     assert re.search(r'<details id=["\']status-panel["\']', text)
 
 
+def test_app_js_has_show_more_of_article_control():
+    text = _read(APP_JS)
+    assert "Show more of the article" in text
+    assert "Show less" in text
+    assert "aria-expanded" in text
+
+
+def test_app_js_context_endpoint_used_for_show_more():
+    text = _read(APP_JS)
+    assert "/context?before=" in text
+    assert "more_before" in text
+    assert "more_after" in text
+
+
+def test_app_js_shows_book_unavailable_message():
+    text = _read(APP_JS)
+    assert "not available right now" in text
+
+
+def test_app_js_paging_buttons_present():
+    text = _read(APP_JS)
+    assert "Show earlier" in text
+    assert "Show later" in text
+
+
+def test_app_js_show_more_uses_textcontent_only():
+    text = _read(APP_JS)
+    # No new innerHTML usage introduced anywhere in the file.
+    assert "innerHTML" not in text
+
+
+def test_app_css_has_source_context_styles():
+    text = _read(APP_CSS)
+    assert ".source-context" in text
+    assert ".source-context-toggle" in text
+
+
 def test_node_markdown_and_chip_tokenizer_behaviour():
     """Behavioural check of appendMarkdownText/renderAnswerWithAttribution
     against the real captured SSE payload, run under Node if available on
