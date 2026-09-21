@@ -184,9 +184,19 @@ def test_evicted_passage_is_repasted_in_full():
 
 
 def test_held_ids_after_eviction_drops_uncited_id():
+    """``evict`` only fires once ``tokens_used() > budget.system +
+    budget.history`` (a fixed floor, regardless of ceiling since
+    ``Budget.scaled`` keeps ``system`` at its default). Since the
+    2026-09-21 system-prompt budget raise, that floor alone is 2000
+    tokens, so this test needs enough turns for real content to exceed
+    it -- the old 19-turn / 3000-ceiling fixture (floor ~800 under the
+    old 800-token system budget) never crosses the new floor at all.
+    Using ``Budget.scaled(6500)`` (system 2000 + newest 2500 + generation
+    2000 = 6500 fixed, so history/margin are both 0 -- floor exactly
+    2000) with enough turns for total usage to exceed it."""
     log = PromptLog(_count_tokens)
     log.append_system("sys")
-    budget = Budget.scaled(3000)
+    budget = Budget.scaled(6500)
 
     log.append_user("q1")
     log.append_evidence(
@@ -195,7 +205,7 @@ def test_held_ids_after_eviction_drops_uncited_id():
     )
     log.append_assistant("answer with no citation", cited_labels=[])
 
-    for i in range(2, 20):
+    for i in range(2, 60):
         log.append_user(f"q{i} " * 50)
         log.append_evidence(
             [{"id": f"pid-{i}", "label": f"S{i}", "text": "y " * 50, "title": "T"}],
