@@ -347,3 +347,30 @@ def test_question_gap_check_still_fires_when_answer_scan_found_nothing():
     assert len(mismatches) == 1
     assert mismatches[0]["span"] is None
     assert mismatches[0]["computed"] == pytest.approx(80.0)
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-21 "✓ checked" wording bug (owner-reported live bug B): a bare
+# "✓ checked" reads as "this fact was checked" when the host only re-did a
+# unit conversion arithmetic step, never the underlying claim (the owner
+# saw "-70C (-94F checked)" for a fabricated temperature). Every item now
+# carries its "kind" so the UI can special-case unit conversions.
+# ---------------------------------------------------------------------------
+
+
+def test_temperature_conversion_item_is_tagged_kind_temp():
+    answer = "Helium boils at **-268.928 C**, which is equivalent to **-452.070 F**."
+    item = _one(check_computed_statements(answer, evaluate=_stub_evaluate), status="verified")
+    assert item["kind"] == "temp"
+
+
+def test_chain_arithmetic_item_is_tagged_kind_chain():
+    answer = "2 x 3 x 4 = 24"
+    item = _one(check_computed_statements(answer, evaluate=_stub_evaluate), status="verified")
+    assert item["kind"] == "chain"
+
+
+def test_percent_item_is_tagged_kind_percent():
+    answer = "12.5% of 640 is calculated by multiplying, which equals 80."
+    item = _one(check_computed_statements(answer, evaluate=_stub_evaluate), status="verified")
+    assert item["kind"] == "percent"

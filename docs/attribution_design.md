@@ -48,6 +48,49 @@ Matching the spec's own three terms rather than inventing new ones:
   stricter sub-case (a figure with no support anywhere); the UI should style it
   more strongly than a generic own-example since an invented number is riskier.
 
+## Specifics gate (2026-09-21, owner-reported live bug)
+
+**What.** The owner watched the tutor fabricate a person and two temperatures
+("Vitus Andronicus, a Roman soldier ... -70°C (-94°F)"), and the host then
+marked those sentences ● "found in the sources" against a real passage that
+was only about cold/temperature in general -- no library passage anywhere
+named any such person or stated either figure. `is_supported` was passing
+the sentence purely on generic word overlap ("cold", "survived",
+"temperatures" all appear in the real passage too).
+
+Fix: once a sentence carries a SPECIFIC -- a number, or a proper name -- the
+overlap check is no longer enough. `is_supported(sentence, passage_text,
+all_passages_text="")` now additionally requires every specific the
+sentence states to actually appear in the evidence text (`passage_text`
+plus `all_passages_text`, the concatenation of every passage in the
+*current* turn's packet -- `resolve_citations`/`attribute_sentences`/
+`_best_supporting_passage` all pass their already-received passage list
+through, so no new plumbing/parameters were added at any public boundary).
+A number must match the exact figure (reusing the existing `_figures`
+extraction and its Unicode-minus/label-noise normalization) except a
+unit-conversion OUTPUT riding along in parentheses right after its source
+number (the "-94°F" in "-70°C (-94°F)") -- that output doesn't need its own
+citation, but the ORIGINAL number ("-70") still does. A name is a
+capitalised multi-word span, or a single capitalised word that is not
+sentence-initial and not in a short stoplist (months, days, "I") --
+matched case-insensitively, and a surname-only/one-token match against the
+evidence counts too. A sentence with no specifics at all keeps the
+pre-existing overlap-only behavior unchanged.
+
+The evidence set is always the CURRENT turn's retrieved/retained passages
+only -- never the tutor's own earlier text in the same lesson. Nothing in
+`is_supported`/`resolve_citations`/`attribute_sentences` reads prior turns'
+answer text; widening the evidence set to "the lesson so far" would let a
+fabrication launder itself into "found" the second time the model repeats
+it (exactly what happened live: turn 2 asked about "Vitus Andronicus" and
+the model repeated turn 1's invention).
+
+**What is NOT verified.** This is a specifics gate, not a full fact-check:
+a paraphrased claim with no numbers and no proper names (e.g. "cold
+temperatures can be survived for a time") is still judged by loose overlap
+alone, same as before. The gate only tightens things once a sentence stakes
+out something concrete enough to check mechanically.
+
 ## Amendment needed for spec v0.4
 
 §14's three-way split assumes the model marks its own kind reliably ("say so").

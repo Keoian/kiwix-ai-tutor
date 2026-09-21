@@ -819,3 +819,88 @@ def test_apply_citation_quality_suppresses_not_found_note_when_skipped(ctx):
     )
     chat_children_after_skipped = call(ctx, "document.getElementById('chat').children.length")
     assert chat_children_after_skipped == chat_children_after_normal
+
+
+# ---------------------------------------------------------------------------
+# (h) 2026-09-21 owner-reported live bug B: a bare "✓ checked" reads as
+# "this fact was checked" when the host only re-did a unit conversion on
+# an unsourced input number. Built end-to-end against the real renderer.
+# ---------------------------------------------------------------------------
+
+
+def test_unsourced_temperature_conversion_shows_conversion_checked(ctx):
+    answer = "It got as low as -70C (-94F)."
+    attributions_payload = {
+        "attributions": [],
+        "unbacked": [{"span": [0, len(answer) - 1], "reason": "unbacked_number"}],
+        "computed": [
+            {
+                "span": [11, len(answer) - 1],
+                "expression": "-70 C -> F",
+                "stated": -94.0,
+                "computed": -94.0,
+                "status": "verified",
+                "kind": "temp",
+            }
+        ],
+    }
+    ctx.eval("var _ci = document.createElement('div');")
+    ctx.eval(
+        "module.exports.renderAnswerWithAttribution(_ci, "
+        f"{js_str(answer)}, {js_str(attributions_payload)}, {js_str({'citations': []})});"
+    )
+    rendered = call(ctx, "_ci.textContent")
+    assert "conversion checked" in rendered
+    assert "✓ checked" not in rendered
+
+
+def test_sourced_temperature_conversion_still_shows_plain_checked(ctx):
+    answer = "Water boils at 100C (212F)."
+    attributions_payload = {
+        "attributions": [],
+        "unbacked": [],
+        "computed": [
+            {
+                "span": [15, len(answer) - 1],
+                "expression": "100 C -> F",
+                "stated": 212.0,
+                "computed": 212.0,
+                "status": "verified",
+                "kind": "temp",
+            }
+        ],
+    }
+    ctx.eval("var _cj = document.createElement('div');")
+    ctx.eval(
+        "module.exports.renderAnswerWithAttribution(_cj, "
+        f"{js_str(answer)}, {js_str(attributions_payload)}, {js_str({'citations': []})});"
+    )
+    rendered = call(ctx, "_cj.textContent")
+    assert "✓ checked" in rendered
+    assert "conversion checked" not in rendered
+
+
+def test_chain_arithmetic_the_student_asked_for_keeps_plain_checked(ctx):
+    answer = "12 x 12 = 144"
+    attributions_payload = {
+        "attributions": [],
+        "unbacked": [{"span": [0, len(answer)], "reason": "unbacked_number"}],
+        "computed": [
+            {
+                "span": [0, len(answer)],
+                "expression": "12 x 12 = 144",
+                "stated": 144.0,
+                "computed": 144.0,
+                "status": "verified",
+                "kind": "chain",
+            }
+        ],
+    }
+    ctx.eval("var _ck = document.createElement('div');")
+    ctx.eval(
+        "module.exports.renderAnswerWithAttribution(_ck, "
+        f"{js_str(answer)}, {js_str(attributions_payload)}, {js_str({'citations': []})});"
+    )
+    rendered = call(ctx, "_ck.textContent")
+    assert "✓ checked" in rendered
+    assert "conversion checked" not in rendered

@@ -895,6 +895,22 @@
     return String(Math.round(n * 10000) / 10000);
   }
 
+  // 2026-09-21 "✓ checked" wording bug (owner-reported live bug B): a
+  // bare "✓ checked" reads as "this fact was checked" when the host only
+  // re-did a unit-conversion arithmetic step (e.g. C -> F) whose INPUT
+  // number -- the actual measurement being claimed -- was never found in
+  // any source passage. True span overlap (not just adjacency) against
+  // the host's own "unbacked_number" attribution spans, computed from the
+  // SAME attributions event, so no new plumbing is needed.
+  function _spanOverlapsUnbackedNumber(unbackedSpans, span) {
+    if (!span) return false;
+    return (unbackedSpans || []).some(function (u) {
+      if (u.reason !== "unbacked_number") return false;
+      const uspan = u.span || [];
+      return uspan[0] < span[1] && span[0] < uspan[1];
+    });
+  }
+
   function attributionMarkers(attributionsEvent, text) {
     const markers = [];
     if (!attributionsEvent) return markers;
@@ -922,9 +938,22 @@
     // (span: null) is rendered as a separate note, see appendComputedGapNote.
     (attributionsEvent.computed || []).forEach(function (c) {
       if (!c.span) return;
+      let kind = c.status === "verified" ? "computed-verified" : "computed-mismatch";
+      // Only a unit CONVERSION ("temp" kind, e.g. C -> F/K) risks being
+      // misread as "the fact was checked" -- explicit arithmetic the
+      // student/model wrote out itself ("chain"/"percent", e.g.
+      // "what is 12 x 12") is exactly what the calculator IS the fact
+      // for, so it keeps the plain "checked" wording.
+      if (
+        kind === "computed-verified" &&
+        c.kind === "temp" &&
+        _spanOverlapsUnbackedNumber(attributionsEvent.unbacked, c.span)
+      ) {
+        kind = "computed-verified-conversion";
+      }
       markers.push({
         pos: c.span[1],
-        kind: c.status === "verified" ? "computed-verified" : "computed-mismatch",
+        kind: kind,
         computed: c.computed,
       });
     });
@@ -966,6 +995,21 @@
         className: "attribution-marker attribution-computed-verified",
         text: "✓ checked",
         attrs: { "aria-label": "Checked by the calculator", title: "Checked by the calculator" },
+      });
+    }
+    // 2026-09-21 live bug B: this IS a "✓ checked"-style marker (the
+    // conversion arithmetic really was verified), but wording it exactly
+    // like the plain one reads as "this fact was checked", when only a
+    // unit conversion on an unsourced input number was. Same textContent-
+    // only shape as every other marker here.
+    if (marker.kind === "computed-verified-conversion") {
+      return el("span", {
+        className: "attribution-marker attribution-computed-verified",
+        text: "conversion checked",
+        attrs: {
+          "aria-label": "Only the unit conversion was checked, not the fact",
+          title: "Only the unit conversion was checked, not the fact",
+        },
       });
     }
     if (marker.kind === "computed-mismatch") {

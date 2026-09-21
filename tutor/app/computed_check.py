@@ -149,6 +149,7 @@ def _chain_items(text: str, evaluate: EvaluateFn) -> list[dict]:
                 "stated": stated,
                 "computed": computed,
                 "status": status,
+                "kind": "chain",
             }
         )
     return items
@@ -228,6 +229,7 @@ def _percent_items(text: str, evaluate: EvaluateFn) -> list[dict]:
                     "stated": computed,
                     "computed": computed,
                     "status": "verified",
+                    "kind": "percent",
                 }
             )
             continue
@@ -244,6 +246,7 @@ def _percent_items(text: str, evaluate: EvaluateFn) -> list[dict]:
                 "stated": stated,
                 "computed": computed,
                 "status": "mismatch",
+                "kind": "percent",
             }
         )
     return items
@@ -304,6 +307,7 @@ def _temp_items(text: str, evaluate: EvaluateFn) -> list[dict]:
                 "stated": stated,
                 "computed": computed,
                 "status": status,
+                "kind": "temp",
             }
         )
     return items
@@ -352,6 +356,7 @@ def _question_gap_items(
                 "stated": None,
                 "computed": computed,
                 "status": "mismatch",
+                "kind": "percent",
             }
         )
     return items
