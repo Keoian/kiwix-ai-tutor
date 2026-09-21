@@ -102,3 +102,45 @@ residual note.
 3. Longer term: surface `term_matches`/`estimated_matches` on
    `ResearchResponse` so `assess_evidence` can use real IDF instead of
    the curated generic-word list.
+
+## Assessor confusion on the tuning split
+
+Measured via `data/assessor_confusion.py` (scratch), 42-question tuning
+split of `eval/questions/simplewiki_questions.jsonl`, real `C:\kiwix\`
+archive, `config/archives.simplewiki_only.toml`. `gold_in_top5` per
+`eval/run_retrieval_eval.py`'s own definition.
+
+| gold\level | strong | weak | empty |
+|---|---|---|---|
+| A (new assessor) True | 31 | 0 | 1 |
+| A False | 7 | 1 | 2 |
+| B (old, coverage-only) True | 31 | 0 | 1 |
+| B False | 7 | 1 | 2 |
+
+A now matches B on this split after the topic-picker fix below (main
+topic is no longer pinned to the single longest key term). False-weak
+under A: 1 of 32 gold-in-top5 cases (`sw46`, the nonsense-topic probe,
+correctly `empty` — no passages at all, so within the ≤2/weak-or-empty
+constraint trivially).
+
+Fix (before the fix, false-weak was 6/32, violating the constraint):
+`_topic_phrase` used to commit to the single longest key term as "the"
+topic (`explain`, `difference`, `lovers`, `fahrenheit`/`farenheit` were
+picked over `motion`, `mammal`/`reptile`, real title words), which the
+title/text often doesn't contain even though the passages are genuinely
+on-topic. `_select_topic_phrase` now tries every non-generic candidate
+longest-first and accepts the first one actually present, falling back
+to the old longest-only behaviour (not found) only when none match --
+preserving the nonsense-topic catch. `_phrase_in_passage` also now
+tolerates plural/singular mismatches and reordered multi-word phrases
+via `singularize`, scoped to one passage at a time (never across
+passages, which would reintroduce the fused-term-split false positive).
+
+Retrieval-only picture (level vs `gold_in_top5`, new assessor):
+`kid_phrasing_probes.jsonl` (18): 3/18 gold-in-top5, all `strong`; the
+other 15 misses split 6 `strong`(false-strong risk area, off-corpus
+kid-phrasing), 5 `empty`, 2 `weak`.
+`misspelling_probes.jsonl` (10): 5/10 gold-in-top5 (4 `strong`, 1
+`weak`); the 5 misses split 1 `strong`, 4 `empty`.
+The citation-experiment's 18 tuning questions are a category subset of
+the same simplewiki tuning split above -- not run separately.

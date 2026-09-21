@@ -126,35 +126,80 @@ _GENERIC_SINGLE_WORDS = frozenset(
 )
 
 
-def _topic_phrase(key_terms: frozenset[str], corrected_terms: Mapping[str, str] | None) -> str:
-    """The question's own "main topic" phrase: the longest corrected phrase
+def _topic_candidates(
+    key_terms: frozenset[str], corrected_terms: Mapping[str, str] | None
+) -> list[str]:
+    """Ordered (longest-first, then alphabetical for a stable tie-break)
+    candidates for the question's "main topic" phrase: corrected phrases
     (e.g. "squarefoot" -> "square foot") if any correction happened,
-    otherwise the longest non-generic key term, otherwise the longest key
-    term of any kind (better than nothing when every term is generic)."""
+    otherwise non-generic key terms, otherwise every key term (better than
+    nothing when every term is generic)."""
     if corrected_terms:
-        phrases = [v for v in corrected_terms.values() if v]
+        phrases = [v.lower() for v in corrected_terms.values() if v]
         if phrases:
-            return max(phrases, key=len).lower()
-    candidates = [t for t in key_terms if t.lower() not in _GENERIC_SINGLE_WORDS]
-    pool = candidates or list(key_terms)
-    if not pool:
-        return ""
-    return max(pool, key=len).lower()
+            return sorted(phrases, key=lambda p: (-len(p), p))
+    candidates = [t.lower() for t in key_terms if t.lower() not in _GENERIC_SINGLE_WORDS]
+    pool = candidates or [t.lower() for t in key_terms]
+    return sorted(pool, key=lambda p: (-len(p), p))
+
+
+def _topic_phrase(key_terms: frozenset[str], corrected_terms: Mapping[str, str] | None) -> str:
+    """The single longest topic candidate (see ``_topic_candidates``), kept
+    for callers that just want a label -- ``assess_evidence`` itself now
+    picks among ALL candidates via ``_select_topic_phrase`` below."""
+    candidates = _topic_candidates(key_terms, corrected_terms)
+    return candidates[0] if candidates else ""
+
+
+def _phrase_in_passage(topic_phrase: str, passage: Any) -> bool:
+    """True if ``topic_phrase`` (possibly multi-word, e.g. "square foot")
+    appears in THIS passage's TITLE, or as an exact phrase in its TEXT, or
+    -- to tolerate plural/singular mismatches (e.g. "volcanoes" vs the
+    title "Volcano") and reordered multi-word phrases (e.g. title words in
+    a different order than the phrase) -- every word of the phrase,
+    singularized, appears somewhere in this SAME passage's title+text.
+    Words matched across DIFFERENT passages does NOT satisfy this -- that
+    is exactly the fused-term-split false-strong failure mode this guards
+    against."""
+    title, text = _passage_title_text(passage)
+    title_l, text_l = title.lower(), text.lower()
+    if topic_phrase in title_l or topic_phrase in text_l:
+        return True
+    phrase_words = [singularize(w) for w in topic_phrase.split() if w]
+    if not phrase_words:
+        return False
+    passage_words = {singularize(w) for w in tokenize(f"{title} {text}")}
+    return all(w in passage_words for w in phrase_words)
 
 
 def _topic_present(topic_phrase: str, passages: list[Any]) -> bool:
-    """True if ``topic_phrase`` (possibly multi-word, e.g. "square foot")
-    appears in some top passage's TITLE, or as an exact phrase in its TEXT.
-    Individual words matched separately (e.g. "square" in one passage,
-    "foot" in another) does NOT satisfy this -- that is exactly the
-    fused-term-split false-strong failure mode being fixed."""
+    """True if ``topic_phrase`` is present (see ``_phrase_in_passage``) in
+    some single top passage."""
     if not topic_phrase:
         return True
-    for passage in passages[:_TOP_PASSAGES_CHECKED]:
-        title, text = _passage_title_text(passage)
-        if topic_phrase in title.lower() or topic_phrase in text.lower():
-            return True
-    return False
+    return any(_phrase_in_passage(topic_phrase, p) for p in passages[:_TOP_PASSAGES_CHECKED])
+
+
+def _select_topic_phrase(
+    key_terms: frozenset[str],
+    corrected_terms: Mapping[str, str] | None,
+    passages: list[Any],
+) -> tuple[str, bool]:
+    """Pick the best "main topic" candidate: the longest candidate that is
+    actually present (see ``_topic_present``) in the top passages, so a
+    generic/incidental longest word (a verb like "explain", a question-
+    shape noun like "difference") doesn't get committed to ahead of a real
+    entity term the passages DO cover. Falls back to the single longest
+    candidate (old behaviour) -- not found -- when none of them match,
+    which is exactly the true-miss case (e.g. a nonsense topic) this
+    check exists to still catch."""
+    candidates = _topic_candidates(key_terms, corrected_terms)
+    if not candidates:
+        return "", True
+    for candidate in candidates:
+        if _topic_present(candidate, passages):
+            return candidate, True
+    return candidates[0], False
 
 
 @dataclass(frozen=True)
@@ -261,8 +306,7 @@ def assess_evidence(
     coverage = len(covered_norm) / len(norm_key_terms) if norm_key_terms else 1.0
     covered_terms = frozenset(t for t in key_terms if singularize(t) in covered_norm)
 
-    topic_phrase = _topic_phrase(key_terms, corrected_terms)
-    topic_ok = _topic_present(topic_phrase, list(passages))
+    topic_phrase, topic_ok = _select_topic_phrase(key_terms, corrected_terms, list(passages))
 
     reasons = [f"coverage {coverage:.2f} vs threshold {_COVERAGE_STRONG_THRESHOLD}"]
     if topic_phrase:
