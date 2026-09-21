@@ -24,6 +24,12 @@ The students are children. Expect bad spelling, bad grammar, and elliptical foll
   is a Dell with a GTX 1060 6 GB running Linux Mint. Old GPUs are slow at large-prompt prefill, so
   keep prompts cache-friendly.
 
+## Minimum hardware
+
+- **Minimum: a GPU with 6 GB of VRAM** (the delivery Dell's GTX 1060 6 GB is the floor). The model,
+  its context and the KV cache must fit in that budget — do not make choices that need more.
+- It **can run on CPU only, but it will be slow**. CPU-only is a fallback, not a target.
+
 ## What "good" means here
 
 - Answers are grounded in the library. The host attributes each sentence to a source independently
