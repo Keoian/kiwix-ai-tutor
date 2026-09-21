@@ -20,7 +20,9 @@ parallel = 1
 flash_attn = true
 jinja = true
 # Thinking off: a tutor turn must not spend hundreds of hidden tokens first.
-extra_args = ["--chat-template-kwargs", "{\"enable_thinking\":false}", "--reasoning-budget", "0"]
+# --reasoning-budget 0 only: a JSON --chat-template-kwargs value loses its quotes when
+# Windows PowerShell 5.1 passes it to a native exe (scripts/serve_dev.ps1), and the server refuses to start.
+extra_args = ["--reasoning-budget", "0"]
 slots = true
 
 [sampling]
