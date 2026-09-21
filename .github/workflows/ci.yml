@@ -40,7 +40,71 @@ jobs:
       - name: Lint (includes the plan §5 portability rules)
         run: python -m ruff check .
 
-      - name: Unit tests
+      - name: Unit tests (Windows)
+        if: runner.os == 'Windows'
         run: >-
           python -m pytest -m "not integration" -v -p no:cacheprovider
           -o faulthandler_timeout=120 --timeout=180 --timeout-method=thread
+
+      - name: Unit tests (Linux, diagnostic)
+        if: runner.os == 'Linux'
+        id: unit_tests_linux
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p data
+          timeout -s INT 600 -k 60 python -m pytest -m "not integration" -v -p no:cacheprovider \
+            --timeout=120 --timeout-method=signal -o faulthandler_timeout=90 -x \
+            2>&1 | tee data/pytest.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" = "124" ] || [ "$rc" = "137" ]; then
+            echo "Test run timed out (rc=$rc) under coreutils timeout (with -k 60 SIGKILL fallback)"
+          fi
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit $rc
+        shell: bash
+
+      - name: Diagnose hang (Linux, always runs)
+        if: always() && runner.os == 'Linux'
+        run: |
+          set +e
+          mkdir -p data
+          LOG=data/pytest.log
+          touch "$LOG"
+
+          emit() {
+            title="$1"
+            text="$2"
+            # encode newlines as %0A, cap length to stay under GitHub's annotation limit
+            encoded=$(printf '%s' "$text" | sed ':a;N;$!ba;s/\n/%0A/g' | cut -c1-3500)
+            echo "::error title=${title}::${encoded}"
+          }
+
+          TAIL=$(tail -n 40 "$LOG")
+          emit "ci-hang-tail" "$TAIL"
+
+          LASTTEST=$(grep -nE '::test_|PASSED|FAILED|ERROR' "$LOG" | tail -n 1)
+          LASTLINE_NO=$(printf '%s' "$LASTTEST" | cut -d: -f1)
+          if [ -n "$LASTLINE_NO" ]; then
+            NEXTLINE_NO=$((LASTLINE_NO + 1))
+            LASTPLUS=$(sed -n "${LASTLINE_NO},${NEXTLINE_NO}p" "$LOG")
+          else
+            LASTPLUS="(no test markers found in log)"
+          fi
+          emit "ci-hang-last-test" "$LASTPLUS"
+
+          STACK=$(awk '/Thread 0x.*most recent call first/{f=1} f{print; c++} c>=40{exit}' "$LOG")
+          if [ -n "$STACK" ]; then
+            emit "ci-hang-stack" "$STACK"
+          fi
+
+          PSOUT=$(ps -ef --forest 2>/dev/null | grep -i python | grep -v grep)
+          if [ -n "$PSOUT" ]; then
+            emit "ci-hang-ps" "$PSOUT"
+          fi
+
+          rc="${{ steps.unit_tests_linux.outputs.rc }}"
+          if [ -z "$rc" ] || [ "$rc" != "0" ]; then
+            echo "Unit tests (Linux) failed or hung (rc=$rc); failing job."
+            exit 1
+          fi
