@@ -109,8 +109,21 @@ jobs:
           ULIMIT_N=$(ulimit -n)
           emit "ci-ulimit-n" "$ULIMIT_N"
 
+          ULIMIT_U=$(ulimit -u)
+          emit "ci-ulimit-u" "$ULIMIT_U"
+
+          NPROC=$(ps -e --no-headers | wc -l)
+          ZOMBIES=$(ps -e -o stat= | grep -c '^Z' || true)
+          emit "ci-proc-count" "total procs: $NPROC, zombies: $ZOMBIES"
+
           DFOUT=$(df -h /tmp "$RUNNER_TEMP" 2>&1)
           emit "ci-df" "$DFOUT"
+
+          DFIOUT=$(df -i /tmp "$RUNNER_TEMP" 2>&1)
+          emit "ci-df-inodes" "$DFIOUT"
+
+          DMESGOUT=$(dmesg 2>/dev/null | tail -n 60 || echo "dmesg not permitted")
+          emit "ci-dmesg" "$DMESGOUT"
 
           if [ -f data/fd_growth.txt ]; then
             emit "ci-fd-growth" "$(cat data/fd_growth.txt)"

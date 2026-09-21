@@ -20,7 +20,7 @@ from __future__ import annotations
 import sqlite3
 import time
 
-_TRANSIENT_IO_RETRIES = 6
+_TRANSIENT_IO_RETRIES = 9
 _TRANSIENT_IO_BASE_DELAY_S = 0.2
 _TRANSIENT_IO_MAX_DELAY_S = 5.0
 
