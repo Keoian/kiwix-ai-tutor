@@ -397,3 +397,57 @@ python -m eval.run_turn_eval --registry config/archives.simplewiki_only.toml `
 
 Adopt only if `supported_citation_rate` improves by >= 0.15 over
 `current` without raising `evidence_dump_rate`, per the task brief's gate.
+
+## Seed exchange A/B (2026-09-20)
+
+Three runs, 18 tuning questions each (direct/why_how/student_phrasing), `current` vs
+`seed_exchange_s0`. cited-and-supported = `all_supported`.
+
+| Run | current cite/resolve/supp/dump/backed/unbk/len | seed cite/resolve/supp/dump/backed/unbk/len |
+|---|---|---|
+| 1 | .28/.28/.00/.11/.90/.06/7104 | .89/.89/.39/.06/.95/.00/595 |
+| 2 | .33/.33/.22/.00/.87/.11/996 | .67/.61/.17/.06/.94/.06/15424 |
+| 3 | .17/.17/.06/.00/.81/.17/907 | .78/.78/.50/.00/.93/.00/573 |
+| **Pooled n=54** | **.26/.26/.09/.04/.86/.11/3002** | **.78/.76/.35/.04/.94/.02/5530** |
+
+Pooled supported_citation_rate: current 0.093, seed 0.352 — improvement +0.259 (>= 0.15 gate met
+on the pooled set). evidence_dump_rate ties at 0.037 for both (not raised). Per-run direction is
+consistent: seed > current on supported_citation_rate in all 3 runs (0.39 vs 0.00, 0.17 vs 0.22 —
+**run 2 is the exception**, seed slightly lower there), so 2 of 3 runs favor seed and 1 disagrees.
+
+Paired per-question (cited-and-supported, 54 pairs across 3 runs): seed wins 19, loses 5, ties 30.
+Net positive but run 2 contributes most of the losses.
+
+**Runaway answers (> 4000 chars):** all three are the same underlying pathology — an
+evidence-dump-style table repeated verbatim in a loop, not a coherent long answer:
+- run1 `current` sw21: 113,883 chars; ends mid-table repeating "World War I / World War II |"
+  pairs; last-20-word span repeats 1534x — a repetition loop, not a single evidence dump.
+- run2 `seed_exchange_s0` sw06: 143,594 chars; repeats the periodic-table ordering sentence
+  verbatim; loop.
+- run2 `seed_exchange_s0` sw21: 123,600 chars; repeats field-gun table rows; loop (29x on the
+  trailing 20-word span, less degenerate than sw06/sw21-run1 but still clearly runaway).
+sw21 is the runaway question in both current (run1) and seed (run2) — a "list many things"
+question that appears to invite table-style output the model then loops on.
+
+**Cap/guard check:** no output token cap or repetition guard exists in the app. `max_tokens` is an
+optional parameter on `tutor/app/llm_client.py:153` (`max_tokens: int | None = None`), only applied
+at line 168-169 if a caller passes a value; no caller (app or `eval/run_turn_eval.py`) passes one,
+so generation is unbounded except by the model's context window. No `repeat_penalty`,
+`frequency_penalty`, `presence_penalty`, or `stop` sequence is set anywhere in `llm_client.py`.
+
+**[S0] leaks:** one instance, run2 `seed_exchange_s0` sw21 — the model emitted a real citation
+labelled `[S0]` alongside S1-S6; `resolve_citations` correctly marked it `unresolved: true` /
+`supported: false` per the reserved-label guard (Task 3), so it did not leak into a resolved
+source link. No other run shows `[S0]` usage. The run2 `all_resolve` (0.61) < `citation_rate`
+(0.67) gap on seed_exchange_s0 traces to this one sw21 answer's unresolved `S0` label; no other
+unresolved-label cases were found in run2.
+
+**Confound:** since e89f419, the profile grade level is pinned into the system prompt for both
+variants alike, so it is not a differential confound between `current` and `seed_exchange_s0` — but
+it does mean supported/backed rates reflect a *measured* (pinned) grade level rather than one
+*inferred* from conversation history, which may itself explain some of the run-to-run variance
+against earlier baselines measured pre-e89f419.
+
+**Adoption rule:** pooled gate (>= 0.15 improvement, no evidence_dump_rate increase) is **MET** on
+n=54 (+0.259, dump tied). Per-run direction is **not fully consistent** (run 2 shows a small
+regression on supported_citation_rate, 0.22 -> 0.17). Default is **not changed** per instructions.
