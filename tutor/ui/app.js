@@ -368,6 +368,281 @@
   // (out of range) is simply skipped rather than mis-highlighting.
   // -----------------------------------------------------------------------
 
+  // -----------------------------------------------------------------------
+  // 2026-09-20 offset-aware block mapping (tables/lists attribution
+  // follow-up): `mapAnswerToBlocks` is a PURE function -- no DOM, no
+  // globals besides the regexes already defined above -- that walks the
+  // raw answer text the exact same way `appendMarkdownText` does (heading /
+  // table / list-item / paragraph line grouping) but returns each block's
+  // RAW character-offset range(s) into the original string instead of
+  // building nodes. This lets `renderBlocksToDom` below place every
+  // attribution marker and [S#] chip inside the correct cell/item/heading
+  // by raw offset, instead of appending it as a sibling after a whole
+  // table/list (which is what silently misplaced markers before this
+  // change: appendMarkdownText built one opaque <table>/<ul> node per
+  // block, so a marker appended afterward landed after the whole block,
+  // never inside the row/item it belonged to).
+  //
+  // Block shapes returned:
+  //   {type: "heading", tag, innerStart, innerEnd}
+  //   {type: "table", headCells: [{start,end}], rows: [{start, end, cells: [{start,end}]}]}
+  //   {type: "list", ordered, items: [{start, end, textStart, textEnd}]}
+  //   {type: "paragraph", lines: [{start, end}]}
+  // All offsets index the SAME raw text handed in -- never a slice.
+  // -----------------------------------------------------------------------
+
+  function _lineOffsets(text) {
+    const lines = text.split("\n");
+    const starts = [];
+    let pos = 0;
+    for (let idx = 0; idx < lines.length; idx++) {
+      starts.push(pos);
+      pos += lines[idx].length + 1;
+    }
+    return { lines: lines, starts: starts };
+  }
+
+  function _trimCellRange(text, s, e) {
+    while (s < e && /\s/.test(text[s])) s++;
+    while (e > s && /\s/.test(text[e - 1])) e--;
+    return { start: s, end: e };
+  }
+
+  function _cellRanges(text, rowStart, rowEnd) {
+    let s = rowStart;
+    let e = rowEnd;
+    if (text[s] === "|") s++;
+    if (e > s && text[e - 1] === "|") e--;
+    const cells = [];
+    let cellStart = s;
+    for (let k = s; k < e; k++) {
+      if (text[k] === "|") {
+        cells.push(_trimCellRange(text, cellStart, k));
+        cellStart = k + 1;
+      }
+    }
+    cells.push(_trimCellRange(text, cellStart, e));
+    return cells;
+  }
+
+  function mapAnswerToBlocks(text) {
+    const blocks = [];
+    if (!text) return blocks;
+    const lo = _lineOffsets(text);
+    const lines = lo.lines;
+    const starts = lo.starts;
+    const n = lines.length;
+    let i = 0;
+    while (i < n) {
+      const line = lines[i];
+
+      const headingMatch = _HEADING_RE.exec(line);
+      if (headingMatch) {
+        const innerLen = headingMatch[2].length;
+        const innerStart = starts[i] + (line.length - innerLen);
+        blocks.push({
+          type: "heading",
+          tag: headingMatch[1].length <= 3 ? "h3" : "h4",
+          innerStart: innerStart,
+          innerEnd: innerStart + innerLen,
+        });
+        i++;
+        continue;
+      }
+
+      if (
+        _TABLE_ROW_RE.test(line) &&
+        i + 1 < n &&
+        _TABLE_SEP_RE.test(lines[i + 1])
+      ) {
+        const headStart = starts[i];
+        const headEnd = headStart + line.length;
+        const headCells = _cellRanges(text, headStart, headEnd);
+        let j = i + 2;
+        const rows = [];
+        while (j < n && _TABLE_ROW_RE.test(lines[j])) {
+          const rowStart = starts[j];
+          const rowEnd = rowStart + lines[j].length;
+          rows.push({ start: rowStart, end: rowEnd, cells: _cellRanges(text, rowStart, rowEnd) });
+          j++;
+        }
+        blocks.push({ type: "table", headCells: headCells, rows: rows });
+        i = j;
+        continue;
+      }
+
+      if (_LIST_ITEM_RE.test(line)) {
+        const ordered = /^\s*\d+\./.test(line);
+        const items = [];
+        let j = i;
+        while (j < n) {
+          const itemMatch = _LIST_ITEM_RE.exec(lines[j]);
+          if (!itemMatch) break;
+          const lineStart = starts[j];
+          const lineLen = lines[j].length;
+          const textLen = itemMatch[2].length;
+          const textStart = lineStart + (lineLen - textLen);
+          items.push({
+            start: lineStart,
+            end: lineStart + lineLen,
+            textStart: textStart,
+            textEnd: textStart + textLen,
+          });
+          j++;
+        }
+        blocks.push({ type: "list", ordered: ordered, items: items });
+        i = j;
+        continue;
+      }
+
+      const paraLineIdx = [];
+      let j = i;
+      while (
+        j < n &&
+        !_HEADING_RE.test(lines[j]) &&
+        !_LIST_ITEM_RE.test(lines[j]) &&
+        !(
+          _TABLE_ROW_RE.test(lines[j]) &&
+          j + 1 < n &&
+          _TABLE_SEP_RE.test(lines[j + 1])
+        )
+      ) {
+        paraLineIdx.push(j);
+        j++;
+      }
+      if (j === i) {
+        paraLineIdx.push(i);
+        j = i + 1;
+      }
+      blocks.push({
+        type: "paragraph",
+        lines: paraLineIdx.map(function (idx) {
+          return { start: starts[idx], end: starts[idx] + lines[idx].length };
+        }),
+      });
+      i = j;
+    }
+    return blocks;
+  }
+
+  // Renders the inline content of ONE block-piece (a heading's text, a
+  // table cell, a list item's text, or one paragraph line) between raw
+  // offsets [rangeStart, rangeEnd). `citationMatches` (each {start, end,
+  // labels}) and `markers` (each {pos, ...}) are the FULL, absolute-offset
+  // lists for the whole answer; only the ones whose offset falls inside
+  // this range are consumed here, so a marker/chip belonging to another
+  // block is never emitted at the wrong place. A marker's pos must be
+  // `> rangeStart` (never at the very start of a range) and `<= rangeEnd`.
+  function renderInlineSegment(container, text, rangeStart, rangeEnd, citationMatches, markers, resolveLabel, makeMarkerNode) {
+    const events = [];
+    (citationMatches || []).forEach(function (c) {
+      if (c.start >= rangeStart && c.end <= rangeEnd) {
+        events.push({ pos: c.start, order: 0, type: "citation", citation: c });
+      }
+    });
+    (markers || []).forEach(function (m) {
+      if (m.pos > rangeStart && m.pos <= rangeEnd) {
+        events.push({ pos: m.pos, order: 1, type: "marker", marker: m });
+      }
+    });
+    events.sort(function (a, b) {
+      return a.pos - b.pos || a.order - b.order;
+    });
+    let cursor = rangeStart;
+    events.forEach(function (ev) {
+      if (ev.pos > cursor) {
+        appendInlineMarkdown(container, text.slice(cursor, ev.pos));
+        cursor = ev.pos;
+      }
+      if (ev.type === "citation") {
+        ev.citation.labels.forEach(function (label) {
+          container.appendChild(resolveLabel(label));
+        });
+        cursor = ev.citation.end;
+      } else {
+        container.appendChild(makeMarkerNode(ev.marker));
+      }
+    });
+    if (cursor < rangeEnd) {
+      appendInlineMarkdown(container, text.slice(cursor, rangeEnd));
+    }
+  }
+
+  // Appends any marker whose pos falls within (start, end] to `container`
+  // as-is (no text interleaving) -- used for a table row's last cell and a
+  // list item, where the spec wants the marker at the END of the unit, not
+  // interleaved mid-cell/mid-item.
+  function appendMarkersInRange(container, markers, start, end, makeMarkerNode) {
+    (markers || []).forEach(function (m) {
+      if (m.pos > start && m.pos <= end) {
+        container.appendChild(makeMarkerNode(m));
+      }
+    });
+  }
+
+  // Renders the full block list produced by `mapAnswerToBlocks` into
+  // `container`, wiring markers/chips into the correct cell/item/heading/
+  // paragraph line. A heading gets no markers (only its own [S#] chips, if
+  // any -- an empty markers list is passed). A table row's marker(s) land
+  // in its LAST cell; a list item's marker(s) land at the end of the item.
+  function renderBlocksToDom(container, text, blocks, citationMatches, markers, resolveLabel, makeMarkerNode) {
+    blocks.forEach(function (block) {
+      if (block.type === "heading") {
+        const heading = el(block.tag, {});
+        renderInlineSegment(heading, text, block.innerStart, block.innerEnd, citationMatches, [], resolveLabel, makeMarkerNode);
+        container.appendChild(heading);
+        return;
+      }
+      if (block.type === "table") {
+        const wrapper = el("div", { className: "md-table-wrap" });
+        const table = el("table", { className: "md-table" });
+        const thead = el("thead");
+        const headRow = el("tr");
+        block.headCells.forEach(function (cellRange) {
+          const th = el("th");
+          renderInlineSegment(th, text, cellRange.start, cellRange.end, citationMatches, [], resolveLabel, makeMarkerNode);
+          headRow.appendChild(th);
+        });
+        thead.appendChild(headRow);
+        table.appendChild(thead);
+
+        const tbody = el("tbody");
+        block.rows.forEach(function (row) {
+          const tr = el("tr");
+          row.cells.forEach(function (cellRange, idx) {
+            const td = el("td");
+            renderInlineSegment(td, text, cellRange.start, cellRange.end, citationMatches, [], resolveLabel, makeMarkerNode);
+            if (idx === row.cells.length - 1) {
+              appendMarkersInRange(td, markers, row.start, row.end, makeMarkerNode);
+            }
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        wrapper.appendChild(table);
+        container.appendChild(wrapper);
+        return;
+      }
+      if (block.type === "list") {
+        const list = el(block.ordered ? "ol" : "ul", {});
+        block.items.forEach(function (item) {
+          const li = el("li");
+          renderInlineSegment(li, text, item.textStart, item.textEnd, citationMatches, [], resolveLabel, makeMarkerNode);
+          appendMarkersInRange(li, markers, item.start, item.end, makeMarkerNode);
+          list.appendChild(li);
+        });
+        container.appendChild(list);
+        return;
+      }
+      // paragraph
+      block.lines.forEach(function (lineRange, idx) {
+        renderInlineSegment(container, text, lineRange.start, lineRange.end, citationMatches, markers, resolveLabel, makeMarkerNode);
+        if (idx < block.lines.length - 1) container.appendChild(el("br"));
+      });
+    });
+  }
+
   // Renders a computed number for display: plain for an integer, rounded
   // to 4 decimal places (trailing zeros dropped by String()) otherwise --
   // never full float noise like 79.99999999999999.
@@ -519,38 +794,20 @@
       });
     }
 
-    let cursor = 0;
-    let markerIndex = 0;
-
-    function emitTextUpTo(pos) {
-      if (pos > cursor) {
-        appendMarkdownText(container, text.slice(cursor, pos));
-        cursor = pos;
-      }
+    function resolveLabel(label) {
+      if (unresolvedLabels[label]) return renderUnresolvedLabel(label);
+      return renderCitationChip(label, passageIdByLabel[label]);
     }
 
-    function emitMarkersUpTo(pos) {
-      while (markerIndex < markers.length && markers[markerIndex].pos <= pos) {
-        emitTextUpTo(markers[markerIndex].pos);
-        container.appendChild(makeAttributionMarkerNode(markers[markerIndex]));
-        markerIndex += 1;
-      }
-    }
-
-    citationMatches.forEach(function (citation) {
-      emitMarkersUpTo(citation.start);
-      emitTextUpTo(citation.start);
-      citation.labels.forEach(function (label) {
-        if (unresolvedLabels[label]) {
-          container.appendChild(renderUnresolvedLabel(label));
-        } else {
-          container.appendChild(renderCitationChip(label, passageIdByLabel[label]));
-        }
-      });
-      cursor = citation.end;
-    });
-    emitMarkersUpTo(text.length);
-    emitTextUpTo(text.length);
+    // Block/cell/item-aware placement (2026-09-20 tables/lists attribution
+    // follow-up): map the raw text into blocks with real offset ranges
+    // first, then hand each block-piece only the markers/chips whose raw
+    // offset actually falls inside it. A marker whose offset cannot be
+    // mapped onto any block-piece (should not happen given the filter
+    // above, but never trust it blindly) is simply never emitted, rather
+    // than misplaced.
+    const blocks = mapAnswerToBlocks(text);
+    renderBlocksToDom(container, text, blocks, citationMatches, markers, resolveLabel, makeAttributionMarkerNode);
   }
 
   // -----------------------------------------------------------------------
@@ -1310,4 +1567,11 @@
   ensureSession().then(refreshStatus);
   refreshStudents();
   setInterval(refreshStatus, 15000);
+
+  // Exposes the pure offset-mapping function (no DOM access) to a Node.js
+  // test harness, when one is loading this file as a CommonJS module. A
+  // real browser never defines `module`, so this is a no-op there.
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = { mapAnswerToBlocks: mapAnswerToBlocks };
+  }
 })();
