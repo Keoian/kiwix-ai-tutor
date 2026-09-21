@@ -21,12 +21,14 @@ The students are children. Expect bad spelling, bad grammar, and elliptical foll
 - Measurement scripts must run lessons **strictly sequentially** — parallel runs against the single
   slot produce spurious results.
 - **Windows and Linux are both shipping targets.** Development is on Windows; the delivery machine
-  is a Dell with a GTX 1060 6 GB running Linux Mint. Old GPUs are slow at large-prompt prefill, so
+  is a Dell laptop with a GTX 1060 Max-Q 6 GB (README says Linux Mint). Old GPUs are slow at large-prompt prefill, so
   keep prompts cache-friendly.
 
 ## Minimum hardware
 
-- **Minimum: a GPU with 6 GB of VRAM** (the delivery Dell's GTX 1060 6 GB is the floor). The model,
+- **Minimum: a GPU with 6 GB of VRAM.** The delivery target is a **Dell laptop with a GTX 1060 Max-Q
+  (6 GB)** (owner-stated 2026-09-21) — a power-limited mobile Pascal part, slower than this dev
+  machine's card; that laptop is the floor. The model,
   its context and the KV cache must fit in that budget — do not make choices that need more.
 - It **can run on CPU only, but it will be slow**. CPU-only is a fallback, not a target.
 
