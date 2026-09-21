@@ -469,6 +469,105 @@ def test_guard_noun_and_verb_split_across_two_generic_titles():
     assert assessment.level == "strong"
 
 
+def test_v4_biggest_animal_unrelated_titles_not_strong():
+    """Turn-1 evidence bug (docs/rewrite_probe_measure.md 'Assessor v4'):
+    'biggest' alone (a bare superlative modifier) must never certify a
+    passage as covering 'What's the biggest animal?' just because the word
+    literally appears in an unrelated title."""
+    result = _Result(
+        [
+            _passage("The Biggest Loser", "A reality show about weight loss and fitness."),
+            _passage(
+                "World's Biggest Coffee Morning",
+                "An annual fundraising event held every year.",
+            ),
+        ]
+    )
+    assessment = assess_evidence("What's the biggest animal?", result)
+    assert assessment.level != "strong"
+
+
+def test_v4_fastest_bird_disjoint_passages_not_strong():
+    """'fastest' matches a motorsport article and 'bird' matches a state-
+    birds list -- disjoint passages, neither actually about the fastest
+    bird -- must not be strong even though naive coverage is 1.00."""
+    result = _Result(
+        [
+            _passage("Fastest lap", "The fastest lap record in Formula One racing."),
+            _passage("List of U.S. state birds", "Each U.S. state has an official bird."),
+        ]
+    )
+    assessment = assess_evidence("What's the fastest bird?", result)
+    assert assessment.level != "strong"
+
+
+def test_v4_largest_molecule_no_answer_passage_not_strong():
+    """No titin/macromolecule passage at all; 'molecule' passages mention
+    sugar/bonding, not size, and 'largest' never co-occurs with 'molecule'
+    in the same passage."""
+    result = _Result(
+        [
+            _passage("Molecule", "This is a sugar molecule. Carbon atoms are made blue."),
+            _passage("Molecule", "Bonding: for a molecule to exist, atoms have to stick."),
+            _passage("Water", "Water has a specific heat capacity."),
+        ]
+    )
+    assessment = assess_evidence("What's the largest molecule?", result)
+    assert assessment.level != "strong"
+
+
+def test_v4_smallest_planet_stays_strong():
+    """Mercury passage genuinely says 'smallest planet' -- head noun and
+    superlative cue co-occur in the same passage -- must stay strong."""
+    result = _Result(
+        [
+            _passage(
+                "Mercury (planet)",
+                "Mercury is the smallest planet in the Solar System.",
+            ),
+        ]
+    )
+    assessment = assess_evidence("What is the smallest planet?", result)
+    assert assessment.level == "strong"
+
+
+def test_v4_tallest_mountain_stays_strong():
+    """Everest passage says 'tallest mountain' -- head noun + cue
+    co-occur -- must stay strong even though the modifier itself must
+    never count toward coverage alone."""
+    result = _Result(
+        [
+            _passage(
+                "Mount Everest",
+                "Mount Everest is the tallest mountain in the world.",
+            ),
+        ]
+    )
+    assessment = assess_evidence("What's the tallest mountain?", result)
+    assert assessment.level == "strong"
+
+
+def test_v4_non_superlative_question_unaffected():
+    """A plain (non-superlative) question must behave exactly as before:
+    real topic coverage in a real passage is still strong."""
+    result = _Result(
+        [_passage("Volcano", "A volcano is an opening in the Earth's crust.")]
+    )
+    assessment = assess_evidence("What is a volcano?", result)
+    assert assessment.level == "strong"
+
+
+def test_v4_superlative_downgrade_has_reason():
+    result = _Result(
+        [
+            _passage("The Biggest Loser", "A reality show about weight loss."),
+        ]
+    )
+    assessment = assess_evidence("What's the biggest animal?", result)
+    assert assessment.level != "strong"
+    assert any("superlative" in r.lower() for r in assessment.reasons)
+
+
 def test_no_rewritten_queries_is_backward_compatible():
     """Omitting the new parameters reproduces the exact old signature's
     behaviour."""
