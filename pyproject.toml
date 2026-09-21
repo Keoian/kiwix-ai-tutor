@@ -47,6 +47,11 @@ dev = [
     # CI hardening (2026-09-20): turns a hung test into a named FAILED test
     # with a traceback instead of a 6h CI stall. See .github/workflows/ci.yml.
     "pytest-timeout>=2.3",
+    # 2026-09-20: executes tutor/ui/app.js's pure JS logic under pytest when
+    # Node is not installed (embedded V8). Has prebuilt wheels for win_amd64
+    # and manylinux (CI: windows + ubuntu); tests/test_ui_js_exec.py skips
+    # cleanly (not fail) if a runner has neither Node nor this wheel.
+    "mini-racer>=0.12",
 ]
 
 [tool.setuptools.packages.find]

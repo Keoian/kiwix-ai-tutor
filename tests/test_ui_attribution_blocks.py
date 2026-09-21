@@ -53,7 +53,11 @@ def test_app_js_has_pure_block_mapping_function():
 def test_app_js_exports_block_mapping_for_node():
     text = _read(APP_JS)
     assert 'typeof module !== "undefined"' in text
-    assert "module.exports = { mapAnswerToBlocks: mapAnswerToBlocks }" in text
+    # 2026-09-20 (UI JS exec follow-up): module.exports now carries every
+    # pure/DOM-lite function tests/test_ui_js_exec.py executes under the
+    # embedded engine, not just mapAnswerToBlocks -- check the map is still
+    # exported rather than pinning the exact object literal text.
+    assert re.search(r"module\.exports\s*=\s*\{[\s\S]*mapAnswerToBlocks:\s*mapAnswerToBlocks", text)
 
 
 def test_app_js_has_block_aware_renderer_and_inline_segment_helpers():
