@@ -121,6 +121,36 @@ _ENTITY_TITLE_RESULTS = 3
 _ENTITY_RELAXED_AND_SIZES = (2, 3)
 _IDF_CACHE_MAXSIZE = 4096
 
+# Baseline v11 (docs/retrieval_baseline.md "Baseline v11"): spelling-
+# tolerant fallback for a rare/misspelt KEY term. Only engages when the
+# normal path is weak -- a content term with <= this many corpus-wide
+# estimated matches -- so a correctly spelt rare term (a small but real
+# corpus count) is never touched. Bounded to a couple of terms/request so a
+# long, mostly-misspelt question can't blow the soft deadline.
+_SPELL_ZERO_MATCH_CEILING = 0
+_SPELL_MIN_TERM_LEN = 4
+_MAX_SPELL_CORRECTIONS = 2
+_SPELL_SUGGEST_LIMIT = 20
+_SPELL_MAX_EDIT_DISTANCE = 2
+# libzim's title-suggestion search matches on a TITLE PREFIX, not on
+# arbitrary edit distance -- so it only surfaces "Helium" for a query
+# literally spelled "heluim" when the divergence point (here "u"/"i"
+# transposed) falls late enough. Real single-edit typos on a real corpus
+# (measured, see docs/retrieval_baseline.md "Baseline v11") often diverge
+# a few characters before the end, so the query is retried against
+# progressively shorter prefixes of the misspelt term (never below
+# ``_SPELL_MIN_PREFIX_LEN``) until the true title's shared prefix is
+# reached. All variants for all terms go out as one ``multi`` batch.
+_SPELL_PREFIX_DROPS = (0, 1, 2, 3, 4)
+_SPELL_MIN_PREFIX_LEN = 3
+# A correction candidate must clear this many corpus-wide matches itself,
+# or it is not meaningfully more real than the misspelling it would
+# replace (both would otherwise look like "no signal").
+_SPELL_MIN_CORRECTED_MATCHES = 3
+# Set to "0" to force the fallback off entirely (e.g. to reproduce pre-v11
+# behavior exactly for an A/B comparison).
+_SPELL_FALLBACK_ENABLED = os.environ.get("TUTOR_RETRIEVAL_SPELLING_FALLBACK", "1") != "0"
+
 # Reuse plan §7.2 "Dense article top 16": the dense sidecar's own
 # candidate list, fused at article level with the lexical/title rankings
 # below (not blended with raw cosine/BM25 scores directly).
@@ -330,6 +360,39 @@ _UNIT_PREP_RE = re.compile(r"\bin\s+([a-z]+)\b", re.IGNORECASE)
 
 _ENTITY_ROLE_WEIGHT = 2.5
 _UNIT_ROLE_WEIGHT = 0.3
+
+
+def _damerau_levenshtein(a: str, b: str, max_dist: int = 2) -> int:
+    """Restricted Damerau-Levenshtein edit distance (insert/delete/
+    substitute/adjacent-transpose), with an early bail-out once the true
+    distance is provably > ``max_dist`` (length gap alone) -- this is only
+    ever called against a small, already-bounded candidate list, but stays
+    cheap regardless.
+    """
+    if abs(len(a) - len(b)) > max_dist:
+        return max_dist + 1
+    la, lb = len(a), len(b)
+    d = [[0] * (lb + 1) for _ in range(la + 1)]
+    for i in range(la + 1):
+        d[i][0] = i
+    for j in range(lb + 1):
+        d[0][j] = j
+    for i in range(1, la + 1):
+        for j in range(1, lb + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            d[i][j] = min(
+                d[i - 1][j] + 1,
+                d[i][j - 1] + 1,
+                d[i - 1][j - 1] + cost,
+            )
+            if (
+                i > 1
+                and j > 1
+                and a[i - 1] == b[j - 2]
+                and a[i - 2] == b[j - 1]
+            ):
+                d[i][j] = min(d[i][j], d[i - 2][j - 2] + 1)
+    return d[la][lb]
 
 
 def _term_role_weights(query: str) -> dict[str, float]:
@@ -567,6 +630,7 @@ class ResearchResponse:
     timings: dict[str, Any] = field(default_factory=dict)
     dense_used: bool = False
     dense_note: str | None = None
+    corrected_terms: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -578,6 +642,7 @@ class ResearchResponse:
             "timings": self.timings,
             "dense_used": self.dense_used,
             "dense_note": self.dense_note,
+            "corrected_terms": self.corrected_terms,
         }
 
 
@@ -898,6 +963,99 @@ class ResearchEngine:
             self._idf_cache.popitem(last=False)
         return matches
 
+    def _correct_spelling(
+        self,
+        worker: Any,
+        entry: ArchiveEntry,
+        terms: list[str],
+        *,
+        deadline_s: float,
+        memo: dict[tuple[Any, ...], dict[str, Any]] | None,
+    ) -> dict[str, tuple[str, int]]:
+        """Baseline v11: try to correct each of ``terms`` (already known to
+        have ~zero corpus-wide matches) using the archive's own title-
+        suggestion search as the candidate source -- no wordlist/dependency
+        added. For each term: title-suggest it (libzim's suggestion search
+        is itself edit-distance tolerant, so a misspelling like "heluim"
+        still often surfaces "Helium" as a title), collect candidate words
+        from the returned titles within Damerau distance <=
+        ``_SPELL_MAX_EDIT_DISTANCE`` of the term, then pick whichever
+        candidate has the highest real ``estimated_matches`` -- a genuine
+        rare-but-correctly-spelt term simply won't have a close, much-more-
+        common neighbor and is correctly left uncorrected.
+
+        Returns ``{term: (corrected_term, corrected_matches)}`` for terms a
+        correction was found for; terms with no qualifying candidate are
+        omitted entirely (never a fatal error).
+        """
+        # (term, prefix) pairs to query, longest prefix (drop=0, the term
+        # itself) first -- see ``_SPELL_PREFIX_DROPS``.
+        variants: list[tuple[str, str]] = []
+        for term in terms:
+            for drop in _SPELL_PREFIX_DROPS:
+                prefix = term[: len(term) - drop]
+                if len(prefix) < _SPELL_MIN_PREFIX_LEN:
+                    break
+                variants.append((term, prefix))
+        suggest_res = _call_worker_multi(
+            worker,
+            [("search_titles", {"query": p, "limit": _SPELL_SUGGEST_LIMIT}) for _, p in variants],
+            deadline_s=deadline_s,
+            memo=memo,
+        )
+        candidates_by_term: dict[str, set[str]] = {t: set() for t in terms}
+        for i, (term, _prefix) in enumerate(variants):
+            sub_result = (
+                suggest_res.value[i]
+                if suggest_res is not None and suggest_res.status in ("ok", "partial")
+                else None
+            )
+            if sub_result is None or sub_result["status"] != "ok":
+                continue
+            for hit in sub_result["value"] or []:
+                for word in tokenize(hit.title):
+                    word = word.lower()
+                    if len(word) < _SPELL_MIN_TERM_LEN or word == term:
+                        continue
+                    if _damerau_levenshtein(term, word, _SPELL_MAX_EDIT_DISTANCE) <= (
+                        _SPELL_MAX_EDIT_DISTANCE
+                    ):
+                        candidates_by_term[term].add(word)
+        all_candidates = sorted({w for words in candidates_by_term.values() for w in words})
+        if not all_candidates:
+            return {}
+        matches_res = _call_worker_multi(
+            worker,
+            [("estimated_matches", {"term": w}) for w in all_candidates],
+            deadline_s=deadline_s,
+            memo=memo,
+        )
+        matches_by_candidate: dict[str, int] = {}
+        for i, word in enumerate(all_candidates):
+            sub_result = (
+                matches_res.value[i]
+                if matches_res is not None and matches_res.status in ("ok", "partial")
+                else None
+            )
+            if (
+                sub_result is not None
+                and sub_result["status"] == "ok"
+                and sub_result["value"] is not None
+            ):
+                matches_by_candidate[word] = int(sub_result["value"])
+        corrections: dict[str, tuple[str, int]] = {}
+        for term, words in candidates_by_term.items():
+            best_word = None
+            best_matches = 0
+            for word in words:
+                matches = matches_by_candidate.get(word, 0)
+                if matches > best_matches:
+                    best_matches = matches
+                    best_word = word
+            if best_word is not None and best_matches >= _SPELL_MIN_CORRECTED_MATCHES:
+                corrections[term] = (best_word, best_matches)
+        return corrections
+
     def _process_archive(
         self,
         entry: ArchiveEntry,
@@ -907,6 +1065,7 @@ class ResearchEngine:
         topic_hint: str | None = None,
         query_vec: Sequence[float] | None = None,
         memo: dict[tuple[Any, ...], dict[str, Any]] | None = None,
+        corrected_terms_out: dict[str, str] | None = None,
     ) -> tuple[list[dict[str, Any]], bool, str | None, list[dict[str, Any]]]:
         worker = self._get_worker(entry)
         timed_out = False
@@ -1073,6 +1232,7 @@ class ResearchEngine:
         # slot-forcing regressed recall@1.
         term_matches: dict[str, int] = {}
         rarity_order: list[str] = []
+        correction_terms: set[str] = set()
         role_weights = _term_role_weights(query)
         if tokens and remaining() > 0:
             # Single-character tokens are almost always tokenizer artifacts
@@ -1132,13 +1292,49 @@ class ResearchEngine:
             else:
                 for term in uncached_terms:
                     term_matches[term] = 0
+            # Baseline v11 (docs/retrieval_baseline.md "Baseline v11"): a
+            # term with zero (or near-zero) corpus-wide matches is either a
+            # genuinely absent word or a misspelt KEY term (e.g. "heluim"
+            # for "helium") -- the two look identical from IDF alone. Try a
+            # spelling correction ONLY for these weak-signal terms (the
+            # normal path is left untouched for every term that already has
+            # a real rarity signal), using the archive's own title-
+            # suggestion search as the candidate source so no wordlist/
+            # dependency is added.
+            zero_terms = [
+                t
+                for t in candidate_terms
+                if term_matches.get(t, 0) <= _SPELL_ZERO_MATCH_CEILING
+                and len(t) >= _SPELL_MIN_TERM_LEN
+            ]
+            spelling_corrections: dict[str, tuple[str, int]] = {}
+            if _SPELL_FALLBACK_ENABLED and zero_terms and remaining() > 0:
+                spelling_corrections = self._correct_spelling(
+                    worker,
+                    entry,
+                    zero_terms[:_MAX_SPELL_CORRECTIONS],
+                    deadline_s=_op_deadline(),
+                    memo=memo,
+                )
+            correction_terms: set[str] = set()
+            if spelling_corrections:
+                for orig, (fixed, matches) in spelling_corrections.items():
+                    term_matches[fixed] = matches
+                    correction_terms.add(fixed)
+                    if corrected_terms_out is not None:
+                        corrected_terms_out[orig] = fixed
             # Rarest (fewest corpus-wide matches) first; a term with zero
             # matches anywhere in the archive (a misspelling) carries no
             # rarity signal and is dropped, same rationale as
-            # ``rank_terms_by_rarity``.
+            # ``rank_terms_by_rarity``. Corrected terms (not in
+            # ``unique_tokens``) sort ahead of same-frequency original
+            # terms -- they are a strong, deliberately-surfaced signal.
             rarity_order = sorted(
                 (t for t in term_matches if term_matches[t] > 0),
-                key=lambda t: (term_matches[t], unique_tokens.index(t)),
+                key=lambda t: (
+                    term_matches[t],
+                    unique_tokens.index(t) if t in unique_tokens else -1,
+                ),
             )
             entity_title_hits: list[Any] = []
             entity_snippet_hits: list[Any] = []
@@ -1191,7 +1387,7 @@ class ResearchEngine:
             # already reflects title+lead coordination, not raw rarity.
             if entity_title_hits:
                 own_terms_for_entities = frozenset(
-                    tokenize(strip_instruction_words(query))
+                    {*tokenize(strip_instruction_words(query)), *correction_terms}
                 )
                 snippet_by_path = {h.path: h.snippet for h in entity_snippet_hits if h.snippet}
                 entity_hit_meta = {
@@ -1284,7 +1480,9 @@ class ResearchEngine:
         # worker, so this costs no extra round-trip) and the question's OWN
         # terms only (not keywords/topic_hint -- those already shape which
         # articles appear as hits at all via ``search_query`` above).
-        own_terms = frozenset(tokenize(strip_instruction_words(query)))
+        own_terms = frozenset(
+            {*tokenize(strip_instruction_words(query)), *correction_terms}
+        )
         hit_meta: dict[str, tuple[str, str]] = {}
         for h in (*fulltext_hits, *title_hits):
             if h.path not in hit_meta:
@@ -1541,6 +1739,11 @@ class ResearchEngine:
         # so a duplicate (op, kwargs) issued anywhere in this request hits
         # the worker at most once.
         op_memo: dict[tuple[Any, ...], dict[str, Any]] = {}
+        # Baseline v11: spelling-tolerant fallback records any corrections
+        # made across all archives consulted this request (e.g.
+        # {"heluim": "helium"}) so the UI/model can say "showing results
+        # for helium" -- see ``_correct_spelling``.
+        corrected_terms_out: dict[str, str] = {}
 
         def _consult(entries: list[ArchiveEntry]) -> None:
             nonlocal any_timeout, dense_used
@@ -1564,6 +1767,7 @@ class ResearchEngine:
                     topic_hint=topic_hint,
                     query_vec=query_vec,
                     memo=op_memo,
+                    corrected_terms_out=corrected_terms_out,
                 )
                 any_timeout = any_timeout or timed_out
                 if dense_note is not None:
@@ -1575,12 +1779,23 @@ class ResearchEngine:
 
         _consult(primary_archives)
 
+        # Baseline v11: a spelling correction found during archive
+        # consultation (e.g. "photosynthsis" -> "photosynthesis") must
+        # also count for the coverage gate below, or a passage that only
+        # ever contains the CORRECTED spelling (which is all real articles
+        # do) looks like weak/no coverage of the question's own terms and
+        # gets dropped as "empty" even though the right article was found.
+        if corrected_terms_out:
+            coverage_terms = coverage_terms | frozenset(corrected_terms_out.values())
+
         if fallback_archives and not soft_elapsed() and remaining() > 0:
             preliminary_coverage = _best_coverage(
                 candidates, coverage_terms, topic_hint_terms, own_term_count
             )
             if preliminary_coverage["weak"]:
                 _consult(fallback_archives)
+                if corrected_terms_out:
+                    coverage_terms = coverage_terms | frozenset(corrected_terms_out.values())
 
         candidates.sort(key=lambda c: -c["score"])
         # WP-B8 ranking refinements (reuse plan §7.5-7.6): documented
@@ -1683,6 +1898,7 @@ class ResearchEngine:
             timings={"elapsed_s": elapsed, "cache_hit": False},
             dense_used=dense_used,
             dense_note="; ".join(dense_notes) if dense_notes else None,
+            corrected_terms=dict(corrected_terms_out),
         )
         self._response_cache[cache_key] = response
         self._response_cache.move_to_end(cache_key)

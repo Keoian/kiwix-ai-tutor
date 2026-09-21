@@ -1394,3 +1394,51 @@ unchanged from v9: reaching it needs either a faster HTML parser
 (measure lxml/selectolax on this corpus and get sign-off to add the
 dependency) or accepting B's ranking change; A/v10's memoisation alone is
 close but not sufficient on this question set.
+
+## Baseline v11 -- spelling-tolerant fallback for a misspelt key term
+
+**Measured**: tuning split (`data/perq_v11_baseline.py`) has **zero**
+`student_phrasing` misses caused by an actual misspelling; its 5 k=5
+misses are generic-term confusion (`Water`/`Solar_System`/`Speed_of_sound`
+outranked by a generic title) plus one no-entity empty response. Per the
+brief, wrote 10 synthetic probes (single transposition/omission/doubling,
+e.g. `heluim`, `nitrogeen`) into `eval/questions/misspelling_probes.jsonl`
+(diagnostic, `split: "tuning"`, separate file).
+
+**Implementation** (`tutor/retrieval/research.py` only -- reuses existing
+`search_titles`/`estimated_matches` ops and `multi` batching, no worker.py
+change): `_correct_spelling` engages only when a content term's
+`estimated_matches` is 0. libzim's suggestion search is prefix-based, so
+candidates come from `search_titles` on the term and shrinking prefixes
+(drop 0-4 chars, floor 3); returned title words within Damerau distance
+<=2 are verified by `estimated_matches` (>=3 required) and the winner
+becomes `resp.corrected_terms` (e.g. `{"heluim": "helium"}`), feeding the
+entity search, both scorer `own_terms` sets, and the coverage gate.
+Toggle `TUTOR_RETRIEVAL_SPELLING_FALLBACK` (default ON). TDD in
+`tests/test_research.py`: fires and ranks correctly for a misspelling;
+confirmed **not** to fire for a correctly-spelt rare term or an absent
+word with no real-count candidate.
+
+**Acceptance, tuning split (n=42), 2 runs**:
+
+| metric | before | after |
+|---|---|---|
+| recall@1/3/5 | 0.595/0.690/0.762 | 0.595/0.690/0.762 |
+| MRR | 0.645 | 0.645 |
+| mean latency (s) | 1.236/1.068 | 1.180/1.063 |
+| top-5 changed / false corrections | -- | 0/42, 0 |
+
+Unchanged (no misspellings in tuning, 0 corrections fired); latency delta
+negative, within noise, well under +0.05 s.
+
+**Misspelling probes (n=10)**: recall@1/3/5 0.000/0.000/0.100 ->
+0.300/0.400/0.500; 8/10 fired a correction, 4 newly reach top-5
+(heluim, photosynthsis, oxygne, jupiterr); 1 (volcanoe) already worked via
+Xapian stemming. Remaining misses: `glod` (nonzero real count, never
+attempted by design); `lighning`->"lighting" (wrong but real, more common
+neighbor); 3 corrected but still outside top-5. Diagnostic set, not tuned
+further.
+
+**Conclusion**: ships as default -- no tuning regression, zero changed
+questions, zero false corrections, measured recall lift on the targeted
+failure mode.

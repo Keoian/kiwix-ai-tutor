@@ -1,0 +1,10 @@
+{"id": "msp01", "question": "What is the boiling point of heluim?", "expected_paths": ["Helium"], "category": "misspelling_probe", "split": "tuning"}
+{"id": "msp02", "question": "Tell me the freezing point of nitrogeen.", "expected_paths": ["Nitrogen"], "category": "misspelling_probe", "split": "tuning"}
+{"id": "msp03", "question": "How does photosynthsis work in plants?", "expected_paths": ["Photosynthesis"], "category": "misspelling_probe", "split": "tuning"}
+{"id": "msp04", "question": "Can you describe how volcanoe eruptions happen?", "expected_paths": ["Volcano"], "category": "misspelling_probe", "split": "tuning"}
+{"id": "msp05", "question": "What causes lighning during a storm?", "expected_paths": ["Lightning"], "category": "misspelling_probe", "split": "tuning"}
+{"id": "msp06", "question": "Explain how a rainbwo forms in the sky.", "expected_paths": ["Rainbow"], "category": "misspelling_probe", "split": "tuning"}
+{"id": "msp07", "question": "What is the chemical symbol for oxygne?", "expected_paths": ["Oxygen"], "category": "misspelling_probe", "split": "tuning"}
+{"id": "msp08", "question": "Name the largest planet, jupiterr, in our solar system.", "expected_paths": ["Jupiter"], "category": "misspelling_probe", "split": "tuning"}
+{"id": "msp09", "question": "What is the chemical symbol for glod?", "expected_paths": ["Gold"], "category": "misspelling_probe", "split": "tuning"}
+{"id": "msp10", "question": "Give me the definition of denstiy in physics.", "expected_paths": ["Density"], "category": "misspelling_probe", "split": "tuning"}

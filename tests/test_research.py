@@ -893,3 +893,137 @@ def test_idf_lookup_is_cached_per_archive_and_term(registry_toml, snapshot_store
     calls_after_first = dict(worker.calls)
     engine._process_archive(entry, "boiling point helium celsius", lambda: 5.0)
     assert worker.calls == calls_after_first, "second call must hit the IDF cache, not the worker"
+
+
+# ---------------------------------------------------------------------------
+# Baseline v11: spelling-tolerant fallback for a misspelt KEY term.
+#
+# "heluim" has zero corpus-wide estimated_matches (the normal path's rarity
+# signal is dropped for it -- see the comment above `rarity_order`), so
+# nothing in the pre-v11 pipeline ever discovers "Helium". libzim's own
+# title-suggestion search (`search_titles`) is fuzzy/prefix-based and, per
+# the task brief, can surface "Helium" for the query "heluim" directly --
+# that fuzzy suggestion is the candidate SOURCE; the edit-distance check and
+# the `estimated_matches` verification are what the fallback adds so a
+# wrong or over-eager suggestion doesn't get taken on faith.
+# ---------------------------------------------------------------------------
+
+
+class _MisspellFakeWorker(_EntityFakeWorker):
+    """Reuses `_EntityFakeWorker`'s corpus, but the question spells
+    "helium" as "heluim" (a real transposition, Damerau distance 1). The
+    correctly-spelled fake corpus (`_MATCHES`, `_TITLE_HITS`,
+    `_GENERIC_HITS`) is otherwise unchanged -- "heluim" is simply absent
+    from it (`estimated_matches("heluim") == 0`, `search_titles`/
+    `search_fulltext` for the literal string "heluim" return no direct
+    hits), except for one thing: libzim's real title-suggestion search is
+    itself edit-distance tolerant, so `search_titles("heluim", ...)` is
+    stubbed to still surface "Helium" as a suggestion -- the fuzzy
+    candidate source the fallback is built to use.
+    """
+
+    def request(self, op: str, *, deadline_s: float, **kwargs) -> WorkerResult:
+        if op == "search_titles" and kwargs.get("query", "").strip() == "heluim":
+            return WorkerResult(
+                status="ok",
+                value=self._hits([("Helium", "Helium")], "title"),
+                error=None,
+                elapsed_s=0.0,
+            )
+        if op == "search_fulltext":
+            query = kwargs["query"]
+            terms = set(query.split())
+            if terms == {"boiling"} or terms == {"point"}:
+                return WorkerResult(
+                    status="ok",
+                    value=self._hits(self._GENERIC_HITS, "fulltext"),
+                    error=None,
+                    elapsed_s=0.0,
+                )
+            if terms == {"helium"}:
+                return WorkerResult(
+                    status="ok",
+                    value=self._hits([("Helium", "Helium")], "fulltext"),
+                    error=None,
+                    elapsed_s=0.0,
+                )
+        return super().request(op, deadline_s=deadline_s, **kwargs)
+
+
+def test_misspelt_key_term_is_corrected_and_finds_entity(registry_toml, snapshot_store, tmp_path):
+    from tutor.retrieval.registry import load_registry
+
+    registry = load_registry(registry_toml)
+    engine = _engine(
+        registry_toml,
+        snapshot_store,
+        tmp_path,
+        worker_factory=lambda path: _MisspellFakeWorker(path),
+    )
+    entry = registry.for_subject(None)[0]
+    corrected_terms_out: dict[str, str] = {}
+    candidates, _timed_out, _note, _key_facts = engine._process_archive(
+        entry,
+        "What is the boiling point of heluim?",
+        lambda: 5.0,
+        corrected_terms_out=corrected_terms_out,
+    )
+    titles = _titles_by_rank(candidates)
+    assert titles and titles[0] == "Helium", titles
+    assert corrected_terms_out == {"heluim": "helium"}
+
+
+def test_correctly_spelt_rare_term_is_not_corrected(registry_toml, snapshot_store, tmp_path):
+    """A real rare term with its own small-but-nonzero corpus count (e.g.
+    "celsius") must never be treated as a misspelling -- the fallback only
+    engages for terms whose estimated_matches is (near-)zero."""
+    from tutor.retrieval.registry import load_registry
+
+    registry = load_registry(registry_toml)
+    engine = _engine(
+        registry_toml,
+        snapshot_store,
+        tmp_path,
+        worker_factory=lambda path: _EntityFakeWorker(path),
+    )
+    entry = registry.for_subject(None)[0]
+    corrected_terms_out: dict[str, str] = {}
+    engine._process_archive(
+        entry,
+        "Output the boiling point of helium in celsius and farenheit.",
+        lambda: 5.0,
+        corrected_terms_out=corrected_terms_out,
+    )
+    assert corrected_terms_out == {}
+
+
+def test_no_correction_when_no_close_candidate_has_real_matches(
+    registry_toml, snapshot_store, tmp_path
+):
+    """A genuinely absent word (not a misspelling of anything in the
+    archive) must not be "corrected" to some unrelated title word."""
+
+    class _NoCandidateWorker(_EntityFakeWorker):
+        def request(self, op: str, *, deadline_s: float, **kwargs) -> WorkerResult:
+            if op == "search_titles" and kwargs.get("query", "").strip() == "xylophonium":
+                return WorkerResult(status="ok", value=[], error=None, elapsed_s=0.0)
+            return super().request(op, deadline_s=deadline_s, **kwargs)
+
+    from tutor.retrieval.registry import load_registry
+
+    registry = load_registry(registry_toml)
+    engine = _engine(
+        registry_toml,
+        snapshot_store,
+        tmp_path,
+        worker_factory=lambda path: _NoCandidateWorker(path),
+    )
+    entry = registry.for_subject(None)[0]
+    corrected_terms_out: dict[str, str] = {}
+    engine._process_archive(
+        entry,
+        "What is the boiling point of xylophonium?",
+        lambda: 5.0,
+        corrected_terms_out=corrected_terms_out,
+    )
+    assert corrected_terms_out == {}
