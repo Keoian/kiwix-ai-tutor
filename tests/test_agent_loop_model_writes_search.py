@@ -36,6 +36,8 @@ class FakeLlmClient:
         self._scripts = list(scripts)
         self.calls: list[list[dict]] = []
         self.tool_choice_calls: list[object] = []
+        self.tools_calls: list[object] = []
+        self.response_format_calls: list[object] = []
 
     def stream_chat(
         self,
@@ -50,6 +52,8 @@ class FakeLlmClient:
     ):
         self.calls.append([dict(m) for m in messages])
         self.tool_choice_calls.append(tool_choice)
+        self.tools_calls.append(tools)
+        self.response_format_calls.append(response_format)
         script = self._scripts.pop(0)
         yield from script
 
@@ -549,3 +553,66 @@ def test_clip_model_written_question_clips_to_30_words_and_single_line():
 
     assert _clip_model_written_question(None) is None
     assert _clip_model_written_question("   ") is None
+
+
+def test_forced_call_schema_requires_question_first_queries_bounded():
+    """The forced round's own request must send a tools schema (NOT the
+    default RESEARCH_TOOL shown for voluntary calls) where ``question`` is
+    REQUIRED and listed first in ``properties`` -- so a grammar-constrained
+    server generates it before ``queries`` -- and ``queries`` keeps its
+    1-3 item bound. Host-side validation of a voluntary call (the plain
+    ``RESEARCH_TOOL``) must still accept a missing ``question``."""
+    from tutor.tools.schemas import FORCED_RESEARCH_TOOL, RESEARCH_TOOL, validate_tool_call
+
+    forced_params = FORCED_RESEARCH_TOOL["function"]["parameters"]
+    assert forced_params["required"] == ["question", "queries"]
+    prop_names = list(forced_params["properties"].keys())
+    assert prop_names.index("question") < prop_names.index("queries")
+    assert forced_params["properties"]["queries"]["minItems"] == 1
+    assert forced_params["properties"]["queries"]["maxItems"] == 3
+
+    # Voluntary-call schema is untouched: question still optional.
+    assert "question" not in RESEARCH_TOOL["function"]["parameters"]["required"]
+    result = validate_tool_call("research", json.dumps({"queries": ["Titin"]}))
+    assert result.ok is True
+
+
+def test_forced_call_sends_forced_schema_to_llm():
+    """End-to-end: the actual request the forced round issues to the LLM
+    (the ``tools`` kwarg on ``stream_chat``) is ``[FORCED_RESEARCH_TOOL]``,
+    not the full ``TOOLS`` list -- i.e. the required/minItems constraints
+    on this call really do reach the request payload the server's grammar
+    is built from."""
+    from tutor.tools.schemas import FORCED_RESEARCH_TOOL
+
+    session, budget = _mk_session()
+    llm = FakeLlmClient(
+        [
+            _tool_call(
+                "research",
+                {"question": "What is the longest molecule?", "queries": ["Titin"]},
+            ),
+            _final("Titin is the largest known protein [S1]."),
+        ]
+    )
+    research = ScriptedResearchEngine(
+        [
+            _strong_response(1, title="Molecule"),
+            _strong_response(2, title="Titin"),
+        ]
+    )
+    calc = FakeCalc()
+
+    run_turn(
+        session,
+        _UserInput(kind="text", text="What's the largest molecule?"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+        model_writes_search=True,
+    )
+
+    forced_call_tools = llm.tools_calls[0]
+    assert forced_call_tools == [FORCED_RESEARCH_TOOL]

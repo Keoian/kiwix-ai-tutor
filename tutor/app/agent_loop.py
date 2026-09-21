@@ -39,7 +39,7 @@ from tutor.app.prompt import PromptOverflow, render_evidence_with_reuse
 from tutor.app.repetition_guard import find_repetition_loop
 from tutor.retrieval.assessment import assess_evidence
 from tutor.retrieval.hybrid.lexical import singularize, tokenize
-from tutor.tools.schemas import TOOLS, validate_tool_call
+from tutor.tools.schemas import FORCED_RESEARCH_TOOL, TOOLS, validate_tool_call
 
 RESEARCH_CAP = 2
 CALC_CAP = 4
@@ -231,24 +231,21 @@ _FOLLOWUP_HOST_NOTE = (
 # title-like queries instead of sentences/questions.
 _MODEL_WRITES_SEARCH_HOST_NOTE = (
     " [Host note: call research. FIRST give \"question\": the student's "
-    "latest message rewritten as one complete standalone question, with "
-    "every \"it\"/\"that\"/\"they\"/\"the other ones\"/etc. replaced by "
-    "what it refers to in the lesson so far. For example: lesson has been "
-    "about tires and rubber, student asks \"They're a single molecule?\" "
-    "-> question \"Is a tire a single molecule?\"; lesson has been about "
-    "titin being the longest molecule, student asks \"What are the other "
-    "ones?\" -> question \"What other very long molecules are there "
-    "besides titin?\". THEN give 1-3 short library search \"queries\" for "
-    "that question. Write them like encyclopedia article titles or key "
-    "terms, NOT full sentences or questions. Fix spelling. Leave out "
-    "describing words like \"biggest\", \"longest\", \"fastest\", or \"how "
-    "long\" unless they are part of a real title. If you already know the "
-    "likely answer, make that one of the queries. Do not repeat the exact "
-    "same queries as your previous turn unless the question is the same. "
-    "For example: student asks \"What's the biggest animal?\" -> question "
-    "\"What is the biggest animal?\", queries \"Blue whale\", \"Largest "
-    "animals\"; student asks \"How long is DNA?\" -> question \"How long "
-    "is DNA?\", queries \"DNA\", \"Chromosome\", \"Base pair\".]"
+    "latest message rewritten as one standalone question, replacing "
+    "\"it\"/\"that\"/\"they\"/\"the other ones\"/etc. with what it refers "
+    "to in the lesson so far, and fixing spelling. E.g. lesson about tires "
+    "and rubber, student says \"They're a single molecule?\" -> question "
+    "\"Is a tire a single molecule?\"; lesson about titin, student says "
+    "\"What are the other ones?\" -> question \"What other very long "
+    "molecules are there besides titin?\"; student says \"calvinize the "
+    "rubber\" -> question \"Does vulcanizing rubber make a tire a single "
+    "molecule?\", queries \"Vulcanization\", \"Rubber\", \"Tire\". THEN "
+    "give 1-3 short \"queries\" for that question, like encyclopedia "
+    "article titles or key terms, NOT full sentences. Leave out describing words "
+    "like \"biggest\"/\"longest\"/\"fastest\"/\"how long\" unless part of "
+    "a real title. If you already know the likely answer, make that one "
+    "of the queries. Don't repeat last turn's exact queries unless the "
+    "question is the same.]"
 )
 
 # Small cap on the forced rewrite call's own output -- it only needs to
@@ -536,7 +533,7 @@ def _forced_research_tool_call(llm, messages: list[dict], *, cancel):
     errored = False
     for evt in llm.stream_chat(
         messages,
-        tools=TOOLS,
+        tools=[FORCED_RESEARCH_TOOL],
         tool_choice=forced_tool_choice,
         cancel=cancel,
         max_tokens=_FORCED_REWRITE_MAX_TOKENS,
@@ -577,14 +574,15 @@ def _forced_research_tool_call(llm, messages: list[dict], *, cancel):
             "schema": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["queries"],
+                "required": ["question", "queries"],
                 "properties": {
+                    "question": {"type": "string", "maxLength": 300},
                     "queries": {
                         "type": "array",
                         "items": {"type": "string", "maxLength": 80},
                         "minItems": 1,
                         "maxItems": 3,
-                    }
+                    },
                 },
             },
         },
@@ -612,8 +610,12 @@ def _forced_research_tool_call(llm, messages: list[dict], *, cancel):
     queries = [q for q in queries if isinstance(q, str) and q.strip()][:3]
     if not queries:
         return None
-    arguments_json = json.dumps({"queries": queries})
-    return "forced-rewrite-fallback", queries, arguments_json, None
+    fallback_question = parsed.get("question") if isinstance(parsed, dict) else None
+    fallback_args: dict = {"queries": queries}
+    if isinstance(fallback_question, str) and fallback_question.strip():
+        fallback_args["question"] = fallback_question
+    arguments_json = json.dumps(fallback_args)
+    return "forced-rewrite-fallback", queries, arguments_json, fallback_question
 
 
 # Short instruction appended after strong merged evidence on a follow-up

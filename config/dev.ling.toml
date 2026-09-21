@@ -1,0 +1,48 @@
+# Dev config (EXPERIMENT): inclusionAI Ling 3.0 Tiny (7.9B total / 1.3B active MoE,
+# hybrid linear attention, MIT licence), bartowski Q4_K_M GGUF (4.92 GB), thinking
+# switched OFF at the server. Owner-requested manual trial, 2026-09-21.
+# To go back to Granite: use config/dev.toml or config/dev.granite.toml (both Granite).
+# Not yet measured: VRAM at 32K, speed, tool-call reliability, answer quality.
+
+[runtime]
+runtime_dir = 'C:\git\bonsai'
+model_path = 'C:\git\kiwix-ai-tutor\runtime\models\ling-3.0-tiny\Ling-3.0-tiny-Q4_K_M.gguf'
+server_binary = "bin/llama-server.exe"
+
+[server]
+host = "127.0.0.1"
+port = 8080
+ctx_size = 32768
+cache_type_k = "q8_0"
+cache_type_v = "q8_0"
+n_gpu_layers = 99
+parallel = 1
+flash_attn = true
+jinja = true
+# Thinking off: a tutor turn must not spend hundreds of hidden tokens first.
+extra_args = ["--chat-template-kwargs", "{\"enable_thinking\":false}", "--reasoning-budget", "0"]
+slots = true
+
+[sampling]
+temperature = 0.7
+top_p = 0.95
+top_k = 20
+
+[app]
+host = "127.0.0.1"
+port = 8420
+data_dir = "data"
+registry_path = "config/archives.dev.toml"
+answer_max_tokens = 2000
+
+[embedding]
+host = "127.0.0.1"
+port = 8081
+model_path = 'C:\git\kiwix-ai-tutor\runtime\models\embedding.gguf'
+dim = 384
+n_gpu_layers = 0
+threads = 4
+ctx_size = 512
+sidecar_dir = "runtime/simplewiki_dense"
+archive_id = "simplewiki"
+enabled = false

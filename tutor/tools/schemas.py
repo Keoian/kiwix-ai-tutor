@@ -65,6 +65,57 @@ RESEARCH_TOOL: dict = {
     },
 }
 
+
+# Schema used ONLY for the forced ``research`` call under
+# ``app.model_writes_search`` (see ``tutor/app/agent_loop.py``,
+# ``_forced_research_tool_call``) -- NOT shown to the model for a
+# voluntary ``research`` call, and NOT used by ``validate_tool_call``
+# (host-side validation of any actual call, forced or voluntary, still
+# treats ``question`` as optional; see ``RESEARCH_TOOL`` above). Unlike
+# ``RESEARCH_TOOL``, ``question`` is REQUIRED and listed FIRST in
+# ``properties`` so a grammar-constrained server (llama-server's
+# tool-call/json-schema grammar generates object fields in schema order)
+# produces the standalone question before the keyword queries, rather
+# than the model being free to skip it. ``query``/``keywords`` are
+# dropped entirely here -- the forced round only ever wants
+# question+queries.
+FORCED_RESEARCH_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "research",
+        "description": RESEARCH_TOOL["function"]["description"],
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["question", "queries"],
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": (
+                        "The student's latest message rewritten as one complete "
+                        "standalone question, with every pronoun/reference "
+                        "('it', 'that', 'they', 'the other ones', ...) replaced "
+                        "by what it refers to in the lesson so far."
+                    ),
+                    "maxLength": 300,
+                },
+                "queries": {
+                    "type": "array",
+                    "description": (
+                        "1-3 short library search queries for that question: "
+                        "title-like terms, not full sentences. Fix spelling, "
+                        "split/join fused words, use the standard name of the "
+                        "topic."
+                    ),
+                    "items": {"type": "string", "maxLength": 80},
+                    "minItems": 1,
+                    "maxItems": 3,
+                },
+            },
+        },
+    },
+}
+
 CALC_TOOL: dict = {
     "type": "function",
     "function": {
