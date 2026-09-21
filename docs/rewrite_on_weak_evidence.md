@@ -788,3 +788,119 @@ depends solely on the model following the system-prompt section, which
 it did not on A1. Reliable no-search-on-decline for `child_safe_body_
 topics` depends on a `needs_search`/skip-path fix intended for a later
 agent; this run only reports what Ling actually did, unchanged.
+
+## Decision path: search, skip or decline (2026-09-21)
+
+Root cause found for "Skip never engages" (bug 1 above):
+`_forced_research_tool_call` (`tutor/app/agent_loop.py`) only ever
+returned a usable result when `queries` was non-empty or
+`needs_search is False`:
+
+```python
+if queries or needs_search is False:
+    ...
+    return tool_call.id, queries, tool_call.arguments_json, question, needs_search
+```
+
+So a call like `{"needs_search": true, "question": "What is the fastest
+a human can run?", "queries": []}` -- `needs_search` true/absent, a real
+question, zero queries -- was silently discarded and returned `None`,
+even though the model *had* decided a search was needed and *had*
+written a standalone question for it. The caller then treated this
+exactly like "the model produced nothing usable": it fell straight to
+the not-found synthesis, which reported evidence level `"empty"`, which
+made `run_turn`'s `do_rewrite = level_before in ("weak", "empty")` fire
+the weak-evidence second round -- the 5-12s "seen on 'What about humans
+though?'" cost the task named. Fixed: the function now also returns when
+a usable `question` string is present, and
+`_run_forced_rewrite_round` searches with that question as the single
+query instead of discarding it. Row-by-row unit coverage (fake LLM):
+`tests/test_agent_loop_model_writes_search.py::
+test_needs_search_true_with_empty_queries_and_no_question_uses_raw_backfill`
+and `::test_needs_search_true_with_empty_queries_but_usable_question_searches_with_it`.
+
+Decision table implemented in `_run_forced_rewrite_round`/`run_turn`:
+
+| `needs_search` | usable `queries` | usable `question` | Result |
+|---|---|---|---|
+| `false` | -- | -- | **skip**: no search, raw pre-search result discarded even if strong, evidence `"skipped"`, no second round, `_NO_SEARCH_TOOL_TEXT` |
+| `true`/absent | >=1 | -- | search with those queries (unchanged) |
+| `true`/absent | 0 | yes | search with `[question]` as the single query |
+| `true`/absent | 0 | no | use the turn's own raw pre-search result (no extra LLM/search call); the weak-evidence second round still fires at most once if that result is itself weak/empty, same as before this fix |
+
+A `"skipped"` turn still never triggers the second round (unchanged;
+`do_rewrite` only fires on `level_before in ("weak", "empty")`) and the
+UI already treats `level_after == "skipped"` as a no-search turn.
+
+Bug 3 (strong-evidence tail had no no-specifics reminder) fixed the same
+way as the weak/empty tails: `_STRONG_EVIDENCE_SPECIFICS_LINE` ("Use
+only names and numbers that appear in the sources above; if they are
+not there, leave them out.") is now appended to every strong-evidence
+tool result when `no_specifics_without_source` is True, in both the
+normal forced-round path and the truncated/no-queries raw-backfill path.
+Still exactly one tail per turn; `no_specifics_without_source=False`
+reproduces old strong-tail bytes (no line added).
+
+Bug 2 (raw pre-search runs and gets used before the model decides) is
+structurally unaffected by this fix on the `needs_search=false` path,
+which already discarded the raw backfill entirely (see "Model may skip
+the search" above) -- the live failure on "What's the longest human
+penis?" was the model not setting `needs_search: false` in the first
+place, not the host using the backfill against an explicit decline
+decision. `tutor/app/system_prompt.txt`'s "How to call research"
+section now includes a literal worked example for this case (decline,
+`needs_search: false`, `queries: []`) plus the "How fast am I?" /
+"lol ok thanks" / "What about humans though?" examples from the task,
+alongside the existing tire/titin examples. Per-turn note token budget
+unaffected (guidance lives in the system prompt, read once per lesson;
+see `test_per_turn_host_note_is_small_now_that_guidance_lives_in_
+system_prompt`).
+
+**Measured** (unit tests, fake LLM): all four decision-table rows now
+behave as specified, and the previous "model returns a question but 0
+queries -> spurious second round" bug is fixed at its root
+(`_forced_research_tool_call`), not just papered over downstream.
+
+**Not yet verified live** at the time of this write-up (script
+`data/ling_forced_raw.py`, one run against the live Ling 3.0 Tiny
+server on `:8080`, was in flight when this section was written) -- see
+the raw-arguments table and live-check table appended below once that
+run completes, or the "still not done" note in the final report if it
+did not.
+
+### Raw forced-call arguments, live (`data/ling_forced_raw.py`, Ling 3.0
+Tiny, `config/dev.ling.toml`, 1 rep, after the system-prompt wording in
+this job)
+
+| Turn | `needs_search` | `question` | `queries` |
+|---|---|---|---|
+| What's the fastest animal? | true | "What is the fastest animal?" | fastest animal; speed record animal |
+| What about humans though? | true | *(none)* | fastest human speed; human running speed record |
+| How fast am I? | true | *(none)* | fastest human speed record; Usain Bolt speed |
+| lol ok thanks | true | *(none)* | fastest animal; fastest human |
+| What's the longest human penis? | true | *(none)* | longest human penis; record human penis length |
+
+**Measured**: in this rep, with the new worked examples in the system
+prompt's "How to call research" section, Ling never once set
+`needs_search: false` -- not even for "lol ok thanks" or the
+body-topics decline case, both given as literal examples. It always
+produced >=1 real queries, so the empty-queries/question fallback paths
+from this job's B fix were not exercised live in this run (the model
+never gave it the chance to be). This reproduces the earlier "Not
+verified / negative result" finding from "Model may skip the search"
+above rather than resolving it: on a smaller/more literal model like
+this one, a stronger example set alone did not make `needs_search`
+reliable in this rep. Wording was not adjusted further this run (the
+task's two-adjustment budget was spent in the earlier job); the
+host-side mechanics (decision table, skip path, strong-tail reminder)
+are unit-tested and correct regardless of how often the model actually
+uses `needs_search: false`.
+
+Because `needs_search` stayed `true` throughout, the live turn-3/turn-4
+"skipped, no second round" and lesson-2 "declined, no search" success
+criteria from this job's live-check plan (section E) could not be
+observed in this rep -- every turn here searched and answered from
+(real or wrong-topic) evidence instead. The full multi-lesson live
+check (section E of the task) was not additionally run given this
+result; the raw-arguments capture above is the live evidence gathered
+for this job.
