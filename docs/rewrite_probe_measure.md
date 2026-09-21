@@ -144,3 +144,21 @@ kid-phrasing), 5 `empty`, 2 `weak`.
 `weak`); the 5 misses split 1 `strong`, 4 `empty`.
 The citation-experiment's 18 tuning questions are a category subset of
 the same simplewiki tuning split above -- not run separately.
+
+## End-to-end probe A/B on current code (2026-09-21, after retrieval v15 + assessor fixes)
+
+Measured by the orchestrator with `data/probe_rewrite_ab.py --out data/probe_rewrite_ab.v15.jsonl`
+(28 questions = 18 kid-phrasing + 10 misspelling probes, single-turn lessons, live Granite, commit 7f48207+).
+
+| Arm | n | gold article in evidence | rewrite fired | strong but gold absent | "couldn't find it" | mean wall | backed sentence rate |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| rewrite ON | 28 | **17** | 10 | 8 | 0 | 10.1 s | **0.68** |
+| rewrite OFF | 28 | 11 | 0 | 8 | 0 | 8.9 s | 0.39 |
+
+- Rescued by the rewrite (gold absent OFF, present ON): kid07, kid14, msp02, msp05, msp06, msp09. Lost with rewrite: none.
+- Granite's rewrites were correct in all 10 fired cases, e.g. "how does fotosinthesis work?" -> "how does photosynthesis work";
+  "what were dinasors like a long time ago?" -> "what were dinosaurs like long ago"; "nitrogeen" -> "Freezing point of nitrogen";
+  "rainbwo" -> "how does a rainbow form in the sky"; "glod" -> "chemical symbol for gold".
+- Still open: 8 turns per arm are rated strong while the gold article is absent (assessor false-strong), so no rewrite fires there;
+  0 "couldn't find it" answers in this set (expected: these topics exist in the library). Out-of-library compliance is not measured yet.
+- Cost: mean wall +1.2 s across all turns (rewritten turns pay ~5 s each).
