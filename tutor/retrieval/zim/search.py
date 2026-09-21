@@ -37,15 +37,51 @@ _SNIPPET_CONTEXT_CHARS = 80
 # (data/perq_v9_default_run2.json vs data/perq_v9_A_run2.json). Set this env
 # var to "0" to force it off (e.g. to reproduce pre-v9 timings exactly).
 _TEXT_CACHE_ENABLED = os.environ.get("TUTOR_RETRIEVAL_SNIPPET_TEXT_CACHE", "1") != "0"
-_TEXT_CACHE_MAXSIZE = 256
+
+# Baseline v10 (docs/retrieval_baseline.md): profiling ~200 real miss-path
+# hits found bs4 DOM construction (``BeautifulSoup(html, "html.parser")``)
+# is 78% of per-hit miss cost (~17.5 ms/hit); fetch (get_item + bytes()) is
+# 20% (~4.5 ms/hit); decode and get_text are each under 2%. No faster parser
+# backend is installed (checked ``pip list``: no lxml, selectolax, or
+# html5lib) -- adding one was not done here per the task brief; it would
+# need to be measured and proposed separately. Given that, this baseline's
+# two safe, ranking-preserving wins are both memoisation, not parsing:
+#
+# 1. bound the existing text cache by bytes instead of a fixed entry count,
+#    so more distinct articles stay resident within an explicit, small
+#    memory budget (see ``_CACHE_MAX_BYTES`` below) instead of an arbitrary
+#    256-entry cap.
+# 2. share the fetched/decoded HTML between this module's snippet path and
+#    ``fetch_entry`` (used by the passage-extraction pipeline, see
+#    ``research.py`` call site 4 and ``tutor.retrieval.zim.bundle``): the
+#    articles ``fetch_entry`` is called for (``top_paths``) are drawn from
+#    the same search hits that already had a snippet computed, so caching
+#    the *raw decoded HTML* (not the final text -- ``fetch_entry`` and the
+#    snippet path apply different post-processing to it) lets a repeat path
+#    skip get_item()+decode (~20% of miss cost) even though each caller
+#    still parses independently (their downstream algorithms differ:
+#    ``build_bundle`` renders a structured, furniture-stripped document;
+#    the snippet path just wants ``get_text()``).
+#
+# Memory bound: the spec (docs/plan/offline_tutor_spec_v0.3.md, "16 GB RAM"
+# row) budgets the retrieval worker at <= 1 GiB total. Both caches below are
+# capped at 20 MiB of cached string content each (~40 MiB combined) --
+# roughly 2% of that budget, measured in Python string length as a cheap
+# proxy for UTF-8 byte size (an undercount for non-ASCII text, which is rare
+# in this corpus; never an overcount that would blow the bound the other
+# way in the cases that matter).
+_CACHE_MAX_BYTES = 20 * 1024 * 1024
 
 
 class _TextCache:
-    """Tiny per-process LRU cache from (archive identity, path) -> plain text."""
+    """Per-process LRU cache from (archive identity, path) -> a string,
+    bounded by total cached string length rather than entry count (Baseline
+    v10) so cache capacity is an explicit, small memory budget."""
 
-    def __init__(self, maxsize: int = _TEXT_CACHE_MAXSIZE) -> None:
-        self.maxsize = maxsize
+    def __init__(self, max_bytes: int = _CACHE_MAX_BYTES) -> None:
+        self.max_bytes = max_bytes
         self._data: OrderedDict[tuple[int, str], str] = OrderedDict()
+        self._total_bytes = 0
 
     def get_or_compute(self, archive: Any, path: str, compute: Callable[[], str]) -> str:
         key = (id(archive), path)
@@ -56,15 +92,21 @@ class _TextCache:
         value = compute()
         self._data[key] = value
         self._data.move_to_end(key)
-        if len(self._data) > self.maxsize:
-            self._data.popitem(last=False)
+        self._total_bytes += len(value)
+        while self._total_bytes > self.max_bytes and len(self._data) > 1:
+            _, evicted = self._data.popitem(last=False)
+            self._total_bytes -= len(evicted)
         return value
 
     def clear(self) -> None:
         self._data.clear()
+        self._total_bytes = 0
 
 
 _default_text_cache = _TextCache()
+# Baseline v10: raw decoded HTML (pre-unescape), shared between the snippet
+# path (_resolve_hits) and fetch_entry -- see the note above.
+_default_html_cache = _TextCache()
 
 
 class NoFulltextIndex(Exception):
@@ -176,12 +218,18 @@ def _resolve_hits(
         if want_snippet:
             try:
                 if _TEXT_CACHE_ENABLED:
+
+                    def _fetch_raw_html(entry: Any = entry) -> str:
+                        return bytes(entry.get_item().content).decode(
+                            "utf-8", errors="replace"
+                        )
+
                     text = _default_text_cache.get_or_compute(
                         archive,
                         final_path,
                         lambda entry=entry: _extract_text(
-                            bytes(entry.get_item().content).decode(
-                                "utf-8", errors="replace"
+                            _default_html_cache.get_or_compute(
+                                archive, final_path, _fetch_raw_html
                             )
                         ),
                     )
@@ -277,7 +325,15 @@ def fetch_entry(archive: Any, path: str) -> FetchedEntry:
     resolved = resolve_entry(archive, path)
     entry = resolved.entry
     item = entry.get_item()
-    html = _html.unescape(bytes(item.content).decode("utf-8", errors="replace"))
+    if _TEXT_CACHE_ENABLED:
+        raw_html = _default_html_cache.get_or_compute(
+            archive,
+            resolved.final_path,
+            lambda item=item: bytes(item.content).decode("utf-8", errors="replace"),
+        )
+    else:
+        raw_html = bytes(item.content).decode("utf-8", errors="replace")
+    html = _html.unescape(raw_html)
     return FetchedEntry(
         path=resolved.final_path,
         title=entry.title,

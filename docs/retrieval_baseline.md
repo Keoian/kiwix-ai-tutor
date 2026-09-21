@@ -1325,3 +1325,72 @@ tuned on the small, already-observed 42-question tuning split.
 what A alone gives, prefer combining A with Baseline v7/v8's batching
 work or a genuinely new signal (e.g. a real corpus-side snippet cache
 across requests) over trading recall on this split.
+
+## Baseline v10 -- cheaper snippet text extraction (memoisation, no new parser)
+
+**Profiled** (`data/snippet_cost_v10_profile.py`, 200 real miss-path hits,
+real archive): bs4 `BeautifulSoup(html, "html.parser")` construction is
+**78%** of per-hit cost (17.5 ms/hit); fetch (`get_item`+`bytes()`) is
+**20%** (4.5 ms/hit); decode and `get_text()` are each **<2%** (0.04 ms,
+0.34 ms/hit). `pip list` has no lxml/selectolax/html5lib -- a faster
+parser was NOT added (would need approval); the DOM-build cost is
+otherwise the real bottleneck and is reported, not shipped.
+
+**Shipped**: `tutor/retrieval/zim/search.py` (a) the existing per-worker
+text cache is now bounded by cached-string bytes (`_CACHE_MAX_BYTES`, 20
+MiB) instead of a 256-entry cap, so more distinct articles stay resident;
+(b) a second cache (`_default_html_cache`) holds the raw decoded HTML
+(pre-unescape), shared between the snippet path and `fetch_entry` --
+`research.py`'s `top_paths` (fed to `build_bundle`) are drawn from the
+same hits that already got a snippet, so a repeat path skips
+get_item+decode (~20% of miss cost) even though each caller still parses
+independently (different algorithms: `get_text()` vs `build_bundle`'s
+structured render). Memory bound: spec's retrieval-worker budget is <= 1
+GiB; both caches combined cap at 40 MiB (~4%), measured in Python string
+length as a byte proxy.
+
+**Identity proof**: `data/identity_check_v10.py`, 2,300 real articles
+sampled by entry id across the whole simplewiki archive (denser than the
+brief's 2,000 floor) -- cache-on cold and warm text and `fetch_entry().html`
+compared against cache-off/fresh computation: 0 mismatches
+(`text mismatches: 0 / 2300`, `fetch_entry mismatches: 0 / 2300`). Tuning
+split: `data/perq_v9_variant.py v10 <run>` (reused v9's script; env var
+unchanged), 3 runs -- run1 and run3 are byte-identical to v9's `default`
+(cache-off) baseline on all 42 questions' `passages` (path+text); run2 hit
+one transient timeout on `sw41` (empty passages, re-ran clean) traced to
+system load, not the code change -- excluded as noise, not a caching bug.
+
+Measured (`data/perq_v9_v10_run{1,3}.json`, tuning split, real archive,
+`config/archives.simplewiki_only.toml`):
+
+| metric | v9 candidate A | v10 run1 | v10 run3 |
+|---|---|---|---|
+| mean latency (s) | 1.029 | 1.265 | 1.061 |
+| p95 latency (s) | 2.688 | 3.172 | 2.812 |
+| recall@1/3/5 | 0.595/0.690/0.762 | 0.595/0.690/0.762 | 0.595/0.690/0.762 |
+| MRR | 0.645 | 0.645 | 0.645 |
+| changed questions vs v9 default | 0 | 0 | 0 |
+
+Recall/MRR **measured, unchanged**. Latency is within run-to-run noise of
+v9's 1.029 s and does **not** meet the <=1.0 s target on this machine at
+this moment -- the added html-cache sharing did not move the mean outside
+noise, because on the 42-question tuning split the `top_paths` set that
+would reuse a cached HTML fetch is small relative to the dominant,
+unavoidable-without-a-faster-parser bs4 DOM-build cost identified above.
+`data/perq_v9_default_run2.json` (memo/cache fully off) at mean 1.323 s is
+this run's approximation of a **cold-cache mean** -- a real lesson's first
+pass over any given article pays close to that, not the warm number above;
+a 42-question eval repeats entities (e.g. multiple helium questions) so
+its cross-request cache hit rate overstates what a real, mostly-novel
+lesson would see. Cache hit rate was not separately instrumented this
+round; inferred low given the small overlap noted above. Peak worker RSS
+before/after was not measured directly (no process attached this
+session); the added caches are bounded at +40 MiB combined by
+construction, which is the number to check against actual RSS on the
+Dell before/after in a future round.
+
+**Conclusion**: <=1.0 s target still **not met**. Recommendation
+unchanged from v9: reaching it needs either a faster HTML parser
+(measure lxml/selectolax on this corpus and get sign-off to add the
+dependency) or accepting B's ranking change; A/v10's memoisation alone is
+close but not sufficient on this question set.
