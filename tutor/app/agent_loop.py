@@ -534,6 +534,25 @@ _FOLLOWUP_DIRECTNESS_NOTE = (
     "then explain using the sources above."
 )
 
+# Measured stronger variant (docs/followup_answer_shape.md, "enhanced"
+# arm of data/followup_shape_measure.py): adds the "only what is new" /
+# "1-3 sentences for a yes/no question" instructions the plain
+# ``_FOLLOWUP_DIRECTNESS_NOTE`` was missing, which is what let the model
+# fall back to re-emitting the same "Composition / Structure /
+# Replication / Function" essay turn after turn regardless of the
+# question. Gated by ``app.concise_followup_note`` (default True).
+_FOLLOWUP_CONCISE_NOTE = (
+    "Answer the student's question as it relates to the lesson so far: "
+    "give a direct answer first (yes or no, in one clause, if it is a "
+    "yes/no question), then add ONLY what is new -- do not restate points "
+    "you already made earlier in this lesson. If the question only asks "
+    "for a yes/no confirmation, 1-3 sentences total is enough; stop there "
+    "rather than repeating the earlier explanation. If the question asks "
+    "for a fuller explanation (e.g. \"tell me about X\", \"how does X "
+    "work\"), still give a real explanation, not one line, citing sources "
+    "like [S1]."
+)
+
 
 def _has_prior_turns(session, use_log: bool, log, messages: list[dict] | None) -> bool:
     """True when the lesson already has at least one earlier turn, i.e.
@@ -739,6 +758,7 @@ def run_turn(
     rewrite_on_weak_evidence: bool = True,
     rewrite_on_followup: bool = True,
     reuse_prior_passages: bool = True,
+    concise_followup_note: bool = True,
 ) -> TurnResult:
     research_calls = 0
     calc_calls = 0
@@ -830,7 +850,11 @@ def run_turn(
                 corrected_terms=corrected_terms,
                 emit=emit,
                 backfill_passages=packet["passages"],
-                strong_suffix=_FOLLOWUP_DIRECTNESS_NOTE,
+                strong_suffix=(
+                    _FOLLOWUP_CONCISE_NOTE
+                    if concise_followup_note
+                    else _FOLLOWUP_DIRECTNESS_NOTE
+                ),
                 reuse_prior_passages=reuse_prior_passages,
             )
             research_calls += delta

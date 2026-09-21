@@ -468,3 +468,94 @@ def test_no_passage_pasted_twice_in_full_within_one_followup_turn():
         1 for m in turn2_messages if full_pid1_text in (m.get("content") or "")
     )
     assert full_paste_count == 0  # pid-1 was already held from turn 1 -> pointer only
+
+
+def test_concise_followup_note_default_on_lands_on_followup_turn():
+    """docs/followup_answer_shape.md: by default (``concise_followup_note``
+    True, the ``AppConfig`` default), the stronger "only what is new" /
+    "1-3 sentences for yes/no" note lands in the forced round's tool
+    result on turn >= 2, and never on turn 1."""
+    session, budget = _mk_session()
+    llm = FakeLlmClient(
+        [
+            _final("The solar system has eight planets [S1]."),
+            _tool_call("research", {"queries": ["moons and planets in the solar system"]}),
+            _final("There are also moons and asteroids [S1]."),
+        ]
+    )
+    research = ScriptedResearchEngine(
+        [_strong_response(1), _strong_response(2), _strong_response(3)]
+    )
+    calc = FakeCalc()
+
+    run_turn(
+        session,
+        _UserInput(kind="text", text="what is the solar system"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+    )
+    run_turn(
+        session,
+        _UserInput(kind="text", text="what else is in the solar system"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+    )
+
+    rendered = session.log.render()
+    tool_messages = [m for m in rendered if m["role"] == "tool"]
+    joined = "\n".join(m.get("content") or "" for m in tool_messages)
+    assert "do not restate points" in joined
+    assert "ONLY what is new" in joined
+    # Turn 1 has no forced round at all, so the note cannot appear there.
+    assert "do not restate points" not in (rendered[2].get("content") or "")
+
+
+def test_concise_followup_note_off_reproduces_plain_directness_note():
+    """``concise_followup_note=False`` reproduces the shorter, pre-existing
+    ``_FOLLOWUP_DIRECTNESS_NOTE`` wording byte-for-byte instead."""
+    session, budget = _mk_session()
+    llm = FakeLlmClient(
+        [
+            _final("The solar system has eight planets [S1]."),
+            _tool_call("research", {"queries": ["moons and planets in the solar system"]}),
+            _final("There are also moons and asteroids [S1]."),
+        ]
+    )
+    research = ScriptedResearchEngine(
+        [_strong_response(1), _strong_response(2), _strong_response(3)]
+    )
+    calc = FakeCalc()
+
+    run_turn(
+        session,
+        _UserInput(kind="text", text="what is the solar system"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+        concise_followup_note=False,
+    )
+    run_turn(
+        session,
+        _UserInput(kind="text", text="what else is in the solar system"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+        concise_followup_note=False,
+    )
+
+    rendered = session.log.render()
+    tool_messages = [m for m in rendered if m["role"] == "tool"]
+    joined = "\n".join(m.get("content") or "" for m in tool_messages)
+    assert "do not restate points" not in joined
+    assert "ONLY what is new" not in joined
+    assert "then explain using the sources above" in joined

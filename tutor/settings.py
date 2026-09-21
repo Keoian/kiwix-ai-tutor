@@ -137,6 +137,17 @@ class AppConfig:
     resolution always sees the full passage text regardless of this
     setting -- only what is pasted into the prompt log is shortened.
     ``False`` reproduces today's behaviour byte-for-byte."""
+    concise_followup_note: bool = True
+    """Use the longer follow-up host note (docs/followup_answer_shape.md)
+    that, in addition to asking for a direct answer first, tells the
+    model to add ONLY what is new and not restate points already made
+    earlier in the lesson, and that a yes/no question only needs 1-3
+    sentences while a "tell me about X"/"how does X work" question still
+    needs a real explanation. Measured (data/followup_shape_measure.py)
+    to cut same-topic follow-up answers from ~120 near-duplicate tokens
+    (baseline, Jaccard up to 1.0 turn-to-turn) to ~30-60 tokens without
+    losing citations or collapsing the fuller-explanation turns.
+    ``False`` reproduces today's shorter note byte-for-byte."""
 
 
 @dataclass(frozen=True)
@@ -336,6 +347,7 @@ def load_config(path: Path) -> Config:
         rewrite_on_weak_evidence=_app_bool("rewrite_on_weak_evidence", True),
         rewrite_on_followup=_app_bool("rewrite_on_followup", True),
         reuse_prior_passages=_app_bool("reuse_prior_passages", True),
+        concise_followup_note=_app_bool("concise_followup_note", True),
     )
 
     # [embedding] is optional, like [app]; when present every key is
