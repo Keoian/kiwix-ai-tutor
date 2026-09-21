@@ -1442,3 +1442,51 @@ further.
 **Conclusion**: ships as default -- no tuning regression, zero changed
 questions, zero false corrections, measured recall lift on the targeted
 failure mode.
+
+## Baseline v12 -- lxml parser
+
+Installed lxml 6.1.3 (wheel `lxml-6.1.3-cp312-cp312-win_amd64.whl`), BSD-3.
+Wheels published for win_amd64 and manylinux x86_64 for CPython 3.12.
+
+**Identity proof** (data/lxml_identity_v12.py), `html.parser` vs `lxml`,
+seeded random sample over the whole archive (not first-N) + all 68 gold
+paths from the tuning split:
+- `search.py:_extract_text` (snippet text): 10,869 articles (10,000 Simple
+  Wikipedia + 801 Wikibooks + 68 gold), **0 mismatches**.
+- `bundle.py:build_bundle` (zim-bundle-v2 text/sections/infobox/links):
+  same 10,869 articles, **0 mismatches**.
+
+Both call sites are provably identical -> both switched to lxml.
+Timing (ms/article, DOM build + extraction):
+
+| call site | p50 html.parser | p95 html.parser | p50 lxml | p95 lxml |
+|---|---|---|---|---|
+| snippet extract | 6.74 | 44.58 | 5.18 | 33.39 |
+| build_bundle | 9.56 | 61.76 | 8.00 | 49.85 |
+
+**Implementation**: single `_detect_bs_parser()` in
+`tutor/retrieval/zim/content.py`, exported as `HTML_PARSER`; imports lxml
+and falls back to `html.parser` on `ImportError` (tested both paths in
+`tests/test_zim_content.py`, including a forced-fallback run of
+`build_bundle`). `search.py` now imports `HTML_PARSER` from `content.py`
+instead of hardcoding `"html.parser"`. lxml pinned `>=5.0` in
+`pyproject.toml` next to `beautifulsoup4`; CI installs it via
+`pip install -e ".[dev]"`, no separate requirements file to touch. Added to
+THIRD_PARTY_NOTICES.md.
+
+zim-bundle-v2 stays valid: `build_bundle`'s output (text, offsets, infobox,
+links) is byte-identical to the previous parser, so the dense sidecar index
+built from it is unaffected.
+
+**Tuning split** (measured, 84 questions, two runs): mean 0.927s / 0.824s,
+p95 2.265s / 2.188s, recall@1/3/5 0.595/0.690/0.762, MRR 0.645 -- unchanged
+vs Baseline v10/v11. Per-question diff vs v10 run1: 0 changed passages, 0
+changed snippet text (v10's own run1 vs run2 already differs on 1/84
+questions from pre-existing ranking non-determinism, unrelated to this
+change -- confirmed by diffing v12 against both v10 runs). Cold cache
+(`TUTOR_RETRIEVAL_SNIPPET_TEXT_CACHE=0`): mean 1.222s (measured; v10's
+cold-cache mean was not separately re-run here, inferred comparable to the
+~1.3s pre-v9 baseline since lxml only speeds up the DOM-build portion this
+measures).
+
+Target (<= 1.0s mean, warm cache) met: 0.824-0.927s.

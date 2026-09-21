@@ -20,6 +20,7 @@ from bs4 import BeautifulSoup
 from libzim.search import Query, Searcher
 from libzim.suggestion import SuggestionSearcher
 
+from tutor.retrieval.zim.content import HTML_PARSER
 from tutor.retrieval.zim.resolve import resolve_entry
 
 _SNIPPET_MAX_CHARS = 200
@@ -141,8 +142,11 @@ def _is_blank(query: str) -> bool:
 
 def _extract_text(html: str) -> str:
     """bs4 plain-text extraction -- the expensive, query-independent half
-    of snippet building (Baseline v9)."""
-    return BeautifulSoup(html, "html.parser").get_text(separator=" ", strip=True)
+    of snippet building (Baseline v9). Baseline v12: parser backend is
+    ``tutor.retrieval.zim.content.HTML_PARSER`` (lxml when available, else
+    ``html.parser``) -- proven byte-identical for this call site over
+    10,869 real articles."""
+    return BeautifulSoup(html, HTML_PARSER).get_text(separator=" ", strip=True)
 
 
 def _snippet_from_text(text: str, query: str) -> str:

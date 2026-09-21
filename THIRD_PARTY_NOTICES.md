@@ -40,6 +40,7 @@ SOFTWARE.
 |---|---|---|---|
 | libzim (`python-libzim`) | PyPI, installed as a regular dependency (not vendored) | GPL-3.0-or-later. Exact installed package metadata (`python -m pip show libzim`, version 3.13.0): `License-Expression: GPL-3.0-or-later`, `Home-page: https://github.com/openzim/python-libzim`. | Installed from PyPI, no code copied into this repo. **Flag for the project owner**: distributing a bundle that includes this dependency (e.g. a packaged installer) has GPL-3.0-or-later implications that must be reviewed at the installer milestone, before any such bundle ships. |
 | beautifulsoup4 | PyPI, installed as a regular dependency (not vendored) | MIT | No code copied into this repo. |
+| lxml | PyPI, installed as a regular dependency (not vendored) | BSD-3-Clause | Baseline v12: optional BeautifulSoup parser backend (falls back to html.parser if absent). Wheels published for win_amd64 and manylinux x86_64 for this project's Python version. No code copied into this repo. |
 
 ## Design references — no code copied
 

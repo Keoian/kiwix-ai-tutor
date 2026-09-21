@@ -14,6 +14,11 @@ dependencies = [
     # OpenZIM MCP donor's own pins per docs/donor_inventory.md (b).
     "libzim>=3.9,<4",
     "beautifulsoup4>=4.12",
+    # Baseline v12 (docs/retrieval_baseline.md): faster bs4 backend, proven
+    # byte-identical to html.parser for the call sites that use it; optional
+    # at runtime (tutor/retrieval/zim/content.py falls back to html.parser
+    # when this is not importable).
+    "lxml>=5.0",
     # WP-B3: cross-platform process introspection for the libzim worker's
     # "exactly one live child" assertions (used in tests and, if needed,
     # by the worker's own supervision logic).

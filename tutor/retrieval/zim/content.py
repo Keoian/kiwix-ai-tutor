@@ -37,9 +37,24 @@ from collections.abc import Iterable
 
 from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 
-# BeautifulSoup parser name; pinned so the dependency footprint stays minimal
-# (no lxml/html5lib needed) and parsing semantics stay consistent across OSes.
-HTML_PARSER = "html.parser"
+def _detect_bs_parser() -> str:
+    """Baseline v12 (docs/retrieval_baseline.md): lxml was proven to produce
+    byte-identical output to ``html.parser`` for this call site's text,
+    section, infobox, and link extraction over 10,869 real articles (0
+    mismatches), and is faster (p50/p95 both lower). Prefer it, but fall
+    back to the stdlib parser when lxml is not importable so the app keeps
+    working on a machine where it wasn't installed (e.g. it is dropped from
+    the environment, or a constrained platform has no wheel)."""
+    try:
+        import lxml  # noqa: F401
+    except ImportError:
+        return "html.parser"
+    return "lxml"
+
+
+# BeautifulSoup parser name for this module's DOM builds (zim-bundle-v2:
+# build_bundle's text/sections/infobox/links). See ``_detect_bs_parser``.
+HTML_PARSER = _detect_bs_parser()
 
 _HEADING_NAMES = ("h1", "h2", "h3", "h4", "h5", "h6")
 
