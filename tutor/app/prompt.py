@@ -53,6 +53,71 @@ _ALL_HELD_INSTRUCTION = (
 )
 
 
+def render_evidence_with_reuse(
+    passages: Iterable[dict],
+    held_ids: Iterable[str],
+    reuse_prior_passages: bool,
+    *,
+    citation_reminder: str | None = None,
+) -> tuple[str, list[str], list[dict], str | None]:
+    """Shared pointer-substitution + rendering logic behind
+    ``app.reuse_prior_passages`` (docs/passage_reuse.md), used by both
+    ``PromptLog.append_evidence`` (the pre-search/model-initiated research
+    path) and the forced query-rewrite round
+    (``tutor.app.agent_loop._run_forced_rewrite_round``), so both paths
+    honour the setting identically instead of the forced round bypassing
+    held-id bookkeeping entirely as it used to.
+
+    Returns ``(content, newly_seen_ids, display_passages, note)``:
+
+    - ``content`` is ``display_passages`` rendered as ``[S#] text`` lines
+      (pointer text for already-held passages when
+      ``reuse_prior_passages`` is set), with the all-held host note
+      appended when every passage given was already in ``held_ids``, and
+      ``citation_reminder`` appended last when given and something was
+      actually rendered.
+    - ``newly_seen_ids`` are the ids from ``passages`` not already in
+      ``held_ids`` -- the caller is responsible for recording these as
+      held afterwards (``PromptLog.append_evidence`` does so on its own
+      ``_seen_ids``; the forced-rewrite round calls
+      ``PromptLog.mark_held``).
+    - ``display_passages`` is what was actually shown this call (full
+      text or pointer), for callers that also need to store it (e.g. as
+      a ``PromptLog`` entry's ``"passages"``).
+
+    When ``reuse_prior_passages`` is false, this reproduces the original
+    pre-reuse behaviour byte-for-byte: an already-held passage is dropped
+    outright (no pointer, no note), matching ``app.reuse_prior_passages =
+    false``'s documented "old bytes" guarantee.
+    """
+    passages = list(passages)
+    held = frozenset(held_ids)
+    if not reuse_prior_passages:
+        display_passages = [p for p in passages if p["id"] not in held]
+        newly_seen_ids = [p["id"] for p in display_passages]
+        note = None
+    else:
+        display_passages = []
+        newly_seen_ids = []
+        held_count = 0
+        for p in passages:
+            if p["id"] in held:
+                held_count += 1
+                display_passages.append({**p, "text": _pointer_text(p)})
+            else:
+                display_passages.append(dict(p))
+                newly_seen_ids.append(p["id"])
+        all_held = bool(passages) and held_count == len(passages)
+        note = _ALL_HELD_INSTRUCTION if (all_held and display_passages) else None
+
+    content = "\n".join(f"[{p['label']}] {p['text']}" for p in display_passages)
+    if note:
+        content = f"{content}\n{note}" if content else note
+    if citation_reminder and display_passages:
+        content = f"{content}\n{citation_reminder}" if content else citation_reminder
+    return content, newly_seen_ids, display_passages, note
+
+
 def _pointer_text(passage: dict) -> str:
     """One-line pointer for a passage already fully pasted earlier in the
     log: cites where it came from without repeating its text."""
@@ -180,6 +245,20 @@ class PromptLog:
         is no longer there)."""
         return frozenset(self._seen_ids)
 
+    def mark_held(self, ids: Iterable[str]) -> None:
+        """Record ``ids`` as held (their full text is now present
+        somewhere in the log) without going through ``append_evidence``.
+        Used by the forced-rewrite round
+        (``tutor.app.agent_loop._run_forced_rewrite_round``), which
+        appends its own tool-result text via ``append_tool_result``
+        (a plain string, keyed by ``tool_call_id``) rather than
+        ``append_evidence``'s passages-shaped message, but must still
+        update the same held-id bookkeeping so a later turn's pointer
+        substitution (via ``held_ids()``) knows these passages' full text
+        is already in the log."""
+        for pid in ids:
+            self._seen_ids.add(pid)
+
     def append_evidence(
         self,
         passages: Iterable[dict],
@@ -190,36 +269,9 @@ class PromptLog:
             raise RuntimeError("append_evidence requires an open turn (append_user first)")
         current_turn = self._turns[-1]
 
-        passages = list(passages)
-
-        if not reuse_prior_passages:
-            new_passages = [p for p in passages if p["id"] not in self._seen_ids]
-            display_passages = new_passages
-            newly_seen_ids = [p["id"] for p in new_passages]
-        else:
-            # Every passage from this turn's packet is kept and shown --
-            # held ones as a short pointer line instead of dropped
-            # outright, so the model still sees an [S#] line for them
-            # this turn and the citation preface below can tell whether
-            # *every* passage was already held. Only ids not already in
-            # ``self._seen_ids`` are new (and get added to it below).
-            display_passages = []
-            newly_seen_ids = []
-            held_count = 0
-            for p in passages:
-                if p["id"] in self._seen_ids:
-                    held_count += 1
-                    display_passages.append({**p, "text": _pointer_text(p)})
-                else:
-                    display_passages.append(dict(p))
-                    newly_seen_ids.append(p["id"])
-            all_held = bool(passages) and held_count == len(passages)
-
-        content = "\n".join(f"[{p['label']}] {p['text']}" for p in display_passages)
-        all_held_display = reuse_prior_passages and all_held and display_passages
-        note = _ALL_HELD_INSTRUCTION if all_held_display else None
-        if note:
-            content = f"{content}\n{note}" if content else note
+        content, newly_seen_ids, display_passages, note = render_evidence_with_reuse(
+            passages, self._seen_ids, reuse_prior_passages
+        )
 
         if budget is not None:
             user_text = current_turn[0].get("content", "") if current_turn else ""

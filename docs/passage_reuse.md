@@ -67,17 +67,60 @@ byte-for-byte: `PromptLog.append_evidence`'s original code path (silently
 drop a passage whose id is already in `_seen_ids`, no pointer, no note)
 runs unchanged.
 
-## Scope note: forced-rewrite rounds are not covered
+## Forced-rewrite rounds are now covered
 
-The forced query-rewrite round (`docs/rewrite_on_weak_evidence.md`,
-`_run_forced_rewrite_round` in `tutor/app/agent_loop.py`) builds its own
-tool-result string directly via `render_evidence(...)` and appends it with
-`PromptLog.append_tool_result`, not `PromptLog.append_evidence` — so it
-never goes through the held-id/pointer bookkeeping added here. Passages
-surfaced only through a forced-rewrite round can still be re-pasted in
-full on a later turn. Wiring that path into the same held-id tracking
-would touch the rewrite machinery another workstream owns; left for a
-follow-up.
+Since `d97f2b6` forced a query-rewrite round on every follow-up turn
+(`docs/rewrite_on_weak_evidence.md`, `_run_forced_rewrite_round` in
+`tutor/app/agent_loop.py`), that path ran on effectively every turn after
+the lesson's first — but it built its own tool-result string directly via
+`render_evidence(...)` and appended it with `PromptLog.append_tool_result`,
+not `PromptLog.append_evidence`, so it never went through the held-id/
+pointer bookkeeping above. In practice this meant reuse barely applied:
+passages surfaced by a forced-rewrite round were re-pasted in full on
+every later turn, and were never recorded as held either.
+
+This is now fixed. Both `PromptLog.append_evidence` and
+`_run_forced_rewrite_round`'s tool-result construction go through one
+shared helper, `tutor.app.prompt.render_evidence_with_reuse`: given a
+turn's passages, the log's current `held_ids()`, and the
+`reuse_prior_passages` flag, it returns the rendered content (pointer
+lines for already-held passages, the "already shown above" line format,
+and the all-held host note when every passage this call is already
+held), the newly-seen ids, and the display passages actually shown.
+`PromptLog.append_evidence` uses it and updates `self._seen_ids` itself;
+`_run_forced_rewrite_round` calls it directly (passing `log.held_ids()`)
+and then calls the new `PromptLog.mark_held(newly_seen_ids)` to update the
+same bookkeeping from outside `append_evidence`, since it appends via
+`append_tool_result` (a plain string keyed by `tool_call_id`), not a
+passages-shaped message.
+
+A citation reminder line is appended by the shared helper itself in the
+forced-round path (`citation_reminder=_CITATION_REMINDER`), since that
+path's tool-result text is a literal string sent straight to the model,
+unlike `append_evidence`'s passages-shaped log entry, whose reminder is
+added later at wire-render time by `citations.render_evidence` inside
+`_to_wire_messages`.
+
+`reuse_prior_passages=False` still reproduces old-bytes behaviour for the
+forced round too: `render_evidence_with_reuse`'s `False` branch drops an
+already-held passage outright (no pointer, no note), and
+`_run_forced_rewrite_round` falls back to the original
+`render_evidence({"passages": merged_passages})` call whenever
+`reuse_prior_passages` is false or the session has no `PromptLog`
+(`use_log` false — some fakes in unit tests, and non-log message-list
+sessions generally, which have no held-id concept to consult).
+
+One consequence worth calling out: a follow-up turn's raw pre-search
+packet is never appended to the log directly (see
+`docs/rewrite_on_weak_evidence.md` — it is only ever merged in as
+*backfill* behind the forced round's own rewritten-query passages,
+`_lead_with_backfill`), so it was never at risk of being pasted in full
+twice within the same turn even before this fix; that invariant is
+covered by
+`tests/test_agent_loop_followup.py::test_no_passage_pasted_twice_in_full_within_one_followup_turn`.
+See also
+`tests/test_agent_loop_followup.py::test_followup_forced_round_pastes_pointer_for_held_passage`
+and `::test_followup_forced_round_off_setting_pastes_full_text_every_time`.
 
 ## Backfill (not implemented)
 

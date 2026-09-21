@@ -34,8 +34,8 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from tutor.app.citations import extract_labels, render_evidence
-from tutor.app.prompt import PromptOverflow
+from tutor.app.citations import _CITATION_REMINDER, extract_labels, render_evidence
+from tutor.app.prompt import PromptOverflow, render_evidence_with_reuse
 from tutor.app.repetition_guard import find_repetition_loop
 from tutor.retrieval.assessment import assess_evidence
 from tutor.retrieval.hybrid.lexical import singularize, tokenize
@@ -560,6 +560,7 @@ def _run_forced_rewrite_round(
     emit,
     backfill_passages: list[dict] | None = None,
     strong_suffix: str = "",
+    reuse_prior_passages: bool = True,
 ):
     """Run one forced ``research`` tool-call round (see
     ``_forced_research_tool_call``), append the resulting assistant
@@ -687,7 +688,25 @@ def _run_forced_rewrite_round(
     _retain_passages(session, {"passages": merged_passages})
     searched_for_line = f"Searched for: {', '.join(rewritten_queries)}"
     if level_after == "strong":
-        evidence_text = render_evidence({"passages": merged_passages})
+        if use_log and reuse_prior_passages:
+            # Route the forced round's own tool-result text through the
+            # same pointer-substitution/held-id bookkeeping as
+            # ``_trim_and_append_evidence`` (docs/passage_reuse.md), so a
+            # passage already pasted in full earlier in this lesson --
+            # including by this turn's own pre-search packet, if that was
+            # appended before this round ran -- gets a one-line pointer
+            # here instead of a full re-paste. This bypassed that
+            # bookkeeping entirely before (see docs/passage_reuse.md's
+            # "forced-rewrite rounds are not covered" note).
+            evidence_text, newly_seen_ids, _display, _note = render_evidence_with_reuse(
+                merged_passages,
+                log.held_ids(),
+                True,
+                citation_reminder=_CITATION_REMINDER,
+            )
+            log.mark_held(newly_seen_ids)
+        else:
+            evidence_text = render_evidence({"passages": merged_passages})
         tool_text = f"{searched_for_line}\n{evidence_text}"
         if strong_suffix:
             tool_text = f"{tool_text}\n\n{strong_suffix}"
@@ -812,6 +831,7 @@ def run_turn(
                 emit=emit,
                 backfill_passages=packet["passages"],
                 strong_suffix=_FOLLOWUP_DIRECTNESS_NOTE,
+                reuse_prior_passages=reuse_prior_passages,
             )
             research_calls += delta
             # _run_forced_rewrite_round always leaves the log in a valid,
@@ -867,6 +887,7 @@ def run_turn(
                 assessment=assessment,
                 corrected_terms=corrected_terms,
                 emit=emit,
+                reuse_prior_passages=reuse_prior_passages,
             )
             research_calls += delta
         # else: followup_ran and not do_rewrite -- the follow-up round's

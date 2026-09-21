@@ -138,7 +138,19 @@ def _mk_session() -> tuple[Session, Budget]:
 
 
 def _strong_response(n: int) -> _Response:
-    return _Response(passages=[_Passage(label=f"S{n}", passage_id=f"pid-{n}")])
+    return _Response(
+        passages=[
+            _Passage(
+                label=f"S{n}",
+                passage_id=f"pid-{n}",
+                text=(
+                    f"Passage number {n}: the moons, planets, and asteroids of "
+                    "the solar system all orbit the sun. "
+                )
+                * 10,
+            )
+        ]
+    )
 
 
 def test_followup_fires_on_second_turn_even_with_strong_raw_evidence():
@@ -262,3 +274,197 @@ def test_setting_off_disables_followup_rewrite_on_second_turn():
     assert llm.call_count == 2  # no extra forced-rewrite round
     rendered = session.log.render()
     assert "Host note" not in rendered[4]["content"]
+
+
+def test_followup_forced_round_pastes_pointer_for_held_passage():
+    """The forced-rewrite round's own tool-result text must go through the
+    same held-id/pointer bookkeeping as a plain evidence packet
+    (docs/passage_reuse.md): turn 1 pastes pid-1 in full; turn 2's forced
+    round merges the raw pre-search's pid-1 (as backfill) behind the
+    rewrite's own new pid-2 -- pid-1 must come back as a pointer, not a
+    second full paste, and pid-2 (new) must be recorded as held so a
+    third turn reusing it also gets a pointer."""
+    session, budget = _mk_session()
+    llm = FakeLlmClient(
+        [
+            _final("The solar system has eight planets [S1]."),
+            _tool_call("research", {"queries": ["moons and planets"]}),
+            _final("There are also moons [S2]."),
+            _tool_call("research", {"queries": ["asteroids too"]}),
+            _final("Asteroids exist too [S2]."),
+        ]
+    )
+    research = ScriptedResearchEngine(
+        [
+            _strong_response(1),  # turn 1 raw pre-search -> pid-1, held after turn 1
+            _strong_response(1),  # turn 2 raw pre-search (backfill only) -> pid-1 again
+            _strong_response(2),  # turn 2 rewrite's own query -> pid-2 (new)
+            _strong_response(2),  # turn 3 raw pre-search (backfill only) -> pid-2 again
+            _strong_response(2),  # turn 3 rewrite's own query -> pid-2 again (held by now)
+        ]
+    )
+    calc = FakeCalc()
+
+    run_turn(
+        session,
+        _UserInput(kind="text", text="what is the solar system"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+    )
+    run_turn(
+        session,
+        _UserInput(kind="text", text="what else is in the solar system"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+    )
+
+    assert "pid-1" in session.log.held_ids()
+    assert "pid-2" in session.log.held_ids()
+
+    rendered = session.log.render()
+    tool_messages = [m for m in rendered if m["role"] == "tool"]
+    turn2_tool_text = tool_messages[-1].get("content") or ""
+    full_pid1_text = (
+        "Passage number 1: the moons, planets, and asteroids of "
+        "the solar system all orbit the sun. "
+    ) * 10
+    assert full_pid1_text not in turn2_tool_text
+    assert "already shown above" in turn2_tool_text
+
+    run_turn(
+        session,
+        _UserInput(kind="text", text="anything else"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+    )
+
+    rendered = session.log.render()
+    tool_messages = [m for m in rendered if m["role"] == "tool"]
+    turn3_tool_text = tool_messages[-1].get("content") or ""
+    full_pid2_text = (
+        "Passage number 2: the moons, planets, and asteroids of "
+        "the solar system all orbit the sun. "
+    ) * 10
+    # pid-2's full text was pasted once already (turn 2's rewrite result);
+    # turn 3's forced round must not paste it again in full.
+    assert full_pid2_text not in turn3_tool_text
+    assert "already shown above" in turn3_tool_text
+
+
+def test_followup_forced_round_off_setting_pastes_full_text_every_time():
+    """``reuse_prior_passages=False`` must reproduce the old
+    byte-for-byte behaviour for the forced-rewrite round too: no pointer
+    substitution, the same passage's full text pasted again."""
+    session, budget = _mk_session()
+    llm = FakeLlmClient(
+        [
+            _final("The solar system has eight planets [S1]."),
+            _tool_call("research", {"queries": ["moons and planets"]}),
+            _final("There are also moons [S1]."),
+        ]
+    )
+    research = ScriptedResearchEngine(
+        [
+            _strong_response(1),  # turn 1 raw pre-search -> pid-1
+            _strong_response(1),  # turn 2 raw pre-search (backfill only) -> pid-1
+            _strong_response(1),  # turn 2 rewrite's own query -> pid-1 again
+        ]
+    )
+    calc = FakeCalc()
+
+    run_turn(
+        session,
+        _UserInput(kind="text", text="what is the solar system"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+        reuse_prior_passages=False,
+    )
+    run_turn(
+        session,
+        _UserInput(kind="text", text="what else is in the solar system"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+        reuse_prior_passages=False,
+    )
+
+    rendered = session.log.render()
+    tool_messages = [m for m in rendered if m["role"] == "tool"]
+    turn2_tool_text = tool_messages[-1].get("content") or ""
+    full_pid1_text = (
+        "Passage number 1: the moons, planets, and asteroids of "
+        "the solar system all orbit the sun. "
+    ) * 10
+    assert full_pid1_text in turn2_tool_text
+    assert "already shown above" not in turn2_tool_text
+
+
+def test_no_passage_pasted_twice_in_full_within_one_followup_turn():
+    """A passage must never be pasted in full twice within a single turn
+    -- specifically, the raw pre-search packet's passages (used only as
+    backfill on a follow-up turn, never appended to the log directly) must
+    not end up duplicated against the forced round's own tool-result
+    text."""
+    session, budget = _mk_session()
+    llm = FakeLlmClient(
+        [
+            _final("The solar system has eight planets [S1]."),
+            _tool_call("research", {"queries": ["moons and planets"]}),
+            _final("There are also moons [S1][S2]."),
+        ]
+    )
+    research = ScriptedResearchEngine(
+        [
+            _strong_response(1),  # turn 1 raw pre-search -> pid-1
+            # turn 2 raw pre-search (backfill) returns the SAME pid-1 the
+            # rewrite's own query also happens to return -- the merge must
+            # not duplicate it, and it must not be pasted twice this turn.
+            _strong_response(1),
+            _strong_response(1),
+        ]
+    )
+    calc = FakeCalc()
+
+    run_turn(
+        session,
+        _UserInput(kind="text", text="what is the solar system"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+    )
+    run_turn(
+        session,
+        _UserInput(kind="text", text="what else is in the solar system"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+    )
+
+    rendered = session.log.render()
+    full_pid1_text = (
+        "Passage number 1: the moons, planets, and asteroids of "
+        "the solar system all orbit the sun. "
+    ) * 10
+    turn2_messages = rendered[4:]  # user(turn2) onward, per the existing index convention
+    full_paste_count = sum(
+        1 for m in turn2_messages if full_pid1_text in (m.get("content") or "")
+    )
+    assert full_paste_count == 0  # pid-1 was already held from turn 1 -> pointer only
