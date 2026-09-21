@@ -77,10 +77,84 @@ def _key_terms(question: str) -> frozenset[str]:
     return frozenset(tokenize(strip_instruction_words(question))) - _QUESTION_FILLERS
 
 
-def _passage_terms(passage: Any) -> frozenset[str]:
+def _passage_title_text(passage: Any) -> tuple[str, str]:
     title = passage.get("title", "") if isinstance(passage, dict) else getattr(passage, "title", "")
     text = passage.get("text", "") if isinstance(passage, dict) else getattr(passage, "text", "")
+    return title or "", text or ""
+
+
+def _passage_terms(passage: Any) -> frozenset[str]:
+    title, text = _passage_title_text(passage)
     return frozenset(singularize(t) for t in tokenize(f"{title} {text}"))
+
+
+# Generic single-word terms that, on their own, are common enough across the
+# archive that covering them alone must never be enough to certify a passage
+# as being about the question's actual topic (case: "square foot gardening"
+# -> key terms square/foot/garden, and articles titled "Garden"/"Square"/
+# "Foot"/"Chromatica" (a song containing the word "foot") each trivially
+# cover one of these while being entirely off-topic). This is a coarse,
+# curated stand-in for real corpus-frequency (IDF) weighting; see
+# docs/rewrite_probe_measure.md for why full IDF plumbing was deferred.
+_GENERIC_SINGLE_WORDS = frozenset(
+    {
+        "garden",
+        "foot",
+        "feet",
+        "square",
+        "work",
+        "works",
+        "make",
+        "makes",
+        "food",
+        "place",
+        "water",
+        "play",
+        "plant",
+        "plants",
+        "people",
+        "thing",
+        "things",
+        "part",
+        "parts",
+        "time",
+        "guide",
+        "basics",
+        "step",
+        "steps",
+    }
+)
+
+
+def _topic_phrase(key_terms: frozenset[str], corrected_terms: Mapping[str, str] | None) -> str:
+    """The question's own "main topic" phrase: the longest corrected phrase
+    (e.g. "squarefoot" -> "square foot") if any correction happened,
+    otherwise the longest non-generic key term, otherwise the longest key
+    term of any kind (better than nothing when every term is generic)."""
+    if corrected_terms:
+        phrases = [v for v in corrected_terms.values() if v]
+        if phrases:
+            return max(phrases, key=len).lower()
+    candidates = [t for t in key_terms if t.lower() not in _GENERIC_SINGLE_WORDS]
+    pool = candidates or list(key_terms)
+    if not pool:
+        return ""
+    return max(pool, key=len).lower()
+
+
+def _topic_present(topic_phrase: str, passages: list[Any]) -> bool:
+    """True if ``topic_phrase`` (possibly multi-word, e.g. "square foot")
+    appears in some top passage's TITLE, or as an exact phrase in its TEXT.
+    Individual words matched separately (e.g. "square" in one passage,
+    "foot" in another) does NOT satisfy this -- that is exactly the
+    fused-term-split false-strong failure mode being fixed."""
+    if not topic_phrase:
+        return True
+    for passage in passages[:_TOP_PASSAGES_CHECKED]:
+        title, text = _passage_title_text(passage)
+        if topic_phrase in title.lower() or topic_phrase in text.lower():
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -109,6 +183,7 @@ def assess_evidence(
     *,
     rewritten_queries: list[str] | None = None,
     healthy_terms: Any = None,
+    corrected_terms: Mapping[str, str] | None = None,
 ) -> EvidenceAssessment:
     """Assess how well ``result`` (anything with a ``.passages`` sequence
     of objects/dicts exposing ``title``/``text``) answers ``question``.
@@ -186,20 +261,36 @@ def assess_evidence(
     coverage = len(covered_norm) / len(norm_key_terms) if norm_key_terms else 1.0
     covered_terms = frozenset(t for t in key_terms if singularize(t) in covered_norm)
 
-    if coverage >= _COVERAGE_STRONG_THRESHOLD:
+    topic_phrase = _topic_phrase(key_terms, corrected_terms)
+    topic_ok = _topic_present(topic_phrase, list(passages))
+
+    reasons = [f"coverage {coverage:.2f} vs threshold {_COVERAGE_STRONG_THRESHOLD}"]
+    if topic_phrase:
+        reasons.append(
+            f"topic phrase {topic_phrase!r} {'found' if topic_ok else 'NOT found'} "
+            "in top passages' title/text"
+        )
+
+    if coverage >= _COVERAGE_STRONG_THRESHOLD and topic_ok:
+        reasons.append("verdict: strong")
         return EvidenceAssessment(
             level="strong",
-            reasons=[f"coverage {coverage:.2f} >= threshold {_COVERAGE_STRONG_THRESHOLD}"],
+            reasons=reasons,
             key_terms=key_terms,
             covered_terms=covered_terms,
             coverage=coverage,
         )
+    if coverage >= _COVERAGE_STRONG_THRESHOLD and not topic_ok:
+        reasons.append(
+            "verdict: weak (coverage alone met by generic/incidental terms; "
+            "main topic absent from title/text)"
+        )
+    else:
+        reasons.append(f"missing key terms: {sorted(key_terms - covered_terms)}")
+        reasons.append("verdict: weak")
     return EvidenceAssessment(
         level="weak",
-        reasons=[
-            f"coverage {coverage:.2f} < threshold {_COVERAGE_STRONG_THRESHOLD}",
-            f"missing key terms: {sorted(key_terms - covered_terms)}",
-        ],
+        reasons=reasons,
         key_terms=key_terms,
         covered_terms=covered_terms,
         coverage=coverage,

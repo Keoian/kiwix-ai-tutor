@@ -40,6 +40,44 @@ def test_strong_when_top_passage_covers_key_terms():
     assert "garden" in {t for t in assessment.key_terms}
 
 
+def test_false_strong_fused_term_split_across_generic_titled_passages():
+    """Real bottleneck case: 'squarefoot garden' splits into the generic
+    words 'square'/'foot'/'garden', each trivially covered by an unrelated,
+    generically-titled passage -- coverage alone crosses 0.5 but none of
+    these passages is actually about square-foot gardening."""
+    result = _Result(
+        [
+            _passage("Garden", "A garden is a planned space set aside for plants."),
+            _passage("Foot", "The foot is an anatomical structure of vertebrates."),
+            _passage("Chromatica", "Chromatica is an album; one song mentions a foot."),
+        ]
+    )
+    assessment = assess_evidence(
+        "how to squarefoot garden the right way?",
+        result,
+        corrected_terms={"squarefoot": "square foot"},
+    )
+    assert assessment.level == "weak"
+    assert any("topic phrase" in r for r in assessment.reasons)
+
+
+def test_strong_when_corrected_topic_phrase_actually_present():
+    result = _Result(
+        [
+            _passage(
+                "Square foot gardening",
+                "Square foot gardening is a way to plan a small vegetable garden.",
+            )
+        ]
+    )
+    assessment = assess_evidence(
+        "how to squarefoot garden the right way?",
+        result,
+        corrected_terms={"squarefoot": "square foot"},
+    )
+    assert assessment.level == "strong"
+
+
 def test_weak_when_passages_are_off_topic():
     result = _Result(
         [_passage("Unrelated topic", "This article is about something else entirely.")]

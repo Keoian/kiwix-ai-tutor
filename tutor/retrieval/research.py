@@ -2235,7 +2235,9 @@ class ResearchEngine:
             dense_note="; ".join(dense_notes) if dense_notes else None,
             corrected_terms=dict(corrected_terms_out),
         )
-        response.assessment = assess_evidence(query, response)
+        response.assessment = assess_evidence(
+            query, response, corrected_terms=dict(corrected_terms_out)
+        )
         self._response_cache[cache_key] = response
         self._response_cache.move_to_end(cache_key)
         while len(self._response_cache) > _RESPONSE_CACHE_MAXSIZE:

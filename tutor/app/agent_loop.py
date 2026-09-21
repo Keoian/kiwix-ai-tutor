@@ -689,6 +689,7 @@ def run_turn(
                     merged_response,
                     rewritten_queries=rewritten_queries,
                     healthy_terms=healthy_terms,
+                    corrected_terms=corrected_terms,
                 )
                 level_after = new_assessment.level
 
