@@ -242,7 +242,10 @@ def test_evidence_not_resent_duplicate_across_turns_when_same_passage():
                 passage_id: str = "shared-pid"
                 title: str = "Title"
                 path: str = "A/Title"
-                text: str = "the shared fact text"
+                text: str = (
+                    "the shared fact text has many more than eight words in "
+                    "it so a pointer snippet never equals the full passage"
+                )
                 kind: str = "article"
 
             @dataclass
@@ -279,7 +282,10 @@ def test_evidence_not_resent_duplicate_across_turns_when_same_passage():
     )
 
     full_text = json.dumps(session.log.render())
-    assert full_text.count("the shared fact text") == 1
+    # docs/passage_reuse.md: a passage id already held is pasted as a
+    # short pointer on the second turn, not repasted in full.
+    assert full_text.count("eight words in it") == 1
+    assert "already shown above" in full_text
 
 
 def test_action_appends_user_entry_and_no_evidence():

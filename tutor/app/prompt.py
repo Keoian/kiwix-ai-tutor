@@ -44,6 +44,25 @@ class PromptOverflow(Exception):
     """Raised when the newest turn cannot fit within Budget.newest tokens."""
 
 
+_POINTER_WORD_COUNT = 8
+
+_ALL_HELD_INSTRUCTION = (
+    "[Host note: every source above was already shown earlier in this "
+    "lesson. Answer the student's specific question briefly using the "
+    "sources already shown above; do not re-summarise the topic.]"
+)
+
+
+def _pointer_text(passage: dict) -> str:
+    """One-line pointer for a passage already fully pasted earlier in the
+    log: cites where it came from without repeating its text."""
+    words = (passage.get("text") or "").split()
+    snippet = " ".join(words[:_POINTER_WORD_COUNT])
+    ellipsis = "…" if len(words) > _POINTER_WORD_COUNT else ""
+    title = passage.get("title") or ""
+    return f"(already shown above) {title} — {snippet}{ellipsis}".strip()
+
+
 @dataclass(frozen=True)
 class EvictionEvent:
     kind: str
@@ -151,22 +170,56 @@ class PromptLog:
     def append_user(self, text: str) -> None:
         self._turns.append([{"role": "user", "content": text}])
 
+    def held_ids(self) -> frozenset[str]:
+        """Passage ids whose full text is currently present somewhere in
+        this lesson's prompt log -- i.e. not (yet) evicted. Survives
+        resume (``_rebuild_prompt_log`` repopulates ``_seen_ids`` from the
+        stored entries) and respects eviction (``evict`` removes an id
+        from this set once its text is no longer actually present, so a
+        later turn re-pastes it in full instead of pointing at text that
+        is no longer there)."""
+        return frozenset(self._seen_ids)
+
     def append_evidence(
         self,
         passages: Iterable[dict],
         budget: Budget | None = None,
+        reuse_prior_passages: bool = False,
     ) -> None:
         if not self._turns:
             raise RuntimeError("append_evidence requires an open turn (append_user first)")
         current_turn = self._turns[-1]
 
-        new_passages = []
-        for p in passages:
-            if p["id"] in self._seen_ids:
-                continue
-            new_passages.append(p)
+        passages = list(passages)
 
-        content = "\n".join(f"[{p['label']}] {p['text']}" for p in new_passages)
+        if not reuse_prior_passages:
+            new_passages = [p for p in passages if p["id"] not in self._seen_ids]
+            display_passages = new_passages
+            newly_seen_ids = [p["id"] for p in new_passages]
+        else:
+            # Every passage from this turn's packet is kept and shown --
+            # held ones as a short pointer line instead of dropped
+            # outright, so the model still sees an [S#] line for them
+            # this turn and the citation preface below can tell whether
+            # *every* passage was already held. Only ids not already in
+            # ``self._seen_ids`` are new (and get added to it below).
+            display_passages = []
+            newly_seen_ids = []
+            held_count = 0
+            for p in passages:
+                if p["id"] in self._seen_ids:
+                    held_count += 1
+                    display_passages.append({**p, "text": _pointer_text(p)})
+                else:
+                    display_passages.append(dict(p))
+                    newly_seen_ids.append(p["id"])
+            all_held = bool(passages) and held_count == len(passages)
+
+        content = "\n".join(f"[{p['label']}] {p['text']}" for p in display_passages)
+        all_held_display = reuse_prior_passages and all_held and display_passages
+        note = _ALL_HELD_INSTRUCTION if all_held_display else None
+        if note:
+            content = f"{content}\n{note}" if content else note
 
         if budget is not None:
             user_text = current_turn[0].get("content", "") if current_turn else ""
@@ -176,14 +229,15 @@ class PromptLog:
                     f"newest turn exceeds budget.newest={budget.newest} tokens"
                 )
 
-        current_turn.append(
-            {
-                "role": "tool",
-                "passages": [dict(p) for p in new_passages],
-            }
-        )
-        for p in new_passages:
-            self._seen_ids.add(p["id"])
+        entry: dict = {
+            "role": "tool",
+            "passages": [dict(p) for p in display_passages],
+        }
+        if note:
+            entry["note"] = note
+        current_turn.append(entry)
+        for pid in newly_seen_ids:
+            self._seen_ids.add(pid)
 
     def append_calc_result(self, *, expression: str, result: str) -> None:
         if not self._turns:
@@ -245,9 +299,12 @@ class PromptLog:
     @staticmethod
     def _text_of(message: dict) -> str:
         if message.get("passages"):
-            return "\n".join(
+            text = "\n".join(
                 f"[{p['label']}] {p['text']}" for p in message["passages"]
             )
+            if message.get("note"):
+                text = f"{text}\n{message['note']}" if text else message["note"]
+            return text
         if message.get("tool_calls"):
             return json.dumps(message["tool_calls"], sort_keys=True)
         return message.get("content", "") or ""
@@ -464,6 +521,22 @@ class PromptLog:
                 if p["label"] in needed_labels and p["label"] not in have_labels:
                     self._protected.append(dict(p))
                     have_labels.add(p["label"])
+
+        # ``_seen_ids`` must reflect exactly which passage ids' full text
+        # is still actually present after this eviction (stage 1's
+        # discards above already did this for individually-dropped
+        # passages; a whole evicted turn -- stage 2 -- otherwise left its
+        # ids stranded in ``_seen_ids`` even though the text is gone
+        # unless reprefilled into ``_protected`` above). Recomputing from
+        # the truth is what ``held_ids()`` relies on for passage-reuse
+        # pointers to only ever point at text that is genuinely still
+        # there.
+        self._seen_ids = {p["id"] for p in self._protected}
+        for turn in self._turns:
+            for entry in turn:
+                if entry.get("role") == "tool":
+                    for p in entry.get("passages", []) or []:
+                        self._seen_ids.add(p["id"])
 
         tokens_after = self.tokens_used()
         return EvictionEvent(

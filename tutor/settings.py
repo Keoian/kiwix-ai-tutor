@@ -123,6 +123,20 @@ class AppConfig:
     its passages are kept only as backfill behind the rewrite's own
     results. ``False`` reproduces today's behaviour (no follow-up
     rewrite; the existing weak/empty-evidence rewrite still applies)."""
+    reuse_prior_passages: bool = True
+    """When a turn's evidence packet contains a passage whose full text
+    is already present earlier in the lesson's prompt log (tracked by
+    passage id, and re-derived on resume -- see
+    ``tutor.app.prompt.PromptLog``), paste only a short pointer line for
+    it instead of the full text again (see docs/passage_reuse.md). A
+    passage evicted from the log (its text no longer actually present) is
+    treated as not-held and re-pasted in full. If every passage in a
+    turn's packet is already held, a short host instruction is appended
+    telling the model to answer the specific question from the sources
+    already shown rather than re-summarising. Citation/attribution
+    resolution always sees the full passage text regardless of this
+    setting -- only what is pasted into the prompt log is shortened.
+    ``False`` reproduces today's behaviour byte-for-byte."""
 
 
 @dataclass(frozen=True)
@@ -321,6 +335,7 @@ def load_config(path: Path) -> Config:
         answer_max_tokens=_app_int("answer_max_tokens", 2000),
         rewrite_on_weak_evidence=_app_bool("rewrite_on_weak_evidence", True),
         rewrite_on_followup=_app_bool("rewrite_on_followup", True),
+        reuse_prior_passages=_app_bool("reuse_prior_passages", True),
     )
 
     # [embedding] is optional, like [app]; when present every key is

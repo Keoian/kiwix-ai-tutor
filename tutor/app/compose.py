@@ -302,6 +302,7 @@ def _make_turn_runner(
     last_eviction: dict | None = None,
     rewrite_on_weak_evidence: bool = True,
     rewrite_on_followup: bool = True,
+    reuse_prior_passages: bool = True,
 ):
     from tutor.app.agent_loop import run_turn
 
@@ -366,6 +367,7 @@ def _make_turn_runner(
                 cancel=cancel,
                 rewrite_on_weak_evidence=rewrite_on_weak_evidence,
                 rewrite_on_followup=rewrite_on_followup,
+                reuse_prior_passages=reuse_prior_passages,
             )
         except Exception:  # noqa: BLE001 - never leak a traceback to the student
             emit("error", {"message": _STUDENT_SAFE_ERROR})
@@ -684,6 +686,7 @@ def build_deps(cfg: Any, *, llm: Any = None, research_engine: Any = None) -> App
         last_eviction=last_eviction,
         rewrite_on_weak_evidence=getattr(cfg.app, "rewrite_on_weak_evidence", True),
         rewrite_on_followup=getattr(cfg.app, "rewrite_on_followup", True),
+        reuse_prior_passages=getattr(cfg.app, "reuse_prior_passages", True),
     )
     status_provider = _make_status_provider(
         llm=llm,

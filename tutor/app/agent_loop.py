@@ -162,14 +162,24 @@ def _to_wire_messages(rendered: list[dict]) -> list[dict]:
     return wire
 
 
-def _trim_and_append_evidence(log, passages: list[dict], budget) -> None:
+def _trim_and_append_evidence(
+    log, passages: list[dict], budget, *, reuse_prior_passages: bool = False
+) -> None:
     """Append ``passages`` as an evidence packet, trimming the
     lowest-ranked (last) passages first if the full packet does not fit
-    ``budget.newest`` -- never crashing the turn on PromptOverflow."""
+    ``budget.newest`` -- never crashing the turn on PromptOverflow.
+
+    ``reuse_prior_passages`` (see docs/passage_reuse.md and
+    ``tutor.settings.AppConfig.reuse_prior_passages``): when set, a
+    passage whose full text is already present earlier in the log
+    (``log.held_ids()``) is pasted as a short pointer line instead of
+    being re-pasted in full."""
     remaining = list(passages)
     while True:
         try:
-            log.append_evidence(remaining, budget=budget)
+            log.append_evidence(
+                remaining, budget=budget, reuse_prior_passages=reuse_prior_passages
+            )
             return
         except PromptOverflow:
             if not remaining:
@@ -709,6 +719,7 @@ def run_turn(
     temperature: float | None = None,
     rewrite_on_weak_evidence: bool = True,
     rewrite_on_followup: bool = True,
+    reuse_prior_passages: bool = True,
 ) -> TurnResult:
     research_calls = 0
     calc_calls = 0
@@ -827,7 +838,12 @@ def run_turn(
                 }
             )
             if use_log:
-                _trim_and_append_evidence(log, packet["passages"], budget)
+                _trim_and_append_evidence(
+                    log,
+                    packet["passages"],
+                    budget,
+                    reuse_prior_passages=reuse_prior_passages,
+                )
             else:
                 evidence_text = render_evidence(packet)
                 messages.append(
@@ -1066,7 +1082,12 @@ def run_turn(
                         packet = _packet_from_response(response)
                         _retain_passages(session, packet)
                         if use_log:
-                            _trim_and_append_evidence(log, packet["passages"], budget)
+                            _trim_and_append_evidence(
+                                log,
+                                packet["passages"],
+                                budget,
+                                reuse_prior_passages=reuse_prior_passages,
+                            )
                         else:
                             evidence_text = render_evidence(packet)
                             messages.append(

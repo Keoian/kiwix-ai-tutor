@@ -542,5 +542,7 @@ def render_evidence(packet: dict) -> str:
     for passage in passages:
         marker = " [Q&A]" if passage.get("kind") == "qa" else ""
         lines.append(f"[{passage['label']}]{marker} {passage.get('text', '')}")
+    if packet.get("note"):
+        lines.append(packet["note"])
     lines.append(_CITATION_REMINDER)
     return "\n".join(lines)
