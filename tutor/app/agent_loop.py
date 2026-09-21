@@ -216,12 +216,20 @@ def run_turn(
             log.append_user(user_input.text)
         else:
             messages.append({"role": "user", "content": user_input.text})
+        emit({"kind": "status", "stage": "searching", "detail": "Looking in the library..."})
         response = research_engine.research(
             user_input.text, topic_hint=getattr(session, "subject_hint", None)
         )
         research_calls += 1
         packet = _packet_from_response(response)
         _retain_passages(session, packet)
+        emit(
+            {
+                "kind": "status",
+                "stage": "reading",
+                "detail": f"Reading {len(packet.get('passages') or [])} sources...",
+            }
+        )
         if use_log:
             _trim_and_append_evidence(log, packet["passages"], budget)
         else:
@@ -269,6 +277,7 @@ def run_turn(
         guard_cancel = threading.Event()
         stream_cancel = _UnionCancel(cancel, guard_cancel)
 
+        emit({"kind": "status", "stage": "thinking", "detail": "Writing an answer..."})
         for evt in llm.stream_chat(
             messages,
             tools=TOOLS,
@@ -405,6 +414,13 @@ def run_turn(
                     continue
 
                 if tc.name == "research":
+                    emit(
+                        {
+                            "kind": "status",
+                            "stage": "tool",
+                            "detail": "Searching again...",
+                        }
+                    )
                     if research_calls >= RESEARCH_CAP:
                         _append_tool_message(
                             tc.id,
@@ -435,6 +451,13 @@ def run_turn(
                             )
                     emit({"kind": "tool_result", "name": "research"})
                 elif tc.name == "calc":
+                    emit(
+                        {
+                            "kind": "status",
+                            "stage": "tool",
+                            "detail": "Using the calculator...",
+                        }
+                    )
                     if calc_calls >= CALC_CAP:
                         _append_tool_message(
                             tc.id, f"calc cap of {CALC_CAP} calls reached for this turn."

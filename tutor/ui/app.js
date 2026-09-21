@@ -158,31 +158,164 @@
   // have to account for markdown syntax being stripped: they are computed
   // against the untouched raw text before any slice reaches here.
   // -----------------------------------------------------------------------
-  const MARKDOWN_RE = /(\*\*([^*\n]+)\*\*)|(\*([^*\n]+)\*)|(`([^`\n]+)`)|(\n)/g;
+  const MARKDOWN_RE = /(\*\*([^*\n]+)\*\*)|(\*([^*\n]+)\*)|(`([^`\n]+)`)|(<br\s*\/?>)|(\n)/gi;
 
-  function appendMarkdownText(container, text) {
+  // Inline-only tokenizer: bold/italic/code plus a literal "<br>" token
+  // (some model answers put a literal <br> inside a table cell) both
+  // rendered as a real <br> element. No block-level splitting here --
+  // used for the text inside a single paragraph line, heading, list item
+  // or table cell.
+  function appendInlineMarkdown(container, text) {
     if (!text) return;
     let lastIndex = 0;
     let match;
-    let currentLine = container;
     MARKDOWN_RE.lastIndex = 0;
     function plain(slice) {
-      if (slice) currentLine.appendChild(document.createTextNode(slice));
+      if (slice) container.appendChild(document.createTextNode(slice));
     }
     while ((match = MARKDOWN_RE.exec(text)) !== null) {
       plain(text.slice(lastIndex, match.index));
       if (match[1] !== undefined) {
-        currentLine.appendChild(el("strong", { text: match[2] }));
+        container.appendChild(el("strong", { text: match[2] }));
       } else if (match[3] !== undefined) {
-        currentLine.appendChild(el("em", { text: match[4] }));
+        container.appendChild(el("em", { text: match[4] }));
       } else if (match[5] !== undefined) {
-        currentLine.appendChild(el("code", { text: match[6] }));
-      } else if (match[7] !== undefined) {
-        currentLine.appendChild(el("br"));
+        container.appendChild(el("code", { text: match[6] }));
+      } else if (match[7] !== undefined || match[8] !== undefined) {
+        container.appendChild(el("br"));
       }
       lastIndex = MARKDOWN_RE.lastIndex;
     }
     plain(text.slice(lastIndex));
+  }
+
+  const _TABLE_ROW_RE = /^\s*\|.*\|\s*$/;
+  const _TABLE_SEP_RE = /^\s*\|?(\s*:?-+:?\s*\|)+\s*:?-*:?\s*\|?\s*$/;
+  const _LIST_ITEM_RE = /^\s*([-*]|\d+\.)\s+(.*)$/;
+  const _HEADING_RE = /^(#{1,6})\s+(.*)$/;
+
+  function _splitTableRow(line) {
+    let trimmed = line.trim();
+    if (trimmed.startsWith("|")) trimmed = trimmed.slice(1);
+    if (trimmed.endsWith("|")) trimmed = trimmed.slice(0, -1);
+    return trimmed.split("|").map(function (cell) {
+      return cell.trim();
+    });
+  }
+
+  function _buildTable(lines) {
+    const wrapper = el("div", { className: "md-table-wrap" });
+    const table = el("table", { className: "md-table" });
+    const headCells = _splitTableRow(lines[0]);
+    const thead = el("thead");
+    const headRow = el("tr");
+    headCells.forEach(function (cellText) {
+      const th = el("th");
+      appendInlineMarkdown(th, cellText);
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    const tbody = el("tbody");
+    for (let r = 2; r < lines.length; r++) {
+      const cells = _splitTableRow(lines[r]);
+      const tr = el("tr");
+      cells.forEach(function (cellText) {
+        const td = el("td");
+        appendInlineMarkdown(td, cellText);
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    wrapper.appendChild(table);
+    return wrapper;
+  }
+
+  // Block-level markdown: pipe tables, `#`/`##`/... headings, `- `/`1. `
+  // lists, and plain paragraphs, each rendered with createElement and
+  // textContent DOM nodes only -- raw markup is never assigned. Inline
+  // bold/italic/code (and a literal "<br>") still work inside every block
+  // via appendInlineMarkdown above.
+  function appendMarkdownText(container, text) {
+    if (!text) return;
+    const lines = text.split("\n");
+    let i = 0;
+    while (i < lines.length) {
+      const headingMatch = _HEADING_RE.exec(lines[i]);
+      if (headingMatch) {
+        const tag = headingMatch[1].length <= 3 ? "h3" : "h4";
+        const heading = el(tag, {});
+        appendInlineMarkdown(heading, headingMatch[2]);
+        container.appendChild(heading);
+        i++;
+        continue;
+      }
+
+      if (
+        _TABLE_ROW_RE.test(lines[i]) &&
+        i + 1 < lines.length &&
+        _TABLE_SEP_RE.test(lines[i + 1])
+      ) {
+        const tableLines = [lines[i], lines[i + 1]];
+        let j = i + 2;
+        while (j < lines.length && _TABLE_ROW_RE.test(lines[j])) {
+          tableLines.push(lines[j]);
+          j++;
+        }
+        container.appendChild(_buildTable(tableLines));
+        i = j;
+        continue;
+      }
+
+      if (_LIST_ITEM_RE.test(lines[i])) {
+        const ordered = /^\s*\d+\./.test(lines[i]);
+        const list = el(ordered ? "ol" : "ul", {});
+        let j = i;
+        while (j < lines.length) {
+          const itemMatch = _LIST_ITEM_RE.exec(lines[j]);
+          if (!itemMatch) break;
+          const li = el("li");
+          appendInlineMarkdown(li, itemMatch[2]);
+          list.appendChild(li);
+          j++;
+        }
+        container.appendChild(list);
+        i = j;
+        continue;
+      }
+
+      // Paragraph: consume lines until the next block-starting line.
+      const paraLines = [];
+      let j = i;
+      while (
+        j < lines.length &&
+        !_HEADING_RE.test(lines[j]) &&
+        !_LIST_ITEM_RE.test(lines[j]) &&
+        !(
+          _TABLE_ROW_RE.test(lines[j]) &&
+          j + 1 < lines.length &&
+          _TABLE_SEP_RE.test(lines[j + 1])
+        )
+      ) {
+        paraLines.push(lines[j]);
+        j++;
+      }
+      if (j === i) {
+        // Safety net: nothing matched a block and the paragraph loop
+        // consumed zero lines (shouldn't happen given the checks above,
+        // but never spin forever on unexpected input).
+        appendInlineMarkdown(container, lines[i]);
+        j = i + 1;
+      } else {
+        paraLines.forEach(function (line, idx) {
+          appendInlineMarkdown(container, line);
+          if (idx < paraLines.length - 1) container.appendChild(el("br"));
+        });
+      }
+      i = j;
+    }
   }
 
   function renderTextWithCitations(container, text) {
@@ -566,6 +699,73 @@
     appendMessage("error", message);
   }
 
+  // ---------------------------------------------------------------------
+  // Working (busy) bubble: shown immediately on send, replaced by the
+  // streamed answer at first token, or by a plain retry-able error on
+  // failure. See docs feedback "NO FEEDBACK AFTER SEND" (2026-09-20).
+  // ---------------------------------------------------------------------
+
+  const STATUS_TEXT = {
+    searching: "Looking in the library...",
+    reading: "Reading sources...",
+    thinking: "Writing an answer...",
+    tool: "Working...",
+    checking: "Checking the answer against the sources...",
+  };
+
+  function appendWorkingBubble() {
+    const wrapper = el("div", { className: "msg msg-tutor msg-working" });
+    const dots = el("span", { className: "working-dots", attrs: { "aria-hidden": "true" } });
+    dots.appendChild(el("span", { className: "dot" }));
+    dots.appendChild(el("span", { className: "dot" }));
+    dots.appendChild(el("span", { className: "dot" }));
+    wrapper.appendChild(dots);
+    const statusLine = el("span", {
+      className: "working-status",
+      text: "Looking in the library...",
+      attrs: { "aria-live": "polite" },
+    });
+    wrapper.appendChild(statusLine);
+    chat.appendChild(wrapper);
+    chat.scrollTop = chat.scrollHeight;
+
+    const startedAt = Date.now();
+    const timer = setInterval(function () {
+      const elapsedMs = Date.now() - startedAt;
+      if (elapsedMs < 3000) return;
+      const seconds = Math.floor(elapsedMs / 1000);
+      const base = statusLine.getAttribute("data-base") || statusLine.textContent;
+      statusLine.setAttribute("data-base", base);
+      statusLine.textContent = base + " ... " + seconds + " s";
+    }, 1000);
+
+    return {
+      node: wrapper,
+      statusLine: statusLine,
+      setStatus: function (stage, detail) {
+        const text = detail || STATUS_TEXT[stage] || "Working...";
+        statusLine.setAttribute("data-base", text);
+        statusLine.textContent = text;
+      },
+      stop: function () {
+        clearInterval(timer);
+      },
+    };
+  }
+
+  function replaceWorkingBubbleWithError(working, message) {
+    working.stop();
+    working.node.className = "msg msg-error msg-retry";
+    working.node.textContent = "";
+    working.node.appendChild(
+      el("span", { text: message || "Something went wrong. " })
+    );
+    const retryBtn = el("button", { className: "retry-btn", text: "Retry" });
+    retryBtn.type = "button";
+    working.node.appendChild(retryBtn);
+    return retryBtn;
+  }
+
   function appendEvictionNote(data) {
     const wrapper = el("div", { className: "msg msg-note" });
     const note = el("span", {
@@ -616,9 +816,21 @@
     setBusy(true);
 
     let tutorLine = "";
-    const tutorNode = appendMessage("tutor", "");
+    let tutorNode = null;
+    let firstTokenSeen = false;
+    const working = appendWorkingBubble();
     lastCitationsEvent = null;
     lastAttributionsEvent = null;
+
+    function ensureTutorNode() {
+      if (!firstTokenSeen) {
+        firstTokenSeen = true;
+        working.stop();
+        working.node.remove();
+        tutorNode = appendMessage("tutor", "");
+      }
+      return tutorNode;
+    }
 
     currentAbortController = new AbortController();
     try {
@@ -630,7 +842,14 @@
       });
 
       if (!resp.ok) {
-        appendError("Request failed (" + resp.status + ")");
+        const retryBtn = replaceWorkingBubbleWithError(
+          working,
+          "Request failed (" + resp.status + ")."
+        );
+        retryBtn.addEventListener("click", function () {
+          working.node.remove();
+          sendTurn(payload);
+        });
         setBusy(false);
         return;
       }
@@ -648,22 +867,50 @@
         while ((sepIndex = buffer.indexOf("\n\n")) !== -1) {
           const frame = buffer.slice(0, sepIndex);
           buffer = buffer.slice(sepIndex + 2);
-          handleFrame(frame, tutorNode, function (text) {
-            tutorLine = text;
-          }, function () {
-            return tutorLine;
-          });
+          handleFrame(
+            frame,
+            function () {
+              return ensureTutorNode();
+            },
+            function (text) {
+              tutorLine = text;
+            },
+            function () {
+              return tutorLine;
+            },
+            working,
+            function (message) {
+              if (firstTokenSeen) {
+                appendError(message);
+                return;
+              }
+              const retryBtn = replaceWorkingBubbleWithError(working, message);
+              retryBtn.addEventListener("click", function () {
+                working.node.remove();
+                sendTurn(payload);
+              });
+            }
+          );
         }
       }
     } catch (err) {
-      appendError("Connection lost.");
+      if (!firstTokenSeen) {
+        const retryBtn = replaceWorkingBubbleWithError(working, "Connection lost.");
+        retryBtn.addEventListener("click", function () {
+          working.node.remove();
+          sendTurn(payload);
+        });
+      } else {
+        appendError("Connection lost.");
+      }
     } finally {
+      working.stop();
       setBusy(false);
       currentAbortController = null;
     }
   }
 
-  function handleFrame(frame, tutorNode, setTutorLine, getTutorLine) {
+  function handleFrame(frame, getTutorNode, setTutorLine, getTutorLine, working, onError) {
     let eventName = "message";
     let dataText = "";
     frame.split("\n").forEach(function (line) {
@@ -680,6 +927,16 @@
     } catch (err) {
       data = {};
     }
+
+    if (eventName === "status") {
+      // Additive: unknown to older clients/eval harnesses, safe to ignore
+      // there. Here it drives the working bubble's live status line until
+      // the first token arrives.
+      if (working) working.setStatus(data.stage, data.detail);
+      return;
+    }
+
+    const tutorNode = getTutorNode();
 
     if (eventName === "token") {
       const text = getTutorLine() + (data.text || "");
@@ -708,7 +965,11 @@
     } else if (eventName === "eviction") {
       appendEvictionNote(data);
     } else if (eventName === "error") {
-      appendError(data.message || "An error occurred.");
+      if (onError) {
+        onError(data.message || "Something went wrong.");
+      } else {
+        appendError(data.message || "An error occurred.");
+      }
     } else if (eventName === "done") {
       lastTurnMeta = data;
       applyCitationQuality(tutorNode, data, lastCitationsEvent, lastAttributionsEvent);
@@ -718,6 +979,8 @@
 
   function setBusy(isBusy) {
     sendBtn.disabled = isBusy;
+    sendBtn.classList.toggle("is-busy", isBusy);
+    input.disabled = isBusy;
     stopBtn.disabled = !isBusy;
     actionButtons.forEach(function (btn) {
       btn.disabled = isBusy;
@@ -727,10 +990,21 @@
   composer.addEventListener("submit", function (evt) {
     evt.preventDefault();
     const text = input.value.trim();
-    if (!text) return;
+    if (!text || sendBtn.disabled) return;
     appendMessage("user", text);
     input.value = "";
     sendTurn({ text: text });
+  });
+
+  input.addEventListener("keydown", function (evt) {
+    if (evt.key === "Enter" && !evt.shiftKey) {
+      evt.preventDefault();
+      if (typeof composer.requestSubmit === "function") {
+        composer.requestSubmit();
+      } else {
+        composer.dispatchEvent(new Event("submit", { cancelable: true }));
+      }
+    }
   });
 
   actionButtons.forEach(function (btn) {

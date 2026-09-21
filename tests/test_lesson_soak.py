@@ -402,6 +402,21 @@ def test_process_turn_stream_no_attributions_event_leaves_it_none():
     assert result["attribution_event"] is None
 
 
+def test_process_turn_stream_ignores_unknown_status_event():
+    # Additive `status` SSE event (2026-09-20 working-indicator follow-up):
+    # the soak harness must tolerate it without error and still parse the
+    # rest of the turn normally.
+    lines = (
+        _sse("status", {"stage": "searching", "detail": "Looking in the library..."})
+        + _sse("token", {"text": "Hi"})
+        + _sse("status", {"stage": "thinking", "detail": "Writing an answer..."})
+        + _sse("done", {"status": "ok", "answer": "Hi."})
+    )
+    result = process_turn_stream(lines, t0=0.0, now=lambda: 0.5)
+    assert result["status"] == "ok"
+    assert result["answer_text"] == "Hi."
+
+
 def test_process_turn_stream_still_counts_eviction_and_calc():
     lines = (
         _sse("eviction", {"evicted_turns": 2})

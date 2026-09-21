@@ -322,6 +322,15 @@ def _make_turn_runner(
                 # of their own here: the turn's final status (below) is
                 # what the student sees, always via a student-safe message.
                 return
+            if isinstance(obj, dict) and obj.get("kind") == "status":
+                # Additive turn-progress event (2026-09-20 UI follow-up):
+                # never fails a turn -- emission is best-effort and purely
+                # informational, older clients/eval harnesses ignore it.
+                try:
+                    emit("status", {"stage": obj.get("stage"), "detail": obj.get("detail")})
+                except Exception:  # noqa: BLE001 - status is best-effort
+                    pass
+                return
             if isinstance(obj, dict) and obj.get("kind") == "eviction_reprefill":
                 # Emitted synchronously by run_turn before the model call
                 # that follows the eviction (see tutor.app.agent_loop and
@@ -385,6 +394,13 @@ def _make_turn_runner(
             # docs/attribution_design.md): a separate SSE event, sent
             # before "done", never editing the model's own answer text.
             # Failure here must never fail an otherwise-successful turn.
+            try:
+                emit(
+                    "status",
+                    {"stage": "checking", "detail": "Checking the answer against the sources..."},
+                )
+            except Exception:  # noqa: BLE001 - status is best-effort
+                pass
             computed_items: list[dict] = []
             try:
                 question_text = (

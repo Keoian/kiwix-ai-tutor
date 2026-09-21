@@ -237,6 +237,35 @@ def test_turn_runner_emits_attributions_event_before_done(tmp_path):
     assert attributions_data["attributions"][0]["label"] == "S1"
 
 
+def test_turn_runner_emits_status_events_at_stage_boundaries(tmp_path):
+    """2026-09-20 working-indicator follow-up: additive `status` SSE events
+    fire at real stage boundaries -- searching before pre-retrieval,
+    reading once passages are in hand, thinking before generation, and
+    checking before citations/attributions run -- in that order, and never
+    fail the turn."""
+    cfg = _cfg_with_unreachable_llm_and_missing_archives(tmp_path)
+    answer = "Water boils at 100 C. [S1]"
+    events = [
+        StreamEvent(kind="token", text=answer),
+        StreamEvent(kind="done", finish_reason="stop", usage={}),
+    ]
+    fake_llm = _FakeLlm(events)
+    deps = build_deps(cfg, llm=fake_llm, research_engine=_FakeResearchEngine())
+    session_id = deps.sessions.create()
+    frames = []
+
+    def emit(event_name, data):
+        frames.append((event_name, data))
+
+    cancel = threading.Event()
+    deps.turn_runner(session_id, _Input(kind="text", text="Does water boil?"), emit, cancel)
+
+    status_stages = [data["stage"] for name, data in frames if name == "status"]
+    assert status_stages == ["searching", "reading", "thinking", "checking"]
+    names = [name for name, _ in frames]
+    assert names.index("status") < names.index("done")
+
+
 def test_attributions_event_reports_passages_available(tmp_path):
     """2026-09-20 UI wording follow-up: the `attributions` event carries an
     additive `passages_available` count (len(known_passages)) so the UI can
