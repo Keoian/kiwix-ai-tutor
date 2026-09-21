@@ -245,6 +245,63 @@ def _load_answer_by_question(path, question_text):
     raise AssertionError(f"{question_text!r} not found in {path}")
 
 
+# ---------------------------------------------------------------------------
+# 2026-09-20 follow-up: the loose "last number in the sentence" heuristic
+# produced FALSE mismatches when the answer states the arithmetic in one
+# sentence ("...by 0.125 (since 12.5% is 12.5/100 or 0.125).") and the
+# actual claimed result in the NEXT sentence ("So, 640 x 0.125 = 80.").
+# Fix: verified if ANY number anywhere in the answer matches the computed
+# value; mismatch only when a number is tightly bound to the expression by
+# is/=/equals/gives/comes to (not "is calculated by", "you multiply",
+# "means") AND no number anywhere in the answer matches. Real full answers
+# from data/granite_soak10_v2.turns.json (graded correct by the soak).
+# ---------------------------------------------------------------------------
+
+
+def test_no_false_mismatch_when_correct_value_is_in_a_later_sentence_12_5_percent():
+    question, answer = _load_answer_by_question(
+        "data/granite_soak10_v2.turns.json", "What is 12.5% of 640?"
+    )
+    items = check_computed_statements(answer, question, evaluate=_stub_evaluate)
+    mismatches = [i for i in items if i["status"] == "mismatch"]
+    assert mismatches == [], mismatches
+    assert any(i["status"] == "verified" and i["computed"] == pytest.approx(80.0) for i in items)
+
+
+def test_no_false_mismatch_when_correct_value_is_in_a_later_sentence_250_percent():
+    question, answer = _load_answer_by_question(
+        "data/granite_soak10_v2.turns.json", "What is 250% of 40?"
+    )
+    items = check_computed_statements(answer, question, evaluate=_stub_evaluate)
+    mismatches = [i for i in items if i["status"] == "mismatch"]
+    assert mismatches == [], mismatches
+    assert any(i["status"] == "verified" and i["computed"] == pytest.approx(100.0) for i in items)
+
+
+def test_tightly_bound_wrong_result_is_still_a_mismatch():
+    answer = "17% of 240 = 999."
+    item = _one(check_computed_statements(answer, evaluate=_stub_evaluate), status="mismatch")
+    assert item["stated"] == pytest.approx(999.0)
+    assert item["computed"] == pytest.approx(40.8)
+
+
+def test_loosely_worded_claim_with_no_tight_binding_and_no_match_emits_nothing():
+    # No connector ever directly binds a number to the expression, and the
+    # correct value never appears anywhere -- conservative: say nothing
+    # rather than guess which number (if any) was meant as the answer.
+    answer = "17% of 240 involves multiplying by 0.17, roughly speaking."
+    assert check_computed_statements(answer, evaluate=_stub_evaluate) == []
+
+
+def test_temperature_mismatch_suppressed_when_correct_value_appears_elsewhere():
+    answer = (
+        "Helium boils at -268.928 C, which is roughly -400.0 F. "
+        "(Corrected: -268.928 C is actually -452.070 F.)"
+    )
+    items = check_computed_statements(answer, evaluate=_stub_evaluate)
+    assert all(i["status"] != "mismatch" for i in items), items
+
+
 def test_soak_v3_index_32_is_the_108_8_error():
     question, answer = _load_answer_by_question(
         "data/granite_soak10_v3.turns.json", "What is 12.5% of 640?"

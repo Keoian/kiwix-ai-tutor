@@ -154,13 +154,59 @@ def _chain_items(text: str, evaluate: EvaluateFn) -> list[dict]:
     return items
 
 
+# A number introduced with one of these connectors, directly after "p% of
+# n" or later in the same sentence, is being offered as THE result of the
+# computation -- as opposed to an intermediate value mentioned in passing
+# ("is calculated by", "you multiply", "means", "or" as in "12.5/100 or
+# 0.125"). "to get"/"get"/"gives"/"comes to" all count, since "... to get
+# 108.8" is the real, measured shape of Granite's error
+# (docs/calc_investigation.md fix #1).
+_TIGHT_RESULT_RE = re.compile(
+    rf"(?:is|=|equals|gives|comes to|to get|get)\s*{_GUARDED_NUM}",
+    re.IGNORECASE,
+)
+
+
+def _answer_matching_number_span(text: str, value: float) -> tuple[int, int] | None:
+    """The span of the first sentence in ``text`` containing a plain
+    number equal to ``value`` (tolerance), or ``None``."""
+    for sent_start, sent_end in _sentence_spans(text):
+        sentence = text[sent_start:sent_end]
+        for m in re.finditer(_GUARDED_NUM, sentence):
+            try:
+                candidate = _to_float(m.group(1))
+            except ValueError:
+                continue
+            if _within_tolerance(candidate, value, m.group(1)):
+                return (sent_start, sent_end)
+    return None
+
+
+def _tight_bound_result(sentence: str, after: int) -> re.Match | None:
+    """The LAST connector-bound number in ``sentence`` at or after offset
+    ``after``, skipping a match that is really "N% is M" restating the
+    percent as a fraction (the text right before the connector word ends
+    in ``%``) rather than stating a final result."""
+    best = None
+    for m in _TIGHT_RESULT_RE.finditer(sentence, after):
+        prefix = sentence[: m.start()].rstrip()
+        if prefix.endswith("%"):
+            continue
+        best = m
+    return best
+
+
 def _percent_items(text: str, evaluate: EvaluateFn) -> list[dict]:
-    """Find "p% of n" and treat the LAST plain number appearing later in
-    the same sentence (that is not itself a restatement of p or n) as the
-    claimed result -- covers real prose like "12.5% of 640 is calculated
-    by multiplying 640 by 0.125 ... to get 80.", not just the tidy
-    "p% of n = c" form. Conservative: no trailing number in the sentence
-    means no claim to check, so nothing is emitted."""
+    """Find "p% of n" claims. Status is "verified" if ANY number anywhere
+    in the whole answer equals the computed value (covers real prose that
+    states the arithmetic in one sentence and the result in the next,
+    e.g. "...by 0.125 (since 12.5% is 12.5/100 or 0.125). So, 640 x 0.125
+    = 80." -- graded correct, previously a false "mismatch" from a
+    sentence-local last-number heuristic). Otherwise, "mismatch" only when
+    a number is tightly bound to the expression by a result connector
+    (see ``_TIGHT_RESULT_RE``) and disagrees. Anything else (a loosely
+    worded claim with no tight binding and no matching number anywhere)
+    emits nothing -- conservative, no guessing."""
     items = []
     for sent_start, sent_end in _sentence_spans(text):
         sentence = text[sent_start:sent_end]
@@ -168,39 +214,36 @@ def _percent_items(text: str, evaluate: EvaluateFn) -> list[dict]:
         if not m:
             continue
         p_str, n_str = m.group(1), m.group(2)
-        try:
-            p_val, n_val = _to_float(p_str), _to_float(n_str)
-        except ValueError:
-            continue
-        candidates = [
-            cm
-            for cm in re.finditer(_GUARDED_NUM, sentence)
-            if cm.start() >= m.end()
-        ]
-        c_str = None
-        for cm in candidates:
-            try:
-                v = _to_float(cm.group(1))
-            except ValueError:
-                continue
-            if v in (p_val, n_val):
-                continue
-            c_str = cm.group(1)
-        if c_str is None:
-            continue
         expr = f"({_normalize_expr(p_str)}/100)*{_normalize_expr(n_str)}"
         computed = _run_evaluate(evaluate, expr)
         if computed is None:
             continue
+
+        match_span = _answer_matching_number_span(text, computed)
+        if match_span is not None:
+            items.append(
+                {
+                    "span": match_span,
+                    "expression": f"{p_str}% of {n_str}",
+                    "stated": computed,
+                    "computed": computed,
+                    "status": "verified",
+                }
+            )
+            continue
+
+        tight = _tight_bound_result(sentence, m.end())
+        if tight is None:
+            continue
+        c_str = tight.group(1)
         stated = _to_float(c_str)
-        status = "verified" if _within_tolerance(stated, computed, c_str) else "mismatch"
         items.append(
             {
                 "span": (sent_start + m.start(), sent_end),
                 "expression": f"{p_str}% of {n_str} = {c_str}",
                 "stated": stated,
                 "computed": computed,
-                "status": status,
+                "status": "mismatch",
             }
         )
     return items
@@ -243,7 +286,16 @@ def _temp_items(text: str, evaluate: EvaluateFn) -> list[dict]:
         computed = _run_evaluate(evaluate, expr)
         if computed is None:
             continue
-        status = "verified" if _within_tolerance(stated, computed, om.group(1)) else "mismatch"
+        if _within_tolerance(stated, computed, om.group(1)):
+            status = "verified"
+        elif _answer_has_number_near(text, computed):
+            # The right value is stated somewhere else in the answer (e.g.
+            # a correction, or a different sentence) -- this particular
+            # pairing disagrees, but a false "mismatch" on an otherwise
+            # correct answer is worse than saying nothing about it.
+            continue
+        else:
+            status = "mismatch"
         span = (min(cm.start(), om.start()), max(cm.end(), om.end()))
         items.append(
             {
