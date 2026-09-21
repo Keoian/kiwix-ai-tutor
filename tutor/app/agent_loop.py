@@ -230,7 +230,8 @@ _FOLLOWUP_HOST_NOTE = (
 # what trip up the word-matcher. Tells the model to write short,
 # title-like queries instead of sentences/questions.
 _MODEL_WRITES_SEARCH_HOST_NOTE = (
-    " [Host note: call research. FIRST give \"question\": the student's "
+    " [Host note, for the research tool call ONLY (never repeat any of "
+    "this in your answer to the student): call research. FIRST give \"question\": the student's "
     "latest message rewritten as one standalone question, replacing "
     "\"it\"/\"that\"/\"they\"/\"the other ones\"/etc. with what it refers "
     "to in the lesson so far, and fixing spelling. E.g. lesson about tires "
@@ -245,7 +246,9 @@ _MODEL_WRITES_SEARCH_HOST_NOTE = (
     "like \"biggest\"/\"longest\"/\"fastest\"/\"how long\" unless part of "
     "a real title. If you already know the likely answer, make that one "
     "of the queries. Don't repeat last turn's exact queries unless the "
-    "question is the same.]"
+    "question is the same. After the library results arrive, answer the "
+    "student in plain sentences; do not write \"question\" or "
+    "\"queries\" in the answer.]"
 )
 
 # Small cap on the forced rewrite call's own output -- it only needs to
