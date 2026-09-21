@@ -1,14 +1,21 @@
-# Dev config (default): IBM Granite 4.0 H-Tiny (hybrid Mamba-2/attention MoE,
-# ~7B total / ~1B active) on the Radeon Pro 5500M 8GB (Vulkan). Won the
-# bake-off against Bonsai-8B Q1_0, which is kept as config/dev.bonsai-q1.toml.
-# runtime_dir points at the Bonsai checkout only for llama-server.exe and its
-# DLLs; model_path points at the Granite GGUF fetched into this repo's own
-# runtime/models/. See docs/bakeoff_dev/granite_flags.md for the sweep and
-# chosen flags.
+# Dev config (default since 2026-09-21): inclusionAI Ling 3.0 Tiny (7.9B
+# total / 1.3B active MoE, hybrid linear attention, MIT licence), bartowski
+# Q4_K_M GGUF quantisation, thinking switched OFF at the server (owner
+# decision: "Let's set default to Ling"). Granite 4.0 H-Tiny remains
+# available as config/dev.granite.toml (the prior default); Bonsai-8B
+# Q1_0 as config/dev.bonsai-q1.toml. Identical to config/dev.ling.toml
+# apart from this comment -- both are kept so existing commands that
+# name either file keep working.
+#
+# NOT VERIFIED: fit and speed on the delivery laptop (GTX 1060 Max-Q,
+# 6 GB VRAM) -- all measurements below are from this dev machine only.
+# Measured here (this session, 2026-09-21): ~4.63 GiB model share of
+# VRAM at 32K context, ~25 tok/s writing (generation), ~40-200 tok/s
+# reading (prompt processing, varies with depth).
 
 [runtime]
 runtime_dir = 'C:\git\bonsai'
-model_path = 'C:\git\kiwix-ai-tutor\runtime\models\granite-4.0-h-tiny\granite-4.0-h-tiny-Q4_K_M.gguf'
+model_path = 'C:\git\kiwix-ai-tutor\runtime\models\ling-3.0-tiny\Ling-3.0-tiny-Q4_K_M.gguf'
 server_binary = "bin/llama-server.exe"
 
 [server]
@@ -20,22 +27,16 @@ cache_type_v = "q8_0"
 n_gpu_layers = 99
 parallel = 1
 flash_attn = true
-# Chosen after the Vulkan flag sweep (docs/bakeoff_dev/granite_flags.md):
-# flash_attn=true + q8_0/q8_0 KV is REQUIRED to fit 32K ctx in <=5.6 GiB
-# (llama-bench: -ctk/-ctv q8_0 without -fa 1 refuses to create the context
-# on this build -- quantized KV needs flash attention). Measured: pp512
-# 683 t/s @ d0 / 387 t/s @ d4096, tg64 67.4 t/s @ d0 / 63.9 t/s @ d4096,
-# 5751201792 B (~5.36 GiB) total VRAM at 32K via GPU Adapter Memory
-# counter -- comfortably under the 6 GiB delivery-machine budget and far
-# above the ~15 t/s decode floor. Default ubatch (512, matches
-# llama-server's own default) beat 256 in the sweep and needed no extra
-# flag, so extra_args is unused here.
 jinja = true
+# Thinking off: a tutor turn must not spend hundreds of hidden tokens first.
+# --reasoning-budget 0 only: a JSON --chat-template-kwargs value loses its quotes when
+# Windows PowerShell 5.1 passes it to a native exe (scripts/serve_dev.ps1), and the server refuses to start.
+extra_args = ["--reasoning-budget", "0"]
 slots = true
 
 [sampling]
-temperature = 0.5
-top_p = 0.9
+temperature = 0.7
+top_p = 0.95
 top_k = 20
 
 [app]
@@ -45,7 +46,6 @@ data_dir = "data"
 registry_path = "config/archives.dev.toml"
 answer_max_tokens = 2000
 
-# Dense sidecar left disabled for this bake-off: focus is the chat model.
 [embedding]
 host = "127.0.0.1"
 port = 8081

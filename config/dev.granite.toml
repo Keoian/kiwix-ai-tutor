@@ -1,12 +1,13 @@
 # Dev config: IBM Granite 4.0 H-Tiny (hybrid Mamba-2/attention MoE, ~7B
-# total / ~1B active) bake-off on the Radeon Pro 5500M 8GB (Vulkan).
-# Copied from config/dev.toml; runtime_dir unchanged (llama-server.exe and
-# DLLs still come from the Bonsai checkout), model_path points at the
-# Granite GGUF fetched into this repo's own runtime/models/.
-# See docs/bakeoff_dev/granite_flags.md for the sweep and chosen flags.
-# NOTE: config/dev.toml is now this same Granite profile (Task 1, Granite
-# became the default dev config); this file is kept identical so existing
-# references to it keep working.
+# total / ~1B active), Apache-2.0, on the Radeon Pro 5500M 8GB (Vulkan).
+# Fallback config as of 2026-09-21 -- inclusionAI Ling 3.0 Tiny is now the
+# default (config/dev.toml and config/dev.ling.toml; owner: "Let's set
+# default to Ling"). Previously the default dev config itself (won the
+# bake-off against Bonsai-8B Q1_0, kept as config/dev.bonsai-q1.toml).
+# runtime_dir points at the Bonsai checkout only for llama-server.exe and
+# its DLLs; model_path points at the Granite GGUF fetched into this
+# repo's own runtime/models/. See docs/bakeoff_dev/granite_flags.md for
+# the sweep and chosen flags.
 
 [runtime]
 runtime_dir = 'C:\git\bonsai'

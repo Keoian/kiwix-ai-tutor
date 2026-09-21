@@ -1,5 +1,10 @@
 # Handoff: offline school tutor (kiwix-ai-tutor)
 
+**2026-09-21 update:** `config/dev.toml` is now the Ling 3.0 Tiny config (owner: "Let's
+set default to Ling"); Granite 4.0 H-Tiny moved to `config/dev.granite.toml` as the
+fallback. Not verified on the delivery laptop (GTX 1060 Max-Q, 6 GB) -- see the config
+file headers for what was actually measured (this dev machine only).
+
 Written 2026-09-21 morning (updated after commits `9ed5633`, `fa3d685`, `f589170`). You have no
 prior context. Read this, then `docs/bakeoff_dev/README.md`. The previous handoff is kept at
 `docs/HANDOFF_2026-09-20_afternoon.md`; the one before that at

@@ -15,6 +15,11 @@ from tutor.settings import Config, ConfigError, load_config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEV_TOML = REPO_ROOT / "config" / "dev.toml"
+# Ling 3.0 Tiny became the default dev config 2026-09-21 (owner: "Let's
+# set default to Ling"); config/dev.granite.toml keeps the prior
+# (Granite 4.0 H-Tiny) default config for tests that specifically pin
+# Granite's values.
+DEV_GRANITE_TOML = REPO_ROOT / "config" / "dev.granite.toml"
 SETTINGS_PY = REPO_ROOT / "tutor" / "settings.py"
 
 
@@ -35,7 +40,31 @@ def _write_toml(path: Path, text: str) -> Path:
 
 
 def test_real_dev_toml_loads_expected_values():
+    """config/dev.toml is the Ling 3.0 Tiny config as of 2026-09-21 (owner:
+    "Let's set default to Ling") -- see
+    test_real_dev_granite_toml_loads_expected_values for the prior
+    (Granite) default, still available at config/dev.granite.toml."""
     cfg = load_config(DEV_TOML)
+
+    assert isinstance(cfg, Config)
+    assert cfg.server.ctx_size == 32768
+    assert cfg.server.cache_type_k == "q8_0"
+    assert cfg.server.cache_type_v == "q8_0"
+    assert cfg.server.host == "127.0.0.1"
+    assert cfg.server.port == 8080
+    assert cfg.server.jinja is True
+    assert cfg.server.slots is True
+    assert cfg.server.parallel == 1
+    assert cfg.sampling.temperature == 0.7
+    assert cfg.sampling.top_p == 0.95
+    assert cfg.sampling.top_k == 20
+    assert cfg.runtime.model_path.name == "Ling-3.0-tiny-Q4_K_M.gguf"
+
+
+def test_real_dev_granite_toml_loads_expected_values():
+    """config/dev.granite.toml: the prior default dev config (Granite 4.0
+    H-Tiny), kept as a complete, working fallback config."""
+    cfg = load_config(DEV_GRANITE_TOML)
 
     assert isinstance(cfg, Config)
     assert cfg.server.ctx_size == 32768
@@ -264,7 +293,7 @@ def test_invalid_cache_type_raises_config_error(tmp_path, bad_cache_type):
 
 
 def test_to_argv_contains_expected_flag_value_pairs():
-    cfg = load_config(DEV_TOML)
+    cfg = load_config(DEV_GRANITE_TOML)
     argv = cfg.server.to_argv(cfg.runtime, cfg.sampling)
 
     assert _flag_value(argv, "-m") == str(cfg.runtime.model_path)

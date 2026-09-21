@@ -1,8 +1,16 @@
-# Dev config (EXPERIMENT): inclusionAI Ling 3.0 Tiny (7.9B total / 1.3B active MoE,
+# Dev config: inclusionAI Ling 3.0 Tiny (7.9B total / 1.3B active MoE,
 # hybrid linear attention, MIT licence), bartowski Q4_K_M GGUF (4.92 GB), thinking
-# switched OFF at the server. Owner-requested manual trial, 2026-09-21.
-# To go back to Granite: use config/dev.toml or config/dev.granite.toml (both Granite).
-# Not yet measured: VRAM at 32K, speed, tool-call reliability, answer quality.
+# switched OFF at the server. Made the default dev config 2026-09-21 (owner:
+# "Let's set default to Ling") -- config/dev.toml is now this same Ling
+# profile; this file is kept identical so existing references to it keep
+# working. To go back to Granite (the prior default): use
+# config/dev.granite.toml. Bonsai-8B Q1_0: config/dev.bonsai-q1.toml.
+#
+# NOT VERIFIED: fit and speed on the delivery laptop (GTX 1060 Max-Q,
+# 6 GB VRAM) -- all measurements below are from this dev machine only.
+# Measured here (this session, 2026-09-21): ~4.63 GiB model share of
+# VRAM at 32K context, ~25 tok/s writing (generation), ~40-200 tok/s
+# reading (prompt processing, varies with depth).
 
 [runtime]
 runtime_dir = 'C:\git\bonsai'

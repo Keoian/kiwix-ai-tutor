@@ -3,7 +3,9 @@
 ## Mission
 
 An **offline tutor for a student with no internet**. Everything is local: an offline model
-(`llama-server` running a small model, currently Granite 4.0 H-Tiny), an offline Kiwix ZIM library
+(`llama-server` running a small model; Ling 3.0 Tiny is the current default dev model,
+`config/dev.toml`, since 2026-09-21, with Granite 4.0 H-Tiny as the fallback config,
+`config/dev.granite.toml`), an offline Kiwix ZIM library
 (Wikipedia, OER textbooks, Stack Exchange), and an app that retrieves evidence from that library,
 gives it to the model as citable sources, and **teaches rather than just answers**.
 
