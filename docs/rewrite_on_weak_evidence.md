@@ -33,11 +33,70 @@ message injected mid-conversation.
 
 ## Merge / re-assess rule
 
-The host executes each of the model's 1-3 rewritten queries against the
-research engine, merges the resulting passage lists by keeping each
-passage's best (lowest) rank across all lists, sorts best-first, caps to
-`_MERGE_CAP` (8) passages, and re-runs `assess_evidence` against the
-original question plus the rewritten queries' own terms.
+The host executes the model's 1-3 rewritten queries as ONE batched call,
+`ResearchEngine.research_many(queries, ...)` (`tutor/retrieval/
+research.py`), which shares a single deadline across the whole batch and
+this engine's own persistent per-archive worker pool / IDF/response
+caches, running each query concurrently (per-query wall time is mostly
+blocking IPC to the out-of-process ZIM worker, which releases the GIL --
+see `docs/retrieval_baseline.md`'s profiling note -- so N queries cost
+close to the slowest single query, not the sum of all of them). A
+per-query failure or an already-elapsed shared deadline never raises or
+drops a slot; it comes back as `{"status": "error", ...}` for that query
+alone.
+
+The resulting passage lists are merged by `_merge_dedupe_passages`
+(`tutor/app/agent_loop.py`) via **reciprocal-rank fusion (RRF, k=60)**,
+computed first at ARTICLE level (so an article found by >= 2 of the
+rewritten queries reliably outranks one only a single query found, even
+if that single-query hit had a better raw rank) and then at passage level
+within each article's own rank slot. A **title-match boost** applies when
+an article's own title terms are fully contained in one of the rewritten
+queries (e.g. "Square foot gardening" ⊂ "square foot gardening basics");
+a **penalty** applies to disambiguation pages and titles carrying only a
+single, generic content term (e.g. "Garden", "Square (disambiguation)").
+Still capped to `_MERGE_CAP` (8) passages; ties are broken deterministically
+by (best original rank, title, passage id).
+
+`assess_evidence` is then re-run with two new, backward-compatible
+optional parameters: `rewritten_queries` (the union of each rewritten
+query's own key content terms, replacing the original question's terms
+for coverage purposes) and `healthy_terms` (any of the ORIGINAL question's
+own key terms that already had a healthy match, kept alongside the
+rewritten terms). This matters because the original question's
+misspelt/fused terms (e.g. "squarefoot") can never be covered by good
+passages -- checking them permanently pinned coverage low even when the
+model's rewrite and the merged evidence were both good. See "Before/after"
+below.
+
+### Before/after (live smoke, `data/rewrite_smoke.py`)
+
+- **Before this fix**: query "how to squarefoot garden the right way?" --
+  Granite's three rewritten queries were all reasonable ("how to square
+  foot garden the right way", "square foot gardening basics", "square
+  foot gardening guide step by step"); the merge kept best-rank-per-passage
+  and put the target article **last**: `['6 Foot 7 Foot', 'Garden',
+  'Square foot', 'Square (disambiguation)', 'Square foot gardening']`.
+  Re-assessment against the original ("squarefoot"-containing) terms
+  stayed `weak`, so the tutor told the student it found nothing. Added
+  wall time: 8.3 s (forced call 3.45 s + ~4.9 s for three sequential
+  searches).
+- **After this fix**: same question, live run against the real
+  llama-server -- `level_after` is now `strong`, "Square foot gardening"
+  is present with a real evidence passage (`Square foot gardening` in the
+  merged/observed titles, `6 Foot 7 Foot`/`Square (disambiguation)` no
+  longer crowd it out of the assessed evidence), and the answer's
+  attributions are `backed=4 unbacked=0`. Prompt-cache survival is intact:
+  turn 2's `cached_tokens` (1716) is within one token of turn 1's
+  `total_tokens` (1717). (This particular live run, the model rewrote to
+  a single query rather than three -- Granite's own rewrite choice is
+  non-deterministic across runs -- so it exercises the assessment-terms
+  fix directly and the RRF merge fix on a smaller (1-query) case; the RRF
+  merge's multi-query behaviour is covered by
+  `tests/test_agent_loop_rewrite.py::test_rrf_merge_puts_multi_query_target_article_first`,
+  which reproduces the exact three-query/never-first-place shape from the
+  original bug report and asserts "Square foot gardening" now sorts
+  first.)
 
 ## Not-found instruction
 

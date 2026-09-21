@@ -2216,3 +2216,81 @@ class ResearchEngine:
         while len(self._response_cache) > _RESPONSE_CACHE_MAXSIZE:
             self._response_cache.popitem(last=False)
         return response
+
+    def research_many(
+        self,
+        queries: Sequence[str],
+        *,
+        keywords: list[str] | None = None,
+        budget_tokens: int | None = None,
+        deadline_s: float | None = None,
+        soft_deadline_s: float | None = None,
+        topic_hint: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run several queries against :meth:`research` as one batched
+        request, sharing a single deadline across the whole batch and this
+        engine's own per-archive worker pool / IDF/response caches (both
+        already persistent on ``self``, so concurrent calls reuse the same
+        warm worker processes instead of paying per-call startup cost).
+
+        Each query runs in its own thread: per-query wall time is itself
+        dominated by blocking IPC waits on the out-of-process ZIM worker
+        (``docs/retrieval_baseline.md``'s profiling note), which release the
+        GIL, so N queries against distinct/pooled workers cost close to the
+        slowest single query rather than the sum of all of them -- unlike
+        the previous sequential-call path this replaces.
+
+        Returns a list, same order/length as ``queries``, of
+        ``{"query": str, "status": "ok" | "error", "response":
+        ResearchResponse | None, "error": str | None}`` -- a per-query
+        failure (exception or the shared deadline already elapsed) never
+        raises or drops a slot, so callers can always zip results back
+        against their original queries.
+        """
+        if not queries:
+            return []
+
+        batch_deadline = deadline_s if deadline_s is not None else self._hard_deadline_s
+        batch_started = time.monotonic()
+
+        def _run_one(q: str) -> dict[str, Any]:
+            remaining = batch_deadline - (time.monotonic() - batch_started)
+            if remaining <= 0:
+                return {
+                    "query": q,
+                    "status": "error",
+                    "response": None,
+                    "error": "deadline elapsed",
+                }
+            try:
+                resp = self.research(
+                    q,
+                    keywords=keywords,
+                    budget_tokens=budget_tokens,
+                    deadline_s=remaining,
+                    soft_deadline_s=soft_deadline_s,
+                    topic_hint=topic_hint,
+                )
+                return {"query": q, "status": "ok", "response": resp, "error": None}
+            except Exception as exc:  # pragma: no cover - defensive, per-query isolation
+                return {"query": q, "status": "error", "response": None, "error": str(exc)}
+
+        results: list[dict[str, Any] | None] = [None] * len(queries)
+        threads = []
+        for i, q in enumerate(queries):
+
+            def _target(idx=i, query=q):
+                results[idx] = _run_one(query)
+
+            t = threading.Thread(target=_target, daemon=True)
+            threads.append(t)
+            t.start()
+        for t in threads:
+            t.join(timeout=batch_deadline + _QUEUE_SLACK_S)
+
+        return [
+            r
+            if r is not None
+            else {"query": q, "status": "error", "response": None, "error": "timed out"}
+            for r, q in zip(results, queries, strict=True)
+        ]

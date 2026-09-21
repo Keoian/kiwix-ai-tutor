@@ -86,3 +86,63 @@ def test_to_dict_roundtrip_keys():
     assessment = assess_evidence("how do volcanoes erupt?", result)
     d = assessment.to_dict()
     assert set(d) == {"level", "reasons", "key_terms", "covered_terms", "coverage"}
+
+
+def test_rewritten_queries_terms_replace_fused_original_terms():
+    """The reassessment call after a forced rewrite must judge coverage
+    against the REWRITTEN queries' own terms, not the original fused/
+    misspelt "squarefoot" -- see docs/rewrite_on_weak_evidence.md."""
+    result = _Result(
+        [
+            _passage(
+                "Square foot gardening",
+                "Square foot gardening is a method for planning small vegetable "
+                "gardens using a grid.",
+            )
+        ]
+    )
+    rewritten_queries = [
+        "how to square foot garden the right way",
+        "square foot gardening basics",
+        "square foot gardening guide step by step",
+    ]
+    rewritten = assess_evidence(
+        "how to squarefoot garden the right way?",
+        result,
+        rewritten_queries=rewritten_queries,
+    )
+    # The fused original term pins coverage low or ambiguous; the rewritten
+    # queries' own (correctly spelt) terms should give a clearly strong
+    # verdict on the same evidence.
+    assert rewritten.level == "strong"
+    assert "squarefoot" not in rewritten.key_terms
+
+
+def test_rewritten_queries_with_healthy_original_terms_kept():
+    """A correctly-spelt original-question term with a healthy match is
+    kept alongside the rewritten queries' terms, not dropped."""
+    result = _Result(
+        [
+            _passage(
+                "Square foot gardening",
+                "Square foot gardening basics for a raised bed vegetable garden.",
+            )
+        ]
+    )
+    assessment = assess_evidence(
+        "square foot garden basics",
+        result,
+        rewritten_queries=["square foot gardening basics"],
+        healthy_terms={"garden": True, "basics": True},
+    )
+    assert assessment.level == "strong"
+
+
+def test_no_rewritten_queries_is_backward_compatible():
+    """Omitting the new parameters reproduces the exact old signature's
+    behaviour."""
+    result = _Result([_passage("Volcano", "A volcano is an opening in the crust.")])
+    old = assess_evidence("What is a volcano?", result)
+    new = assess_evidence("What is a volcano?", result, rewritten_queries=None)
+    assert old.level == new.level
+    assert old.key_terms == new.key_terms

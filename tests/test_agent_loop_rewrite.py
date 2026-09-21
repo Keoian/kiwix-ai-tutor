@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from tutor.app.agent_loop import run_turn
+from tutor.app.agent_loop import _MERGE_CAP, _merge_dedupe_passages, run_turn
 from tutor.app.llm_client import StreamEvent
 from tutor.app.prompt import Budget, serialize_messages
 from tutor.app.session import Session
@@ -369,3 +369,79 @@ def test_rewritten_evidence_is_evictable_and_prefix_stable():
     turn2_first_prompt = serialize_messages(llm.calls[-1])
 
     assert turn2_first_prompt.startswith(turn1_final_prompt)
+
+
+# ---------------------------------------------------------------------------
+# RRF merge (Merge / re-assess rule fix) -- shape reproduces the live smoke
+# bug: three rewritten queries each rank the target article, but never
+# first, alongside disambiguation/generic-title noise.
+# ---------------------------------------------------------------------------
+
+def _p(pid, title, rank_tag):
+    return {
+        "id": pid,
+        "label": pid,
+        "title": title,
+        "path": title,
+        "text": f"Evidence about {title} ({rank_tag}). " * 5,
+        "kind": "article",
+    }
+
+
+def test_rrf_merge_puts_multi_query_target_article_first():
+    rewritten_queries = [
+        "how to square foot garden the right way",
+        "square foot gardening basics",
+        "square foot gardening guide step by step",
+    ]
+    # Reproduces the smoke bug's shape: target last in every list.
+    list1 = [
+        _p("sixfoot-1", "6 Foot 7 Foot", "q1"),
+        _p("garden-1", "Garden", "q1"),
+        _p("sfg-1", "Square foot gardening", "q1"),
+    ]
+    list2 = [
+        _p("square-2", "Square (disambiguation)", "q2"),
+        _p("garden-2", "Garden", "q2"),
+        _p("sfg-2", "Square foot gardening", "q2"),
+    ]
+    list3 = [
+        _p("sixfoot-3", "6 Foot 7 Foot", "q3"),
+        _p("square-3", "Square (disambiguation)", "q3"),
+        _p("sfg-3", "Square foot gardening", "q3"),
+    ]
+
+    merged = _merge_dedupe_passages(
+        [list1, list2, list3], _MERGE_CAP, rewritten_queries=rewritten_queries
+    )
+
+    assert merged[0]["title"] == "Square foot gardening"
+
+
+def test_rrf_merge_multi_query_hit_outranks_single_query_hit():
+    list1 = [_p("a1", "Some Other Article", "q1")]  # rank 0 in one query only
+    list2 = [
+        _p("b1", "Random Noise Article", "q2"),
+        _p("sfg", "Square foot gardening", "q2"),
+    ]
+    list3 = [
+        _p("c1", "Another Article", "q3"),
+        _p("sfg", "Square foot gardening", "q3"),
+    ]
+    merged = _merge_dedupe_passages([list1, list2, list3], _MERGE_CAP)
+    titles = [p["title"] for p in merged]
+    assert titles.index("Square foot gardening") < titles.index("Some Other Article")
+
+
+def test_rrf_merge_cap_unchanged():
+    lists = [[_p(f"id{i}", f"Title {i}", "q") for i in range(12)]]
+    merged = _merge_dedupe_passages(lists, _MERGE_CAP)
+    assert len(merged) == _MERGE_CAP
+
+
+def test_rrf_merge_deterministic_tie_break():
+    list1 = [_p("z1", "Zebra", "q"), _p("a1", "Aardvark", "q")]
+    list2 = [_p("z1", "Zebra", "q"), _p("a1", "Aardvark", "q")]
+    merged1 = _merge_dedupe_passages([list1, list2], _MERGE_CAP)
+    merged2 = _merge_dedupe_passages([list2, list1], _MERGE_CAP)
+    assert [p["id"] for p in merged1] == [p["id"] for p in merged2]

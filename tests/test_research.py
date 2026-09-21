@@ -1027,3 +1027,56 @@ def test_no_correction_when_no_close_candidate_has_real_matches(
         corrected_terms_out=corrected_terms_out,
     )
     assert corrected_terms_out == {}
+
+
+# ---------------------------------------------------------------------------
+# research_many (batched, shared-deadline forced-rewrite path)
+# ---------------------------------------------------------------------------
+
+
+def test_research_many_returns_one_result_per_query_same_order(
+    registry_toml, snapshot_store, tmp_path
+):
+    engine = _engine(registry_toml, snapshot_store, tmp_path)
+    queries = ["Pythagorean theorem", "What is the Pythagorean theorem?", "triangle sides"]
+    results = engine.research_many(queries)
+    assert [r["query"] for r in results] == queries
+    assert all(r["status"] == "ok" for r in results)
+    assert all(r["response"] is not None for r in results)
+
+
+def test_research_many_empty_list_returns_empty_list(registry_toml, snapshot_store, tmp_path):
+    engine = _engine(registry_toml, snapshot_store, tmp_path)
+    assert engine.research_many([]) == []
+
+
+def test_research_many_matches_sequential_single_query_results(
+    registry_toml, snapshot_store, tmp_path
+):
+    engine = _engine(registry_toml, snapshot_store, tmp_path)
+    many = engine.research_many(["Pythagorean theorem"])
+    single = engine.research("Pythagorean theorem")
+    assert many[0]["response"].passages[0].path == single.passages[0].path
+
+
+def test_research_many_costs_far_less_than_sum_of_sequential_calls(
+    registry_toml, snapshot_store, tmp_path
+):
+    """Three queries batched together should cost roughly <= ~2x a single
+    query's own latency, not ~3x (the old sequential-call cost) -- see
+    docs/rewrite_on_weak_evidence.md's latency-fix note."""
+    engine = _engine(registry_toml, snapshot_store, tmp_path)
+    queries = ["Pythagorean theorem", "triangle sides", "right angle geometry"]
+
+    start = time.monotonic()
+    engine.research(queries[0])
+    single_elapsed = time.monotonic() - start
+
+    engine2 = _engine(registry_toml, snapshot_store, tmp_path, cache_dir=tmp_path / "cache2")
+    start = time.monotonic()
+    engine2.research_many(queries)
+    many_elapsed = time.monotonic() - start
+
+    # Generous bound (2.5x, not 2x) to keep this robust on a loaded CI box;
+    # the old sequential path would be close to 3x.
+    assert many_elapsed <= max(single_elapsed * 2.5, single_elapsed + 1.0)

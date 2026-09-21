@@ -38,6 +38,7 @@ from tutor.app.citations import extract_labels, render_evidence
 from tutor.app.prompt import PromptOverflow
 from tutor.app.repetition_guard import find_repetition_loop
 from tutor.retrieval.assessment import assess_evidence
+from tutor.retrieval.hybrid.lexical import singularize, tokenize
 from tutor.tools.schemas import TOOLS, validate_tool_call
 
 RESEARCH_CAP = 2
@@ -198,22 +199,109 @@ _FORCED_REWRITE_MAX_TOKENS = 96
 _MERGE_CAP = 8
 
 
-def _merge_dedupe_passages(passage_lists: list[list[dict]], cap: int) -> list[dict]:
-    """Merge several passage lists (one per rewritten query), keeping the
-    best (lowest) rank seen for each passage id across all lists, then
-    returning them best-rank-first, capped to ``cap``."""
-    best_rank: dict[str, int] = {}
+# Reciprocal-rank-fusion constant, matching the standard/existing RRF used
+# elsewhere in retrieval (tutor/retrieval/hybrid/rrf.py, RRF k=60).
+_RRF_K = 60
+
+_TITLE_BOOST = 0.5
+_GENERIC_TITLE_PENALTY = 0.5
+
+
+def _title_terms(title: str) -> frozenset[str]:
+    return frozenset(singularize(t) for t in tokenize(title or ""))
+
+
+def _is_generic_or_disambiguation(title: str, title_terms: frozenset[str]) -> bool:
+    """A title that is a disambiguation page, or shares only a single
+    generic content term with the query (e.g. "Garden", "Square"), is a
+    weak, non-specific hit that should never outrank a multi-term article
+    match on the actual topic."""
+    if "disambiguation" in (title or "").lower():
+        return True
+    return len(title_terms) <= 1
+
+
+def _merge_dedupe_passages(
+    passage_lists: list[list[dict]],
+    cap: int,
+    *,
+    rewritten_queries: list[str] | None = None,
+) -> list[dict]:
+    """Merge several passage lists (one per rewritten query) via
+    reciprocal-rank fusion (RRF, k=60) computed at ARTICLE level (so an
+    article found -- at any rank -- by more than one rewritten query
+    reliably outranks an article only one query happened to find), then
+    ordered passage-level within each article by the same fusion applied
+    to passages. A title-match boost is applied when an article's own
+    title terms are fully contained in one of the rewritten queries (e.g.
+    "Square foot gardening" is a substring-of-terms match for "square foot
+    gardening basics"); a penalty is applied to disambiguation pages and
+    titles that carry only a single, generic content term (e.g. "Garden",
+    "Square"), so a specific multi-query hit always beats a generic
+    single-term title. Capped to ``cap`` passages; ties are broken
+    deterministically by (best original rank, title, passage id)."""
+    query_term_sets = [
+        frozenset(singularize(t) for t in tokenize(q)) for q in (rewritten_queries or [])
+    ]
+
+    article_rrf: dict[str, float] = {}
+    article_hits: dict[str, int] = {}
+    article_best_rank: dict[str, int] = {}
+    article_title: dict[str, str] = {}
+    passage_rrf: dict[str, float] = {}
+    passage_best_rank: dict[str, int] = {}
     by_id: dict[str, dict] = {}
+
     for passages in passage_lists:
+        seen_articles_this_list: set[str] = set()
         for rank, passage in enumerate(passages):
             pid = passage.get("id")
             if pid is None:
                 continue
-            if pid not in best_rank or rank < best_rank[pid]:
-                best_rank[pid] = rank
-                by_id[pid] = passage
-    ordered = sorted(by_id.values(), key=lambda p: best_rank[p["id"]])
-    return ordered[:cap]
+            title = passage.get("title") or ""
+            by_id.setdefault(pid, passage)
+            passage_rrf[pid] = passage_rrf.get(pid, 0.0) + 1.0 / (_RRF_K + rank + 1)
+            if pid not in passage_best_rank or rank < passage_best_rank[pid]:
+                passage_best_rank[pid] = rank
+
+            if title not in seen_articles_this_list:
+                seen_articles_this_list.add(title)
+                article_hits[title] = article_hits.get(title, 0) + 1
+                article_rrf[title] = article_rrf.get(title, 0.0) + 1.0 / (_RRF_K + rank + 1)
+                article_title[title] = title
+                if title not in article_best_rank or rank < article_best_rank[title]:
+                    article_best_rank[title] = rank
+
+    def _article_score(title: str) -> float:
+        terms = _title_terms(title)
+        score = article_rrf.get(title, 0.0)
+        if query_term_sets and terms and any(terms <= qts for qts in query_term_sets):
+            score += _TITLE_BOOST
+        if _is_generic_or_disambiguation(title, terms):
+            score -= _GENERIC_TITLE_PENALTY
+        return score
+
+    article_order = sorted(
+        article_hits.keys(),
+        key=lambda t: (
+            -article_hits[t],
+            -_article_score(t),
+            article_best_rank[t],
+            t,
+        ),
+    )
+    article_rank = {t: i for i, t in enumerate(article_order)}
+
+    ordered_ids = sorted(
+        by_id.keys(),
+        key=lambda pid: (
+            article_rank.get(by_id[pid].get("title") or "", len(article_order)),
+            -passage_rrf.get(pid, 0.0),
+            passage_best_rank.get(pid, 0),
+            str(pid),
+        ),
+    )
+    return [by_id[pid] for pid in ordered_ids[:cap]]
 
 
 @dataclass
@@ -523,21 +611,50 @@ def run_turn(
                         }
                     )
 
-                passage_lists = []
-                for query in rewritten_queries:
-                    sub_response = research_engine.research(
-                        query, topic_hint=getattr(session, "subject_hint", None)
+                many_fn = getattr(research_engine, "research_many", None)
+                if many_fn is not None:
+                    batch_results = many_fn(
+                        rewritten_queries, topic_hint=getattr(session, "subject_hint", None)
                     )
+                else:
+                    # Fallback for a research engine fake without
+                    # research_many: sequential single-query calls, same
+                    # shape as the batched path below.
+                    batch_results = [
+                        {
+                            "query": q,
+                            "status": "ok",
+                            "response": research_engine.research(
+                                q, topic_hint=getattr(session, "subject_hint", None)
+                            ),
+                            "error": None,
+                        }
+                        for q in rewritten_queries
+                    ]
+
+                passage_lists = []
+                for item in batch_results:
+                    sub_response = item.get("response")
+                    if item.get("status") != "ok" or sub_response is None:
+                        continue
                     research_calls += 1
                     sub_packet = _packet_from_response(sub_response)
                     passage_lists.append(sub_packet["passages"])
                     sub_corrected = getattr(sub_response, "corrected_terms", None) or {}
                     corrected_terms.update(dict(sub_corrected))
 
-                merged_passages = _merge_dedupe_passages(passage_lists, _MERGE_CAP)
+                merged_passages = _merge_dedupe_passages(
+                    passage_lists, _MERGE_CAP, rewritten_queries=rewritten_queries
+                )
                 merged_response = _MergedResult(merged_passages)
+                healthy_terms = {
+                    t: True for t in getattr(assessment, "covered_terms", frozenset()) or []
+                }
                 new_assessment = assess_evidence(
-                    f"{user_input.text} {' '.join(rewritten_queries)}", merged_response
+                    user_input.text,
+                    merged_response,
+                    rewritten_queries=rewritten_queries,
+                    healthy_terms=healthy_terms,
                 )
                 level_after = new_assessment.level
 

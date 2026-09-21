@@ -18,6 +18,7 @@ counts this was chosen from.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -102,7 +103,13 @@ class EvidenceAssessment:
         }
 
 
-def assess_evidence(question: str, result: Any) -> EvidenceAssessment:
+def assess_evidence(
+    question: str,
+    result: Any,
+    *,
+    rewritten_queries: list[str] | None = None,
+    healthy_terms: Any = None,
+) -> EvidenceAssessment:
     """Assess how well ``result`` (anything with a ``.passages`` sequence
     of objects/dicts exposing ``title``/``text``) answers ``question``.
 
@@ -113,13 +120,40 @@ def assess_evidence(question: str, result: Any) -> EvidenceAssessment:
         poorly covered by the top ``_TOP_PASSAGES_CHECKED`` passages'
         title+text -- coverage below ``_COVERAGE_STRONG_THRESHOLD``.
     ``strong``: otherwise.
+
+    ``rewritten_queries`` (optional, additive): when given (e.g. by the
+    forced-rewrite re-assessment round in ``tutor/app/agent_loop.py``), the
+    terms checked for coverage are the union of each rewritten query's own
+    key content terms (a misspelt/fused original term like "squarefoot"
+    can never be covered by good passages once the model has already
+    corrected it to "square foot", so re-checking the ORIGINAL question's
+    terms would permanently pin coverage low) plus, from ``healthy_terms``
+    if given, any of the original question's own key terms that already
+    had a healthy match count there (kept so a correctly-spelt original
+    term is not silently dropped just because a rewrite happened).
+    ``healthy_terms`` may be any iterable of term strings, or a mapping of
+    term -> truthy "healthy" flag / estimated-match count (only truthy
+    entries are kept); anything falsy for a term drops it. With no
+    ``rewritten_queries``, behaviour is unchanged (original question terms
+    only) -- fully backward compatible.
     """
     passages = getattr(result, "passages", None)
     if passages is None and isinstance(result, dict):
         passages = result.get("passages")
     passages = passages or []
 
-    key_terms = _key_terms(question)
+    if rewritten_queries:
+        key_terms: frozenset[str] = frozenset()
+        for rq in rewritten_queries:
+            key_terms |= _key_terms(rq)
+        if healthy_terms is not None:
+            if isinstance(healthy_terms, Mapping):
+                healthy = frozenset(t for t, v in healthy_terms.items() if v)
+            else:
+                healthy = frozenset(healthy_terms)
+            key_terms |= _key_terms(question) & healthy
+    else:
+        key_terms = _key_terms(question)
 
     if not passages:
         return EvidenceAssessment(
