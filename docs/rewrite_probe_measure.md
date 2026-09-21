@@ -162,3 +162,39 @@ Measured by the orchestrator with `data/probe_rewrite_ab.py --out data/probe_rew
 - Still open: 8 turns per arm are rated strong while the gold article is absent (assessor false-strong), so no rewrite fires there;
   0 "couldn't find it" answers in this set (expected: these topics exist in the library). Out-of-library compliance is not measured yet.
 - Cost: mean wall +1.2 s across all turns (rewritten turns pay ~5 s each).
+
+## Assessor v3 -- labelled set (84 cached questions)
+
+`assessor_labelled.py --score` on 84 cached Qs; set is small, thresholds
+provisional. Confusion (should-strong/should-weak, s/w/e): tuning
+31/0/1,7/1/2->30/1/1,6/2/2 (fs 7->6); kid_phrasing 4/0/0,9/1/4->4/0/0,8/2/4
+(fs 9->8); misspelling unchanged; out_of_library 0/0/0,4/0/9->0/0/0,2/2/9 (fs
+4->2). **Total false-strong 20->16.** False-weak (excl. sw46, artifact):
+tuning 0->1 (sw42), probe 1->1 (msp03, pre-existing) -- within budget (<=2
+tuning, <=1 probe).
+
+Adopted: (c) stop-name filler -- `guy`/`guys`/`name`/`names` added to shared
+`QUESTION_SHAPE_FILLERS` (fixes ool09). (a)+(b) multi-word topic integrity +
+constraint terms -- `_multiword_phrase_candidates` finds runs of literally-
+adjacent content words (structural verbs excluded); `_multiword_phrase_in_
+passage` needs title >=2 words (number/roman equivalence aware, every number
+word satisfied in the title) OR exact adjacent phrase in text (skipped when
+both halves are curated generic). An all-generic near-miss carve-out forces
+weak when no candidate matches and the best phrase's words are all generic
+with >=1 already in a title; else falls back to the old single-word logic.
+Fixes sw21 (World War I != Two), kid04 (Rain/Forest != rain forest), ool12
+(Whale mentions "blue whale" in passing, not about a flipper). Extended
+`_GENERIC_SINGLE_WORDS` with war/world, rain/forest, planet(s)/solar/system,
+blue/whale.
+Rejected: (d) co-occurrence (rarest two terms by length must co-occur in one
+passage) -- fixed ool09/ool12 but cost ~14 new false-weak on should-strong
+rows ("boiling"+"farenheit" not co-occurring in legit Helium infoboxes;
+"difference"+"between" beating real nouns as "rarest"). Net negative, not
+adopted. Signature unchanged; assessment stays additive.
+Remaining false-strong (residual): sw22 (Revolution article literally spells
+"the French Revolution (1789)"), sw65 ("Planet" mentions "Solar System" in
+passing); sw47, sw64, sw70, sw71, kid03, kid05, kid08, kid10, kid12, kid15,
+kid16, kid18, ool07, ool10 -- pre-existing, not targeted this round.
+New false-weak: sw42 ("two" excluded as a fallback candidate to keep sw21
+fixed; no other candidate matches). For tuning misses like sw21/sw22 a weak
+verdict is DESIRED: it triggers the model-forced rewrite, not a failure.

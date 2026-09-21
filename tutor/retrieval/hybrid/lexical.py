@@ -65,6 +65,14 @@ QUESTION_SHAPE_FILLERS = frozenset(
         "proper",
         "properly",
         "correctly",
+        # Assessor v3 (docs/rewrite_probe_measure.md "Assessor v3"): stop-
+        # name noise -- common words that happen to be titles in the
+        # archive ("Guy Fieri") but never carry topic content of their
+        # own in a question like "what's the name of the guy who...".
+        "guy",
+        "guys",
+        "name",
+        "names",
     }
 )
 
