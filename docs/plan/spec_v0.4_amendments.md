@@ -220,3 +220,23 @@ The same day, paired in-lesson soaks (same script, current vs seed) showed the s
 lengthens answers and does not make lesson citation placement reliable, so the default
 was reverted to `current`; see docs/citation_experiment.md, "Seed exchange A/B" and
 "In-lesson check and reversal", for the full numbers.
+
+## 8. System prompt budget 800 -> 2000 tokens
+
+**Owner decision, 2026-09-21:** raise the system-prompt slot in `Budget` (`tutor/app/
+prompt.py`) from 800 to 2000 tokens, so the assembled system prompt can carry its
+worked examples for the search-writing ("How to call research"), no-specifics-without-
+source, and child-safe body-topics rules in full, without trimming them to fit an
+800-token slot. These sections are read once per lesson (the system message is
+appended once and never re-sent byte-for-byte thereafter within a lesson; the KV cache
+for it is reused), so the fixed cost is paid once, not per turn.
+
+**Implementation:** `Budget.system` default raised 800 -> 2000; `history`/`margin`
+defaults rescaled (21038 / 5230, from 22000 / 5468) to keep the same ~80/20 split of
+what remains after the fixed `system`/`newest`/`generation` overheads, matching the
+same computation `Budget.scaled` performs, so the 32K profile still sums to `ceiling`
+exactly. `tests/test_citations.py` and
+`tests/test_seed_exchange.py` now measure the fully assembled system prompt (base
+`system_prompt.txt` plus the default-on `no_specifics_without_source` and
+`child_safe_body_topics` sections, via `tutor.app.agent_loop.build_system_text`)
+against a 2000-token budget, not just the base file against 800.

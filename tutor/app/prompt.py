@@ -2,9 +2,20 @@
 
 Layout and eviction follow docs/plan/offline_tutor_spec_v0.3.md §8, but the
 concrete token table is the 32K profile from
-docs/plan/offline_tutor_implementation_plan.md §0.2 (system 800 / history
-22000 / newest 2500 / generation 2000 / margin 5468), which supersedes the
-older 8K/16K tables in spec §8.2 per that plan's Deltas section.
+docs/plan/offline_tutor_implementation_plan.md §0.2, originally system 800
+/ history 22000 / newest 2500 / generation 2000 / margin 5468, which
+supersedes the older 8K/16K tables in spec §8.2 per that plan's Deltas
+section.
+
+Owner-approved 2026-09-21 (see docs/plan/spec_v0.4_amendments.md item 8):
+the ``system`` slot is raised from 800 to 2000 tokens to fit the
+assembled system prompt's worked examples (search-writing, no-specifics,
+and body-topics rules, read once per lesson and cached). ``history`` and
+``margin`` are rescaled to keep the same ~80/20 split of what remains
+after the fixed ``system``/``newest``/``generation`` overheads (the same
+computation ``Budget.scaled`` performs), so the 32K profile still sums to
+``ceiling`` exactly: system 2000 / history 21038 / newest 2500 /
+generation 2000 / margin 5230.
 
 Design notes
 ------------
@@ -143,11 +154,11 @@ class Budget:
     """Token budget for one request, matching the 32K profile by default."""
 
     ceiling: int = 32768
-    system: int = 800
-    history: int = 22000
+    system: int = 2000
+    history: int = 21038
     newest: int = 2500
     generation: int = 2000
-    margin: int = 5468
+    margin: int = 5230
 
     @classmethod
     def scaled(cls, ceiling: int) -> Budget:

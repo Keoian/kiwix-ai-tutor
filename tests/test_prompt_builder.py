@@ -31,13 +31,16 @@ def _count_tokens(text: str) -> int:
 
 
 def test_default_budget_matches_32k_table():
+    """Owner-approved 2026-09-21 (docs/plan/spec_v0.4_amendments.md item
+    8): system raised 800 -> 2000 to fit the assembled system prompt;
+    history/margin rescaled to keep the ~80/20 split of what remains."""
     budget = Budget()
     assert budget.ceiling == 32768
-    assert budget.system == 800
-    assert budget.history == 22000
+    assert budget.system == 2000
+    assert budget.history == 21038
     assert budget.newest == 2500
     assert budget.generation == 2000
-    assert budget.margin == 5468
+    assert budget.margin == 5230
 
 
 def test_default_budget_sums_to_ceiling():
@@ -47,10 +50,15 @@ def test_default_budget_sums_to_ceiling():
 
 
 def test_budget_scaled_small_ceiling_for_eviction_tests():
-    budget = Budget.scaled(6000)
-    assert budget.ceiling == 6000
+    """Fixed overheads alone (system 2000 + newest 2500 + generation
+    2000 = 6500) now exceed the old 6000-token fixture ceiling, so this
+    check uses 8000 -- still small enough to force eviction quickly in
+    the other tests below, which only rely on qualitative eviction
+    behaviour, not this exact ceiling."""
+    budget = Budget.scaled(8000)
+    assert budget.ceiling == 8000
     total = budget.system + budget.history + budget.newest + budget.generation + budget.margin
-    assert total == 6000
+    assert total == 8000
 
 
 # ---------------------------------------------------------------------------

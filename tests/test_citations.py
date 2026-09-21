@@ -367,19 +367,28 @@ def test_detect_evidence_dump_false_for_a_normal_short_cited_answer():
     assert detect_evidence_dump(text, citations, passages) is False
 
 
-def test_system_prompt_stays_within_approx_800_token_budget():
-    """The system prompt occupies a fixed ~800-token slot of the turn
-    budget (docs/plan/offline_tutor_spec_v0.3.md). Uses the same
-    length/3.5 approximation ``tutor.app.compose._make_count_tokens`` falls
-    back to when the real tokenizer is unreachable -- good enough for a
-    build-time regression guard, not meant to be exact."""
+def test_system_prompt_stays_within_approx_2000_token_budget():
+    """The fully assembled system prompt -- base ``system_prompt.txt``
+    plus every default-on section (``no_specifics_without_source``,
+    ``child_safe_body_topics``), exactly how ``run_turn`` builds it for a
+    new lesson via ``tutor.app.agent_loop.build_system_text`` -- occupies
+    a fixed ~2000-token slot of the turn budget (owner-approved
+    2026-09-21, docs/plan/spec_v0.4_amendments.md item 8; raised from 800
+    to fit the worked examples for search-writing, no-specifics, and
+    body-topics rules, read once per lesson and cached). Uses the same
+    length/3.5 approximation ``tutor.app.compose._make_count_tokens``
+    falls back to when the real tokenizer is unreachable -- good enough
+    for a build-time regression guard, not meant to be exact."""
     import math
-    from pathlib import Path
 
-    path = Path(__file__).resolve().parents[1] / "tutor" / "app" / "system_prompt.txt"
-    text = path.read_text(encoding="utf-8")
+    from tutor.app.agent_loop import build_system_text
+
+    text = build_system_text()
     approx_tokens = math.ceil(len(text) / 3.5)
-    assert approx_tokens <= 800, f"system_prompt.txt is ~{approx_tokens} tokens, over budget"
+    print(f"assembled system prompt: ~{approx_tokens} tokens")
+    assert approx_tokens <= 2000, (
+        f"assembled system prompt is ~{approx_tokens} tokens, over budget"
+    )
 
 
 def test_detect_evidence_dump_true_for_label_stacking_on_one_sentence():

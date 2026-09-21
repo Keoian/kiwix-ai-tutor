@@ -7,7 +7,7 @@ hypothesis).
 
 Design constraints (each covered by a test in ``tests/test_seed_exchange.py``):
 
-1. Fits the 800-token system budget together with the rest of the seed
+1. Fits the 2000-token system budget together with the rest of the seed
    cost being accounted for in the overall context budget -- the seed is
    NOT part of the system message; it is its own fixed run of messages
    appended via ``PromptLog.append_seed``, so its tokens are counted by

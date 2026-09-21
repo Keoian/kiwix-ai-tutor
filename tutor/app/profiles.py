@@ -39,7 +39,7 @@ class Profile:
 
     def prompt_summary(self) -> str:
         """A short, bounded natural-language summary for the system
-        prompt's profile slot (well under the 800-token system/tools/
+        prompt's profile slot (well under the 2000-token system/tools/
         profile budget slot -- see plan §0.2)."""
         subjects = ", ".join(self.subjects)
         parts = [

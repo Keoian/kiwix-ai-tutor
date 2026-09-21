@@ -74,15 +74,18 @@ def test_seed_entries_are_a_student_question_evidence_calc_and_two_sentence_answ
 # ---------------------------------------------------------------------------
 
 
-def test_system_prompt_800_budget_test_still_passes_independent_of_seed():
+def test_system_prompt_2000_budget_test_still_passes_independent_of_seed():
     """The seed lives outside the system message entirely -- confirm the
-    system text used in production is still within its own budget on its
-    own (regression guard for this change, mirrors
-    tests/test_citations.py::test_system_prompt_stays_within_approx_800_token_budget)."""
+    fully assembled system text used in production (base
+    ``system_prompt.txt`` plus every default-on section, per
+    ``build_system_text``) is still within its own 2000-token budget on
+    its own (regression guard for this change, mirrors
+    tests/test_citations.py::test_system_prompt_stays_within_approx_2000_token_budget)."""
     import tutor.app.agent_loop as agent_loop
 
-    system_text = agent_loop._load_default_system_text()
-    assert _count_tokens(system_text) <= 800
+    system_text = agent_loop.build_system_text()
+    print(f"assembled system prompt: ~{_count_tokens(system_text)} tokens")
+    assert _count_tokens(system_text) <= 2000
 
 
 def test_seed_token_cost_is_counted_in_prompt_log_tokens_used():
