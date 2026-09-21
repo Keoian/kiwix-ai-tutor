@@ -73,9 +73,11 @@ class FakeLlmClient:
     def __init__(self, scripts: list[list[StreamEvent]]):
         self._scripts = list(scripts)
         self.calls: list[list[dict]] = []
+        self.max_tokens_calls: list[int | None] = []
 
     def stream_chat(self, messages, *, max_tokens=None, tools=None, cancel=None, temperature=None):
         self.calls.append(list(messages))
+        self.max_tokens_calls.append(max_tokens)
         if not self._scripts:
             raise AssertionError("FakeLlmClient: no more scripted responses")
         script = self._scripts.pop(0)
@@ -766,3 +768,157 @@ def test_researched_passages_are_retained_on_the_session_for_citation_resolution
 
     assert session.retained, "expected the pre-retrieved passages to be retained"
     assert any(p.get("label") == "S1" for p in session.retained)
+
+
+# ---------------------------------------------------------------------------
+# Bounded generation: max_tokens on every stream_chat call, and the
+# repetition-loop guard (docs/citation_experiment.md, "Seed exchange A/B
+# (2026-09-20)" -- unbounded generation produced 110K-145K-character
+# repetition loops).
+# ---------------------------------------------------------------------------
+
+
+def test_every_stream_chat_call_passes_budget_generation_as_max_tokens():
+    """Every generation call in the turn -- including a tool-call round --
+    must pass max_tokens, and it must be the same number the context
+    budget already reserves for the answer (Budget.generation), not a
+    second invented figure."""
+    llm = FakeLlmClient(
+        [
+            _tool_call_script("calc", {"expression": "2+2"}),
+            _final_answer_script("The answer is 4 [S1]."),
+        ]
+    )
+    research = FakeResearchEngine()
+    calc = FakeCalc()
+    budget = _budget()
+
+    run_turn(
+        _mk_session(),
+        _UserInput(kind="text", text="What is 2+2?"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+    )
+
+    assert len(llm.max_tokens_calls) == 2
+    assert all(mt == budget.generation for mt in llm.max_tokens_calls)
+
+
+def test_finish_reason_length_is_reported_as_max_tokens_truncation():
+    llm = FakeLlmClient(
+        [_final_answer_script("An answer that got cut off", finish_reason="length")]
+    )
+    research = FakeResearchEngine()
+    calc = FakeCalc()
+
+    result = run_turn(
+        _mk_session(),
+        _UserInput(kind="text", text="Tell me about frogs."),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=_budget(),
+        emit=lambda e: None,
+    )
+
+    assert result.status == "ok"
+    assert result.truncated == "max_tokens"
+
+
+def test_repetition_loop_stops_generation_and_trims_to_first_occurrence():
+    sentence = "Helium is the second lightest element in the periodic table."
+    looping_text = " ".join([sentence] * 6)
+    # A single scripted response with the loop already in it: the guard
+    # inspects the accumulated text after each token, so one big token is
+    # enough to exercise detection + trimming end to end.
+    llm = FakeLlmClient([[_token(looping_text), _done()]])
+    research = FakeResearchEngine()
+    calc = FakeCalc()
+
+    result = run_turn(
+        _mk_session(),
+        _UserInput(kind="text", text="Tell me about helium."),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=_budget(),
+        emit=lambda e: None,
+    )
+
+    assert result.status == "ok"
+    assert result.truncated == "repetition"
+    assert result.answer_text.strip() == sentence
+    assert result.answer_text.count(sentence) == 1
+
+
+def test_repetition_guard_sets_a_cancel_event_the_fake_llm_can_observe():
+    """The guard must stop generation via the SAME cancel mechanism a real
+    user stop uses (closing the stream cleanly), not by discarding
+    already-yielded events after the fact. This is exercised by having the
+    fake client itself check `cancel.is_set()` between events, matching
+    real LlamaClient.stream_chat's polling loop."""
+    sentence = "Photosynthesis converts light energy into chemical energy. "
+    repeated = [_token(sentence) for _ in range(5)]
+
+    class _ObservingFakeLlm:
+        def __init__(self):
+            self.stopped_early = False
+
+        def stream_chat(
+            self, messages, *, max_tokens=None, tools=None, cancel=None, temperature=None
+        ):
+            for evt in repeated:
+                if cancel is not None and cancel.is_set():
+                    self.stopped_early = True
+                    yield StreamEvent(kind="done", finish_reason="cancelled")
+                    return
+                yield evt
+            yield StreamEvent(kind="done", finish_reason="stop")
+
+    llm = _ObservingFakeLlm()
+    research = FakeResearchEngine()
+    calc = FakeCalc()
+
+    result = run_turn(
+        _mk_session(),
+        _UserInput(kind="text", text="Tell me about photosynthesis."),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=_budget(),
+        emit=lambda e: None,
+    )
+
+    assert llm.stopped_early
+    assert result.status == "ok"
+    assert result.truncated == "repetition"
+
+
+def test_a_real_user_cancel_mid_repetition_is_still_reported_as_cancelled():
+    """A genuine user Stop press must still win: if the caller's own
+    cancel event is set, the turn is "cancelled", not silently reported as
+    a repetition truncation, even if the text also happens to be
+    looping."""
+    sentence = "This sentence repeats because the model is looping badly."
+    cancel = threading.Event()
+    cancel.set()  # already cancelled before the turn even starts streaming
+
+    llm = FakeLlmClient([[_token(sentence), _token(sentence), _token(sentence), _token(sentence)]])
+    research = FakeResearchEngine()
+    calc = FakeCalc()
+
+    result = run_turn(
+        _mk_session(),
+        _UserInput(kind="text", text="Tell me about entropy."),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=_budget(),
+        emit=lambda e: None,
+        cancel=cancel,
+    )
+
+    assert result.status == "cancelled"

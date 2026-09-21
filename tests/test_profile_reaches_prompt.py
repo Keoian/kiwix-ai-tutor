@@ -82,7 +82,7 @@ class _RecordingFakeLlm:
     def health(self) -> bool:
         return True
 
-    def stream_chat(self, messages, *, tools=None, cancel=None, temperature=None):
+    def stream_chat(self, messages, *, max_tokens=None, tools=None, cancel=None, temperature=None):
         self.calls.append(list(messages))
         yield from self._events
 

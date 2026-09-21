@@ -87,6 +87,17 @@ class AppConfig:
     ``eval.system_prompt_variants.VARIANTS`` and
     ``tutor.app.seed_exchange.SEED_EXCHANGE_VARIANT`` for the only other
     registered value so far."""
+    answer_max_tokens: int = 2000
+    """Output token cap passed as ``max_tokens`` on every generation call
+    (app agent loop and eval harnesses), including tool-call rounds.
+    Default 2000 matches ``tutor.app.prompt.Budget.generation`` -- the
+    reserved-generation-tokens figure already used in the
+    ``rendered_prompt_tokens + reserved_generation_tokens + safety_margin
+    <= configured_context`` accounting (docs/plan/offline_tutor_spec_v0.3.md
+    §8, line ~239). The spec does not separately name an answer/output
+    token budget; reusing this number avoids inventing a second one. See
+    docs/citation_experiment.md, "Seed exchange A/B (2026-09-20)", for the
+    unbounded-generation defect this closes."""
 
 
 @dataclass(frozen=True)
@@ -278,6 +289,7 @@ def load_config(path: Path) -> Config:
         data_dir=_app_path("data_dir", "data"),
         registry_path=_app_path("registry_path", "config/archives.dev.toml"),
         prompt_variant=_app_str("prompt_variant", "current"),
+        answer_max_tokens=_app_int("answer_max_tokens", 2000),
     )
 
     # [embedding] is optional, like [app]; when present every key is

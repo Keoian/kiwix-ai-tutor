@@ -406,6 +406,7 @@ def _make_turn_runner(
                     "uncited": result.uncited,
                     "citation_quality": citation_quality,
                     "evidence_dump": evidence_dump,
+                    "truncated": result.truncated,
                 },
             )
         elif result.status == "cancelled":
@@ -471,6 +472,7 @@ def _persist_turn(
             action=user_input.action if user_input.kind == "action" else None,
             eviction_events=eviction_events,
             attributions=attributions,
+            truncated=result.truncated,
         )
     except ValueError:
         # Subject changed mid-lesson: the existing LessonStore rule is

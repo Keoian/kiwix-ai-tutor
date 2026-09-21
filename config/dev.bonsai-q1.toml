@@ -32,6 +32,7 @@ host = "127.0.0.1"
 port = 8420
 data_dir = "data"
 registry_path = "config/archives.dev.toml"
+answer_max_tokens = 2000
 
 # WP-B7: dense sidecar embedding server. Runs as a SECOND llama-server
 # (scripts/serve_embed.*) on its own port, alongside (not instead of) the

@@ -328,6 +328,23 @@
     chat.scrollTop = chat.scrollHeight;
   }
 
+  // Bounded-generation follow-up (2026-09-20): the host may stop
+  // generation early -- either the output token cap (`max_tokens`) or the
+  // repetition-loop guard (tutor.app.repetition_guard) -- and marks the
+  // turn `truncated` on the done event. The student only sees a short
+  // plain note; the answer text itself is never edited beyond what the
+  // host already trimmed. textContent/DOM nodes only, same as elsewhere.
+  function appendTruncatedNote() {
+    const wrapper = el("div", { className: "msg msg-note" });
+    const note = el("span", {
+      className: "truncated-note",
+      text: "The tutor's answer was cut short.",
+    });
+    wrapper.appendChild(note);
+    chat.appendChild(wrapper);
+    chat.scrollTop = chat.scrollHeight;
+  }
+
   function applyCitationQuality(tutorNode, doneData, citationsEvent) {
     if (doneData && doneData.evidence_dump) {
       collapseEvidenceDump(tutorNode);
@@ -336,6 +353,9 @@
     const unsupportedLabels = (citationsEvent && citationsEvent.unsupported_labels) || [];
     if (citations.length > 0 && unsupportedLabels.length === citations.length) {
       appendUnsupportedSourcesNote();
+    }
+    if (doneData && doneData.truncated) {
+      appendTruncatedNote();
     }
   }
 

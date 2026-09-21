@@ -118,7 +118,7 @@ class _FakeLlm:
     def health(self) -> bool:
         return True
 
-    def stream_chat(self, messages, *, tools=None, cancel=None, temperature=None):
+    def stream_chat(self, messages, *, max_tokens=None, tools=None, cancel=None, temperature=None):
         yield from self._events
 
 
@@ -159,6 +159,32 @@ def test_turn_runner_maps_token_tool_citations_done_events(tmp_path):
     assert done_data["evidence_dump"] is False
     citations_data = dict(frames)["citations"]
     assert citations_data["unsupported_labels"] == []
+    # Bounded-generation follow-up (2026-09-20): a normal, un-truncated
+    # turn reports truncated: None on the done event.
+    assert done_data["truncated"] is None
+
+
+def test_turn_runner_reports_repetition_truncation_on_done_event(tmp_path):
+    cfg = _cfg_with_unreachable_llm_and_missing_archives(tmp_path)
+    sentence = "Water boils at exactly one hundred degrees Celsius. "
+    events = [StreamEvent(kind="token", text=sentence) for _ in range(5)]
+    events.append(StreamEvent(kind="done", finish_reason="stop", usage={}))
+    fake_llm = _FakeLlm(events)
+    deps = build_deps(cfg, llm=fake_llm, research_engine=_FakeResearchEngine())
+
+    session_id = deps.sessions.create()
+    frames = []
+
+    def emit(event_name, data):
+        frames.append((event_name, data))
+
+    cancel = threading.Event()
+    deps.turn_runner(session_id, _Input(kind="text", text="Does water boil?"), emit, cancel)
+
+    done_data = dict(frames)["done"]
+    assert done_data["status"] == "ok"
+    assert done_data["truncated"] == "repetition"
+    assert done_data["answer"].count(sentence.strip()) == 1
 
 
 def test_turn_runner_emits_attributions_event_before_done(tmp_path):

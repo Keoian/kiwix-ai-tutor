@@ -43,6 +43,7 @@ host = "127.0.0.1"
 port = 8420
 data_dir = "data"
 registry_path = "config/archives.dev.toml"
+answer_max_tokens = 2000
 
 # Dense sidecar left disabled for this bake-off: focus is the chat model.
 [embedding]

@@ -66,6 +66,23 @@ def test_app_table_defaults_when_missing(tmp_path):
     # config file's parent's parent.
     assert cfg.app.data_dir == (tmp_path / "data").resolve()
     assert cfg.app.registry_path == (tmp_path / "config" / "archives.dev.toml").resolve()
+    # Answer/output token cap defaults to 2000, matching
+    # tutor.app.prompt.Budget.generation (see settings.py docstring).
+    assert cfg.app.answer_max_tokens == 2000
+
+
+def test_app_table_answer_max_tokens_is_configurable(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    text = _BASE + """
+[app]
+answer_max_tokens = 512
+"""
+    config_path = _write_toml(config_dir / "dev.toml", text)
+
+    cfg = load_config(config_path)
+
+    assert cfg.app.answer_max_tokens == 512
 
 
 def test_app_table_explicit_values_are_honored(tmp_path):

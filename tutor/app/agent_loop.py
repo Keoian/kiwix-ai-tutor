@@ -36,6 +36,7 @@ from pathlib import Path
 
 from tutor.app.citations import extract_labels, render_evidence
 from tutor.app.prompt import PromptOverflow
+from tutor.app.repetition_guard import find_repetition_loop
 from tutor.tools.schemas import TOOLS, validate_tool_call
 
 RESEARCH_CAP = 2
@@ -46,6 +47,22 @@ _STUDENT_SAFE_ERROR = (
 )
 
 _SYSTEM_PROMPT_PATH = Path(__file__).with_name("system_prompt.txt")
+
+
+class _UnionCancel:
+    """Duck-typed ``threading.Event``-alike (only ``is_set()`` is used by
+    ``LlamaClient.stream_chat``) that is set when ANY of the given events
+    is set. Lets the repetition-loop guard (below) trigger the exact same
+    clean-stream-close path as a real user cancel -- closing the HTTP
+    connection to llama-server properly, never killing the server --
+    while still letting ``run_turn`` tell the two apart afterwards by
+    checking the original ``cancel`` event directly."""
+
+    def __init__(self, *events) -> None:
+        self._events = [e for e in events if e is not None]
+
+    def is_set(self) -> bool:
+        return any(e.is_set() for e in self._events)
 
 
 def _load_default_system_text() -> str:
@@ -74,6 +91,14 @@ class TurnResult:
     (§12's chat pane already distinguishes source-backed/computed/own-
     example statement styles, so this is the same kind of provenance
     signal, not a new citation)."""
+    truncated: str | None = None
+    """``None`` (not truncated), ``"repetition"`` (the host-side
+    repetition-loop guard in tutor.app.repetition_guard stopped
+    generation and trimmed the answer), or ``"max_tokens"`` (the server's
+    own ``finish_reason == "length"``, i.e. the ``max_tokens`` cap was
+    hit). Citations and attributions still run on the (possibly trimmed)
+    ``answer_text``; the host never fabricates content to fill in what
+    was cut."""
 
 
 def _passage_to_dict(passage) -> dict:
@@ -236,13 +261,30 @@ def run_turn(
         finish_reason = "stop"
         usage: dict = {}
         errored = False
+        truncated: str | None = None
+        trimmed_answer_text: str | None = None
+        # The guard's own cancel signal, ORed with the caller's `cancel`
+        # (if any) so LlamaClient.stream_chat closes the connection the
+        # same clean way a user-initiated stop does (see _UnionCancel).
+        guard_cancel = threading.Event()
+        stream_cancel = _UnionCancel(cancel, guard_cancel)
 
         for evt in llm.stream_chat(
-            messages, tools=TOOLS, cancel=cancel, temperature=temperature
+            messages,
+            tools=TOOLS,
+            cancel=stream_cancel,
+            temperature=temperature,
+            max_tokens=budget.generation,
         ):
             if evt.kind == "token":
                 answer_text_parts.append(evt.text or "")
                 emit(evt)
+                if truncated is None:
+                    loop = find_repetition_loop("".join(answer_text_parts))
+                    if loop is not None:
+                        truncated = "repetition"
+                        trimmed_answer_text = loop.trimmed_text
+                        guard_cancel.set()
             elif evt.kind == "tool_call":
                 tool_calls.append(evt)
                 emit(evt)
@@ -253,6 +295,8 @@ def run_turn(
             elif evt.kind == "done":
                 finish_reason = evt.finish_reason or "stop"
                 usage = evt.usage or {}
+                if finish_reason == "length" and truncated is None:
+                    truncated = "max_tokens"
 
         if errored:
             return TurnResult(
@@ -263,6 +307,14 @@ def run_turn(
                 calc_calls=calc_calls,
                 events=events,
             )
+
+        # A "cancelled" finish_reason from the guard's own union event
+        # (not the caller's `cancel`) is not a real user cancellation --
+        # it's the repetition guard stopping generation cleanly. Only
+        # treat it as a cancelled turn when the caller actually asked to
+        # cancel.
+        if finish_reason == "cancelled" and (cancel is None or not cancel.is_set()):
+            finish_reason = "stop"
 
         if finish_reason == "cancelled":
             return TurnResult(
@@ -275,7 +327,9 @@ def run_turn(
             )
 
         if not tool_calls:
-            answer_text = "".join(answer_text_parts)
+            answer_text = (
+                trimmed_answer_text if truncated == "repetition" else "".join(answer_text_parts)
+            )
             labels = extract_labels(answer_text)
             if use_log:
                 log.append_assistant(answer_text, cited_labels=labels)
@@ -290,6 +344,7 @@ def run_turn(
                 prompt_tokens=usage.get("prompt_tokens"),
                 events=events,
                 uncited=uncited,
+                truncated=truncated,
             )
 
         # Record the assistant's tool-call turn, then dispatch each call.

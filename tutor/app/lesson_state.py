@@ -50,6 +50,9 @@ class Turn:
     action: str | None = None
     eviction_events: list[dict] | None = None
     attributions: dict | None = None
+    truncated: str | None = None
+    """``None``, ``"repetition"``, or ``"max_tokens"`` -- see
+    ``tutor.app.agent_loop.TurnResult.truncated``."""
 
 
 def _rebuild_prompt_log(count_tokens: Callable[[str], int], entries: list[dict]) -> PromptLog:
@@ -134,6 +137,7 @@ class LessonStore:
                     cached_tokens INTEGER NOT NULL,
                     eviction_events TEXT,
                     attributions_json TEXT,
+                    truncated TEXT,
                     seq INTEGER NOT NULL
                 )
                 """
@@ -147,6 +151,11 @@ class LessonStore:
             }
             if "attributions_json" not in existing_cols:
                 self.connection.execute("ALTER TABLE turns ADD COLUMN attributions_json TEXT")
+            # Older databases created before the generation-bounding /
+            # repetition-guard fix (2026-09-20) lack this column too;
+            # same additive-migration pattern as attributions_json above.
+            if "truncated" not in existing_cols:
+                self.connection.execute("ALTER TABLE turns ADD COLUMN truncated TEXT")
             self.connection.commit()
 
     # -- lifecycle -------------------------------------------------------
@@ -211,6 +220,7 @@ class LessonStore:
         action: str | None = None,
         eviction_events: list[dict] | None = None,
         attributions: dict | None = None,
+        truncated: str | None = None,
     ) -> None:
         row = self._get_lesson_row(lesson_id)
         if row is None:
@@ -231,8 +241,8 @@ class LessonStore:
                 INSERT INTO turns
                     (id, lesson_id, subject, user_text, action, route, calc_calls,
                      research_calls, citation_passage_ids, tokens_used, cached_tokens,
-                     eviction_events, attributions_json, seq)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     eviction_events, attributions_json, truncated, seq)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     turn_id,
@@ -248,6 +258,7 @@ class LessonStore:
                     cached_tokens,
                     json.dumps(eviction_events) if eviction_events is not None else None,
                     json.dumps(attributions) if attributions is not None else None,
+                    truncated,
                     seq,
                 ),
             )
@@ -269,6 +280,7 @@ class LessonStore:
         action: str | None = None,
         eviction_events: list[dict] | None = None,
         attributions: dict | None = None,
+        truncated: str | None = None,
     ) -> None:
         """Atomically persist one completed turn: the turn's metric row
         AND the lesson's current prompt-log snapshot (``session.log``), in
@@ -299,8 +311,8 @@ class LessonStore:
                 INSERT INTO turns
                     (id, lesson_id, subject, user_text, action, route, calc_calls,
                      research_calls, citation_passage_ids, tokens_used, cached_tokens,
-                     eviction_events, attributions_json, seq)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     eviction_events, attributions_json, truncated, seq)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     turn_id,
@@ -316,6 +328,7 @@ class LessonStore:
                     cached_tokens,
                     json.dumps(eviction_events) if eviction_events is not None else None,
                     json.dumps(attributions) if attributions is not None else None,
+                    truncated,
                     seq,
                 ),
             )
@@ -331,7 +344,7 @@ class LessonStore:
                 """
                 SELECT lesson_id, subject, user_text, action, route, calc_calls,
                        research_calls, citation_passage_ids, tokens_used, cached_tokens,
-                       eviction_events, attributions_json
+                       eviction_events, attributions_json, truncated
                 FROM turns WHERE lesson_id = ? ORDER BY seq ASC
                 """,
                 (lesson_id,),
@@ -350,6 +363,7 @@ class LessonStore:
                 cached_tokens=row[9],
                 eviction_events=json.loads(row[10]) if row[10] is not None else None,
                 attributions=json.loads(row[11]) if row[11] is not None else None,
+                truncated=row[12],
             )
             for row in rows
         ]
