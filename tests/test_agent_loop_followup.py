@@ -12,6 +12,7 @@ on the actual wire messages, fake research/calc).
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 
 from tutor.app.agent_loop import run_turn
@@ -207,10 +208,13 @@ def test_followup_fires_on_second_turn_even_with_strong_raw_evidence():
     tool_messages = [m for m in rendered if m["role"] == "tool"]
     joined = "\n".join(m.get("content") or "" for m in tool_messages)
     assert "Searched for: moons and planets in the solar system" in joined
-    # The rewrite's own evidence ([S3]) leads; the raw turn-2 pre-search's
-    # passage ([S2]) is only ever used as backfill behind it, never ahead.
-    assert "[S3]" in joined
-    assert joined.index("[S3]") < joined.index("[S2]")
+    # The rewrite's own evidence (originally labelled "S3" by its own
+    # retrieval call, relabelled "S1" -- sequential, displayed-order
+    # labelling within this packet) leads; the raw turn-2 pre-search's
+    # passage (originally "S2", relabelled "S2" here too) is only ever
+    # used as backfill behind it, never ahead.
+    assert "[S1] Passage number 3" in joined
+    assert joined.index("[S1] Passage number 3") < joined.index("[S2] Passage number 2")
     assert "direct answer" in joined.lower() or "directly first" in joined.lower()
 
 
@@ -711,3 +715,82 @@ def test_restate_question_r2_adds_instruction_sentence():
         in last_tool_content
     )
     assert last_tool_content.rstrip().endswith("do not repeat your earlier answer.")
+
+
+def test_forced_rewrite_round_labels_are_unique_and_sequential():
+    """A forced-rewrite round's merged evidence packet (held/backfilled
+    pointer lines plus newly-fetched passages) must never repeat an
+    ``[S#]`` label within the same packet, and labels must be assigned
+    S1..Sn sequentially in the order the passages are actually displayed.
+
+    Reproduces the real bug: the backfill passage (already held, so it
+    renders as a pointer line under its ORIGINAL label) and the rewrite's
+    own freshly-fetched passage are each independently labelled by their
+    own upstream retrieval call, which always numbers its own results
+    starting from S1 -- so both can land as "S1" in the same packet
+    before this is fixed."""
+    session, budget = _mk_session()
+    llm = FakeLlmClient(
+        [
+            _final("The solar system has eight planets [S1]."),
+            _tool_call("research", {"queries": ["moons and planets in the solar system"]}),
+            _final("There are also moons and asteroids [S1]."),
+        ]
+    )
+    # Turn 1: pid-1 fetched and labelled "S1" by its own (independent)
+    # retrieval call -- held after turn 1.
+    turn1 = _strong_response(1)
+    # Turn 2 raw pre-search (backfill only): re-finds pid-1, again
+    # independently labelled "S1" by this call's own retrieval numbering.
+    turn2_backfill = _strong_response(1)
+    # Turn 2 rewrite's own query: a brand-new passage (pid-2) that this
+    # independent retrieval call ALSO labels "S1" (it has no idea pid-1
+    # already claimed that label in this lesson) -- the real-world
+    # collision.
+    turn2_rewrite = _Response(
+        passages=[
+            _Passage(
+                label="S1",
+                passage_id="pid-2",
+                text=(
+                    "Passage number 2: the moons, planets, and asteroids of "
+                    "the solar system all orbit the sun. "
+                )
+                * 10,
+            )
+        ]
+    )
+    research = ScriptedResearchEngine([turn1, turn2_backfill, turn2_rewrite])
+    calc = FakeCalc()
+
+    run_turn(
+        session,
+        _UserInput(kind="text", text="what is the solar system"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+    )
+    run_turn(
+        session,
+        _UserInput(kind="text", text="what else is in the solar system"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+    )
+
+    rendered = session.log.render()
+    tool_messages = [m for m in rendered if m["role"] == "tool"]
+    turn2_tool_text = tool_messages[-1].get("content") or ""
+
+    labels_in_order = re.findall(r"^\[(S\d+)\]", turn2_tool_text, flags=re.MULTILINE)
+    assert len(labels_in_order) >= 2, turn2_tool_text
+    assert len(labels_in_order) == len(set(labels_in_order)), (
+        f"duplicate [S#] label within one packet: {labels_in_order}\n{turn2_tool_text}"
+    )
+    assert labels_in_order == [f"S{i + 1}" for i in range(len(labels_in_order))], (
+        f"labels not sequential in displayed order: {labels_in_order}"
+    )

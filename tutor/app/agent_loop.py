@@ -396,6 +396,15 @@ def _lead_with_backfill(
     return merged[:cap]
 
 
+def _relabel_sequential(passages: list[dict]) -> list[dict]:
+    """Return a copy of ``passages`` with ``label`` reassigned to
+    ``S1``..``Sn`` in list order, discarding whatever label each passage
+    arrived with (assigned independently by its own originating
+    retrieval call, and not guaranteed unique across calls -- see
+    ``_run_forced_rewrite_round``)."""
+    return [{**p, "label": f"S{i + 1}"} for i, p in enumerate(passages)]
+
+
 @dataclass
 class _MergedResult:
     """Minimal ``.passages`` holder so ``assess_evidence`` (which only
@@ -714,6 +723,19 @@ def _run_forced_rewrite_round(
         merged_passages = _lead_with_backfill(lead_passages, backfill_passages, _MERGE_CAP)
     else:
         merged_passages = lead_passages
+    # Each passage's ``label`` was assigned independently by whichever
+    # upstream retrieval call fetched it (each one numbers its own
+    # results starting at "S1"), so merging several such calls' results
+    # into one packet -- a rewrite's own lead passages plus the raw
+    # pre-search's backfill passages -- can (and in practice does) land
+    # the SAME "[S#]" label on two different passages in the same
+    # packet. Relabel S1..Sn sequentially in final displayed order right
+    # here, before anything renders or retains these passages, so every
+    # downstream consumer (the rendered evidence text, the pointer lines
+    # inside it, ``_retain_passages``, and the citation/attribution
+    # lookup for this turn) sees one single, consistent, collision-free
+    # label per passage.
+    merged_passages = _relabel_sequential(merged_passages)
     merged_response = _MergedResult(merged_passages)
     healthy_terms = {
         t: True for t in getattr(assessment, "covered_terms", frozenset()) or []
