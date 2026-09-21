@@ -153,6 +153,8 @@ class LlamaClient:
         max_tokens: int | None = None,
         temperature: float | None = None,
         tools: list[dict] | None = None,
+        tool_choice: str | dict | None = None,
+        response_format: dict | None = None,
         cancel: threading.Event | None = None,
     ) -> Iterator[StreamEvent]:
         # `stream_options.include_usage` is required to get a `usage` chunk
@@ -171,6 +173,18 @@ class LlamaClient:
             payload["temperature"] = temperature
         if tools is not None:
             payload["tools"] = tools
+        if tool_choice is not None:
+            # OpenAI-compatible ``tool_choice``: either the strings "auto"/
+            # "none"/"required" or ``{"type": "function", "function":
+            # {"name": ...}}`` to force one specific tool. Passed through
+            # verbatim to llama-server's ``/v1/chat/completions`` -- this
+            # client never validates or rewrites it (see
+            # docs/rewrite_on_weak_evidence.md for the forced-call use
+            # this exists for, and its tested grammar-constrained fallback
+            # for servers that reject this field).
+            payload["tool_choice"] = tool_choice
+        if response_format is not None:
+            payload["response_format"] = response_format
         body = json.dumps(payload).encode("utf-8")
 
         try:

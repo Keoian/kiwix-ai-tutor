@@ -73,7 +73,8 @@ class _FakeHandler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/v1/chat/completions":
-            self._read_json()
+            body = self._read_json()
+            self.server.last_chat_body = body  # type: ignore[attr-defined]
 
             if behavior == "server_error":
                 self.send_response(500)
@@ -235,6 +236,7 @@ def fake_server() -> Callable[[str], str]:
         server.behavior = behavior
         return base_url
 
+    _set.server = server
     yield _set
 
     server.shutdown()
@@ -307,6 +309,33 @@ def test_stream_chat_yields_token_events_then_done(fake_server):
     assert done.usage["prompt_tokens"] == 10
     assert done.usage["completion_tokens"] == 2
     assert done.usage["cached_tokens"] == 3
+
+
+def test_stream_chat_forwards_tool_choice_and_response_format(fake_server):
+    base_url = fake_server("simple_tokens")
+    client = LlamaClient(base_url, timeout_s=5)
+    forced_choice = {"type": "function", "function": {"name": "research"}}
+    schema_format = {"type": "json_schema", "json_schema": {"name": "x", "schema": {}}}
+
+    list(
+        client.stream_chat(
+            [{"role": "user", "content": "hi"}],
+            max_tokens=16,
+            tool_choice=forced_choice,
+        )
+    )
+    assert fake_server.server.last_chat_body["tool_choice"] == forced_choice
+    assert "response_format" not in fake_server.server.last_chat_body
+
+    list(
+        client.stream_chat(
+            [{"role": "user", "content": "hi"}],
+            max_tokens=16,
+            response_format=schema_format,
+        )
+    )
+    assert fake_server.server.last_chat_body["response_format"] == schema_format
+    assert "tool_choice" not in fake_server.server.last_chat_body
 
 
 def test_stream_chat_tolerates_missing_cached_tokens(fake_server):
