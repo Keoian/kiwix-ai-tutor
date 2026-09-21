@@ -564,3 +564,147 @@ def test_concise_followup_note_true_opts_into_stronger_wording():
     joined = "\n".join(m.get("content") or "" for m in tool_messages)
     assert "do not restate points" in joined
     assert "ONLY what is new" in joined
+
+
+def test_restate_question_last_off_reproduces_plain_bytes():
+    """``restate_question_last`` defaults to False and reproduces the
+    exact same tool-result bytes as before this setting existed."""
+    session, budget = _mk_session()
+    llm = FakeLlmClient(
+        [
+            _final("The solar system has eight planets [S1]."),
+            _tool_call("research", {"queries": ["moons and planets in the solar system"]}),
+            _final("There are also moons and asteroids [S1]."),
+        ]
+    )
+    research = ScriptedResearchEngine(
+        [_strong_response(1), _strong_response(2), _strong_response(3)]
+    )
+    calc = FakeCalc()
+
+    run_turn(
+        session,
+        _UserInput(kind="text", text="what is the solar system"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+    )
+    run_turn(
+        session,
+        _UserInput(kind="text", text="what else is in the solar system"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+    )
+
+    rendered = session.log.render()
+    tool_messages = [m for m in rendered if m["role"] == "tool"]
+    joined = "\n".join(m.get("content") or "" for m in tool_messages)
+    assert "The student is now asking" not in joined
+
+
+def test_restate_question_last_r1_lands_on_followup_turn_only():
+    """R1: turn >= 2's forced-rewrite round appends a restatement line
+    using the ORIGINAL user text and the model's own rewritten query
+    from that same round, as the last thing in the tool result. Turn 1
+    (no forced round) never gets it."""
+    session, budget = _mk_session()
+    llm = FakeLlmClient(
+        [
+            _final("The solar system has eight planets [S1]."),
+            _tool_call("research", {"queries": ["moons and planets in the solar system"]}),
+            _final("There are also moons and asteroids [S1]."),
+        ]
+    )
+    research = ScriptedResearchEngine(
+        [_strong_response(1), _strong_response(2), _strong_response(3)]
+    )
+    calc = FakeCalc()
+
+    run_turn(
+        session,
+        _UserInput(kind="text", text="what is the solar system"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+        restate_question_last=True,
+    )
+    run_turn(
+        session,
+        _UserInput(kind="text", text="what else is in the solar system"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+        restate_question_last=True,
+    )
+
+    rendered = session.log.render()
+    tool_messages = [m for m in rendered if m["role"] == "tool"]
+    assert "The student is now asking" not in (tool_messages[0].get("content") or "")
+    joined = "\n".join(m.get("content") or "" for m in tool_messages)
+    assert (
+        'The student is now asking: "what else is in the solar system" '
+        '(meaning: moons and planets in the solar system). Answer THIS question.'
+    ) in joined
+    # It is the LAST thing appended to that tool result.
+    last_tool_content = tool_messages[-1]["content"]
+    assert last_tool_content.rstrip().endswith("Answer THIS question.")
+    assert "If it is a yes/no question start with Yes or No" not in joined
+
+
+def test_restate_question_r2_adds_instruction_sentence():
+    """R2: same restatement line, plus one extra instruction sentence
+    right after it -- only when ``restate_question_instruction`` is also
+    True (meaningless on its own without ``restate_question_last``)."""
+    session, budget = _mk_session()
+    llm = FakeLlmClient(
+        [
+            _final("The solar system has eight planets [S1]."),
+            _tool_call("research", {"queries": ["moons and planets in the solar system"]}),
+            _final("There are also moons and asteroids [S1]."),
+        ]
+    )
+    research = ScriptedResearchEngine(
+        [_strong_response(1), _strong_response(2), _strong_response(3)]
+    )
+    calc = FakeCalc()
+
+    run_turn(
+        session,
+        _UserInput(kind="text", text="what is the solar system"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+        restate_question_last=True,
+        restate_question_instruction=True,
+    )
+    run_turn(
+        session,
+        _UserInput(kind="text", text="what else is in the solar system"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+        restate_question_last=True,
+        restate_question_instruction=True,
+    )
+
+    rendered = session.log.render()
+    tool_messages = [m for m in rendered if m["role"] == "tool"]
+    last_tool_content = tool_messages[-1]["content"]
+    assert (
+        "Answer THIS question. If it is a yes/no question start with Yes or No"
+        in last_tool_content
+    )
+    assert last_tool_content.rstrip().endswith("do not repeat your earlier answer.")

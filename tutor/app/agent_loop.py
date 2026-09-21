@@ -555,6 +555,25 @@ _FOLLOWUP_CONCISE_NOTE = (
 )
 
 
+# "Iteration 3" fix candidate (docs/followup_answer_shape.md): restate
+# the resolved standalone question as the LAST thing appended to the
+# forced-rewrite round's evidence tool result, using the model's own
+# rewritten query from that same round. Gated by
+# ``app.restate_question_last`` (default False).
+_RESTATE_QUESTION_R2_INSTRUCTION = (
+    "If it is a yes/no question start with Yes or No; otherwise just "
+    "answer it. Add what is new; do not repeat your earlier answer."
+)
+
+
+def _restate_question_line(original_text: str, rewritten_queries: list[str]) -> str:
+    rewritten = rewritten_queries[0] if rewritten_queries else original_text
+    return (
+        f'The student is now asking: "{original_text}" (meaning: {rewritten}). '
+        "Answer THIS question."
+    )
+
+
 def _has_prior_turns(session, use_log: bool, log, messages: list[dict] | None) -> bool:
     """True when the lesson already has at least one earlier turn, i.e.
     this is not the student's first message. Checked BEFORE this turn's
@@ -581,6 +600,8 @@ def _run_forced_rewrite_round(
     backfill_passages: list[dict] | None = None,
     strong_suffix: str = "",
     reuse_prior_passages: bool = True,
+    restate_question_text: str | None = None,
+    restate_question_instruction: bool = False,
 ):
     """Run one forced ``research`` tool-call round (see
     ``_forced_research_tool_call``), append the resulting assistant
@@ -730,6 +751,11 @@ def _run_forced_rewrite_round(
         tool_text = f"{searched_for_line}\n{evidence_text}"
         if strong_suffix:
             tool_text = f"{tool_text}\n\n{strong_suffix}"
+        if restate_question_text is not None:
+            restate_line = _restate_question_line(restate_question_text, rewritten_queries)
+            if restate_question_instruction:
+                restate_line = f"{restate_line} {_RESTATE_QUESTION_R2_INSTRUCTION}"
+            tool_text = f"{tool_text}\n\n{restate_line}"
     else:
         tool_text = (
             f"{searched_for_line}\n"
@@ -760,6 +786,8 @@ def run_turn(
     rewrite_on_followup: bool = True,
     reuse_prior_passages: bool = True,
     concise_followup_note: bool = False,
+    restate_question_last: bool = False,
+    restate_question_instruction: bool = False,
 ) -> TurnResult:
     research_calls = 0
     calc_calls = 0
@@ -857,6 +885,10 @@ def run_turn(
                     else _FOLLOWUP_DIRECTNESS_NOTE
                 ),
                 reuse_prior_passages=reuse_prior_passages,
+                restate_question_text=(
+                    user_input.text if restate_question_last else None
+                ),
+                restate_question_instruction=restate_question_instruction,
             )
             research_calls += delta
             # _run_forced_rewrite_round always leaves the log in a valid,

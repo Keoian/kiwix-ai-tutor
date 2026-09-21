@@ -137,6 +137,25 @@ class AppConfig:
     resolution always sees the full passage text regardless of this
     setting -- only what is pasted into the prompt log is shortened.
     ``False`` reproduces today's behaviour byte-for-byte."""
+    restate_question_last: bool = False
+    """On a follow-up turn's forced-rewrite round, append a one-line
+    restatement of the resolved standalone question (the model's own
+    rewritten query from that round) as the LAST thing in the evidence
+    tool result, right before the model generates -- see
+    docs/followup_answer_shape.md, "Iteration 3". Theory: recency in the
+    transcript matters more than instruction wording for this model, and
+    without a restated question nearest the end of the prompt, it
+    defaults to anchoring on its own most recent prior answer instead of
+    the newly-resolved question. ``False`` reproduces today's behaviour
+    byte-for-byte. Only applies on turn >= 2 (a follow-up rewrite round);
+    never appended on turn 1."""
+    restate_question_instruction: bool = False
+    """Only meaningful when ``restate_question_last`` is True: also
+    append one extra instruction sentence after the restated question
+    ("If it is a yes/no question start with Yes or No; otherwise just
+    answer it. Add what is new; do not repeat your earlier answer.") --
+    the "R2" arm in docs/followup_answer_shape.md, "Iteration 3", vs.
+    "R1" (the restated question alone, no extra instruction)."""
     concise_followup_note: bool = False
     """Use the longer follow-up host note (``_FOLLOWUP_CONCISE_NOTE``,
     docs/followup_answer_shape.md) instead of the plain
@@ -354,6 +373,8 @@ def load_config(path: Path) -> Config:
         rewrite_on_followup=_app_bool("rewrite_on_followup", True),
         reuse_prior_passages=_app_bool("reuse_prior_passages", True),
         concise_followup_note=_app_bool("concise_followup_note", False),
+        restate_question_last=_app_bool("restate_question_last", False),
+        restate_question_instruction=_app_bool("restate_question_instruction", False),
     )
 
     # [embedding] is optional, like [app]; when present every key is

@@ -81,6 +81,26 @@ def test_app_table_defaults_when_missing(tmp_path):
     # on open questions, flattened "Tell me about X" answers in some
     # rewordings), so the default is False -- the flag stays selectable.
     assert cfg.app.concise_followup_note is False
+    # docs/followup_answer_shape.md, "Iteration 3": not yet adopted --
+    # both default to False.
+    assert cfg.app.restate_question_last is False
+    assert cfg.app.restate_question_instruction is False
+
+
+def test_app_table_restate_question_settings_are_configurable(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    text = _BASE + """
+[app]
+restate_question_last = true
+restate_question_instruction = true
+"""
+    config_path = _write_toml(config_dir / "dev.toml", text)
+
+    cfg = load_config(config_path)
+
+    assert cfg.app.restate_question_last is True
+    assert cfg.app.restate_question_instruction is True
 
 
 def test_app_table_concise_followup_note_is_configurable(tmp_path):

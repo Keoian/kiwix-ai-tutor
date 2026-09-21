@@ -284,3 +284,55 @@ currently defaulting to whatever question shape is nearest in its
 context (which, without a restated question, is its own most recent
 prior answer). This was not tried in this pass; note wording changes
 alone are not the correct lever.
+
+## Iteration 3 (built, not live-measured this pass)
+
+Implemented the "restate the resolved question last" fix candidate
+from the previous section, gated behind two new settings threaded like
+`rewrite_on_followup` (`tutor/settings.py`, `tutor/app/agent_loop.py`,
+`tutor/app/compose.py`):
+
+- `app.restate_question_last` (default `False`): on a follow-up turn's
+  forced-rewrite round, when the round's evidence comes back `strong`,
+  append one line as the LAST thing in that tool result, after the
+  evidence text and after `strong_suffix`:
+  `The student is now asking: "<original message>" (meaning: <the
+  round's own rewritten query>). Answer THIS question.` Never appended
+  on turn 1 (no forced round exists yet), and not appended on the
+  separate weak-evidence forced-rewrite path (only on the follow-up
+  path, since the doc's hypothesis is specifically about follow-up
+  turns burying the question behind evidence).
+- `app.restate_question_instruction` (default `False`, only meaningful
+  together with the above): appends one more sentence right after the
+  restated question -- "If it is a yes/no question start with Yes or
+  No; otherwise just answer it. Add what is new; do not repeat your
+  earlier answer." This is the "R2" arm; "R1" is the restated question
+  alone with no extra instruction sentence.
+- Both default `False` and reproduce prior byte-for-byte behavior when
+  off (`_restate_question_line` in `tutor/app/agent_loop.py`).
+
+Unit tests (fake-LLM doubles, no live model) in
+`tests/test_agent_loop_followup.py`:
+`test_restate_question_last_off_reproduces_plain_bytes`,
+`test_restate_question_last_r1_lands_on_followup_turn_only` (asserts
+the line uses the original text + the round's own rewritten query, is
+absent on turn 1, and is the last thing in the tool result), and
+`test_restate_question_r2_adds_instruction_sentence`. Settings tests in
+`tests/test_settings_app.py` cover the TOML default (`False`/`False`)
+and override.
+
+**Not done this pass: the live measurement.** Running the full
+`data/followup_shape_measure.py`-style protocol (baseline/R1/R2 x 2
+lessons x 2 reps, strictly sequential against the single llama-server
+slot) is a multi-hour live-model workload and was out of scope for the
+time budget available in this session. So, per the task's own
+instruction to report a negative/undecided result plainly rather than
+skip or fabricate one: **R1/R2 are implemented and unit-tested but NOT
+adopted** (`restate_question_last` stays `False` by default) because
+the measured evidence needed to justify turning it on does not exist
+yet. This is a "not verified," not a "negative result" -- unlike
+iteration 2, no live run contradicted the hypothesis; none was run.
+Whoever picks this up next should run
+`data/followup_shape_measure.py` (or a small adaptation of it) with
+`app.restate_question_last`/`app.restate_question_instruction` set per
+arm before deciding whether to flip the default.
