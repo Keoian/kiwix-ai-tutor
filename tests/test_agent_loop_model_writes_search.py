@@ -380,3 +380,172 @@ def test_fallback_to_old_behaviour_when_model_output_unusable():
     # The first (model-written) forced round produced nothing usable, so
     # it fell straight to the not-found tool text with no queries listed.
     assert "No good match was found" in joined
+
+
+def test_restate_meaning_uses_model_question_not_keywords():
+    """STEP 1/2 regression test: in model_writes_search mode, the forced
+    round's model tool call can carry an optional standalone ``question``
+    string alongside its keyword ``queries``. The restate line's
+    "(meaning: ...)" must show that standalone question, NOT the keyword
+    queries joined -- today (before this fix) it falls back to
+    ``rewritten_queries[0]``, e.g. "monomer", losing the student's actual
+    referent (e.g. "tires")."""
+    session, budget = _mk_session()
+    llm = FakeLlmClient(
+        [
+            _tool_call("research", {"queries": ["Titin"]}),
+            _final("Titin is the largest known protein [S1]."),
+            _tool_call(
+                "research",
+                {
+                    "question": "Is a tire a single molecule?",
+                    "queries": ["Monomer"],
+                },
+            ),
+            _final("No, a tire is not a single molecule [S1]."),
+        ]
+    )
+    research = ScriptedResearchEngine(
+        [
+            _strong_response(1, title="Molecule"),
+            _strong_response(2, title="Titin"),
+            _strong_response(3, title="Molecule"),
+            _strong_response(4, title="Monomer"),
+        ]
+    )
+    calc = FakeCalc()
+
+    run_turn(
+        session,
+        _UserInput(kind="text", text="What's the longest molecule?"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+        model_writes_search=True,
+    )
+    result = run_turn(
+        session,
+        _UserInput(kind="text", text="They're a single molecule?"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+        model_writes_search=True,
+    )
+
+    assert result.status == "ok"
+    rendered = session.log.render()
+    tool_messages = [m for m in rendered if m["role"] == "tool"]
+    joined = "\n".join(m.get("content") or "" for m in tool_messages)
+    assert '(meaning: Is a tire a single molecule?)' in joined
+    assert "(meaning: Monomer" not in joined
+
+
+def test_restate_meaning_omitted_when_model_writes_no_question():
+    """When the model's forced tool call has no ``question`` field, the
+    restate line must NOT fall back to showing the keyword queries as the
+    "meaning" -- it should omit the "(meaning: ...)" clause entirely."""
+    session, budget = _mk_session()
+    llm = FakeLlmClient(
+        [
+            _tool_call("research", {"queries": ["Titin"]}),
+            _final("Titin is the largest known protein [S1]."),
+            _tool_call("research", {"queries": ["Monomer"]}),
+            _final("No, a monomer is not a single molecule [S1]."),
+        ]
+    )
+    research = ScriptedResearchEngine(
+        [
+            _strong_response(1, title="Molecule"),
+            _strong_response(2, title="Titin"),
+            _strong_response(3, title="Molecule"),
+            _strong_response(4, title="Monomer"),
+        ]
+    )
+    calc = FakeCalc()
+
+    run_turn(
+        session,
+        _UserInput(kind="text", text="What's the longest molecule?"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+        model_writes_search=True,
+    )
+    result = run_turn(
+        session,
+        _UserInput(kind="text", text="They're a single molecule?"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+        model_writes_search=True,
+    )
+
+    assert result.status == "ok"
+    rendered = session.log.render()
+    tool_messages = [m for m in rendered if m["role"] == "tool"]
+    joined = "\n".join(m.get("content") or "" for m in tool_messages)
+    assert "The student is now asking:" in joined
+    assert "(meaning:" not in joined
+
+
+def test_restate_line_included_on_turn_one_when_question_present():
+    """New behaviour: the restate line now also fires on turn 1 when the
+    model's forced round supplies a ``question`` (previously it only ever
+    fired on turn >= 2, since turn 1 has no prior referent to resolve)."""
+    session, budget = _mk_session()
+    llm = FakeLlmClient(
+        [
+            _tool_call(
+                "research",
+                {"question": "What is the largest molecule?", "queries": ["Titin"]},
+            ),
+            _final("Titin is the largest known protein [S1]."),
+        ]
+    )
+    research = ScriptedResearchEngine(
+        [
+            _strong_response(1, title="Molecule"),
+            _strong_response(2, title="Titin"),
+        ]
+    )
+    calc = FakeCalc()
+
+    result = run_turn(
+        session,
+        _UserInput(kind="text", text="What's the largest molecule?"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+        model_writes_search=True,
+    )
+
+    assert result.status == "ok"
+    rendered = session.log.render()
+    tool_messages = [m for m in rendered if m["role"] == "tool"]
+    joined = "\n".join(m.get("content") or "" for m in tool_messages)
+    assert "(meaning: What is the largest molecule?)" in joined
+
+
+def test_clip_model_written_question_clips_to_30_words_and_single_line():
+    from tutor.app.agent_loop import _clip_model_written_question
+
+    long_question = "Is this " + " ".join(f"word{i}" for i in range(40)) + " a molecule?"
+    clipped = _clip_model_written_question(long_question)
+    assert clipped is not None
+    assert len(clipped.split()) <= 30
+
+    multiline = "Is a tire\na single molecule?"
+    assert _clip_model_written_question(multiline) == "Is a tire a single molecule?"
+
+    assert _clip_model_written_question(None) is None
+    assert _clip_model_written_question("   ") is None

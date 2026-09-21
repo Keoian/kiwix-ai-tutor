@@ -50,6 +50,16 @@ RESEARCH_TOOL: dict = {
                     "minItems": 1,
                     "maxItems": 3,
                 },
+                "question": {
+                    "type": "string",
+                    "description": (
+                        "Optional: the student's latest message rewritten as one "
+                        "complete standalone question, with every pronoun/"
+                        "reference ('it', 'that', 'they', 'the other ones', ...) "
+                        "replaced by what it refers to in the lesson so far."
+                    ),
+                    "maxLength": 300,
+                },
             },
         },
     },
@@ -197,6 +207,16 @@ def validate_tool_call(name: str, arguments_json: str) -> ValidationResult:
                         error="'keywords' items must be at most 40 characters",
                     )
             arguments = {**arguments, "keywords": [k.strip() for k in keywords]}
+        if "question" in arguments:
+            error = _validate_string_field(arguments["question"], "question")
+            if error:
+                return ValidationResult(ok=False, arguments=None, error=error)
+            if len(arguments["question"]) > 300:
+                return ValidationResult(
+                    ok=False,
+                    arguments=None,
+                    error="'question' must be at most 300 characters",
+                )
     elif name == "calc":
         error = _validate_string_field(arguments["expression"], "expression")
         if error:

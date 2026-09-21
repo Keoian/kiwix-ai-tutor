@@ -485,3 +485,71 @@ adds unconditionally to turn 1 as well); whether real answer quality on
 the failure cases above (titin/DNA/blue whale) actually improves; and
 whether the turn-1-skips-restatement design choice made here is the
 right one. The setting defaults to `False` pending that measurement.
+
+## Standalone question in the forced call (2026-09-21)
+
+**Regression found**: with `app.model_writes_search` default ON (commit
+950eef2), the forced `research` call's queries became short keyword/title
+strings (e.g. "Monomer", "Polymer") rather than full standalone questions.
+`_restate_question_line` (`tutor/app/agent_loop.py`) had NOT been updated
+for this: it still built the `(meaning: ...)` clause from
+`rewritten_queries[0]` -- the first keyword query. Owner-observed live
+(lesson: long molecules -> titin -> rubber -> tires): student asked
+"They're a single molecule? :\" (meaning: are TIRES a single molecule?),
+the model searched `monomer, polymer, homopolymer`, and the restate line
+read `(meaning: monomer)` -- so the model answered about its own search
+topic instead of the student's actual referent (tires). "What are the
+other ones?" similarly replayed stale queries with no new referent
+resolved.
+
+**Fix**: `research`'s tool schema (`tutor/tools/schemas.py`) gained an
+optional `question` string argument (validated, not required -- calls
+without it still validate exactly as before). `_MODEL_WRITES_SEARCH_HOST_NOTE`
+now asks the model to write `question` FIRST -- the student's latest
+message rewritten as one standalone question with every pronoun/reference
+resolved from the lesson so far -- THEN `queries` for that question, and
+not to repeat the previous turn's exact queries unless the question is
+unchanged. `_restate_question_line` now takes an explicit `meaning`
+string and, in `model_writes_search` mode, that meaning is the model's
+own (clipped, <=30 words, single line) `question`; if the model didn't
+supply one, the `(meaning: ...)` clause is omitted entirely rather than
+falling back to showing the raw keyword queries. The legacy
+follow-up-rewrite path (`model_writes_search=False`) is unaffected --
+its rewritten queries already ARE standalone questions, so it keeps using
+`rewritten_queries[0]` as before, byte-identical. The restate line now
+also fires on turn 1 (previously restate never fired there, since there
+was no prior turn to restate against) whenever the model supplies a
+`question` on that first forced round.
+
+**Live smoke** (`data/sq_smoke.py`, real llama-server on `:8080`, Granite
+4.0 H-Tiny, one lesson replayed strictly sequentially, 2 reps -- rep 1
+shown; full data in `data/sq_smoke.json`):
+
+| Turn | Student text | `question` | `queries` | Answer (first 2 sentences) |
+|---|---|---|---|---|
+| 1 | What's the longest molecule? | *(none)* | "What's the longest molecule" | The longest known molecule is titin, a protein in human muscle that can span over 27,000 amino acids. [S1] |
+| 2 | What are the other ones? | *(none)* | Very long molecules; Large biomolecules; Longest proteins | The other very long molecules besides titin are very large proteins, especially those involved in structural and functional roles in cells. [S1] Large biomolecules include proteins like titin... |
+| 3 | But what about the other ones not just Titin? | *(none)* | Long protein molecules; Large biomolecules; Proteins with extended chains | Besides titin, other very long molecules include large proteins such as titin itself... |
+| 4 | Like tires? | *(none)* | *(none -- forced round produced nothing usable)* | I couldn't find information about tires in the library sources provided earlier. Tires are not discussed in the current lesson materials. |
+| 5 | They're a single molecule? :\ | *(none)* | *(none)* | I couldn't find information about tires in the library sources provided earlier. Tires are not discussed in the current lesson materials. |
+| 6 | Someone said tires were a single molecule if... calvinize it or something. | *(none)* | Calendered tires; Calendering process; Rubber polymerization | Tires are not a single molecule; they are made through a process called calendering... [S1] |
+
+**Measured**: the schema/validation/restate-line code path is correct and
+exercised live -- `question` is accepted when present and, when absent,
+the restate line correctly omits `(meaning: ...)` rather than showing raw
+keyword queries (the regression this task fixes). The forced-round
+mechanics, clipping, and turn-1 gating all behaved as designed.
+
+**Not verified / negative result**: in both reps of this live run, the
+model (Granite 4.0 H-Tiny) never actually populated the new optional
+`question` field, despite `_MODEL_WRITES_SEARCH_HOST_NOTE` asking for it
+first -- it only ever emitted `queries`. So on turn 4/5 ("Like tires?" /
+"They're a single molecule?") the restate line still had no standalone
+question to show (correctly omitted, not wrong, but not yet the
+improvement this was meant to produce), and by rep 1 turn 6 the model had
+correctly resolved "tires"/"calvinize" into good queries via `queries`
+alone. Whether making `question` a required argument (rather than
+optional) would reliably get a small model to fill it is unmeasured and
+is the natural next step; this run only confirms the fallback path (no
+`question` -> no fabricated "(meaning: ...)") is safe.
+

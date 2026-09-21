@@ -73,6 +73,33 @@ def test_validate_valid_research_call_with_keywords():
     assert result.arguments == args
 
 
+def test_validate_valid_research_call_with_question():
+    args = {"queries": ["Titin"], "question": "What is the longest molecule?"}
+    result = validate_tool_call("research", json.dumps(args))
+    assert result.ok is True
+    assert result.arguments == args
+
+
+def test_validate_research_call_without_question_still_ok():
+    # ``question`` is optional -- validation must accept calls without it
+    # (existing behaviour, unchanged).
+    result = validate_tool_call("research", json.dumps({"queries": ["Titin"]}))
+    assert result.ok is True
+    assert "question" not in result.arguments
+
+
+def test_validate_research_call_question_wrong_type_rejected():
+    args = {"queries": ["Titin"], "question": 123}
+    result = validate_tool_call("research", json.dumps(args))
+    assert result.ok is False
+
+
+def test_research_tool_schema_declares_optional_question():
+    params = RESEARCH_TOOL["function"]["parameters"]
+    assert "question" not in params.get("required", [])
+    assert params["properties"]["question"]["type"] == "string"
+
+
 def test_validate_valid_calc_call():
     result = validate_tool_call("calc", json.dumps({"expression": "2 + 2"}))
     assert result.ok is True

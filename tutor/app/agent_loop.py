@@ -230,16 +230,25 @@ _FOLLOWUP_HOST_NOTE = (
 # what trip up the word-matcher. Tells the model to write short,
 # title-like queries instead of sentences/questions.
 _MODEL_WRITES_SEARCH_HOST_NOTE = (
-    " [Host note: call research with 1-3 short library search queries for "
-    "this question. Write them like encyclopedia article titles or key "
-    "terms, NOT full sentences or questions. Resolve any pronoun/reference "
-    "(\"it\", \"that\", \"they\", ...) using the lesson so far, and fix "
-    "spelling. Leave out describing words like \"biggest\", \"longest\", "
-    "\"fastest\", or \"how long\" unless they are part of a real title. If "
-    "you already know the likely answer, make that one of the queries. "
-    "For example: student asks \"What's the biggest animal?\" -> queries "
-    "\"Blue whale\", \"Largest animals\"; student asks \"How long is "
-    "DNA?\" -> queries \"DNA\", \"Chromosome\", \"Base pair\".]"
+    " [Host note: call research. FIRST give \"question\": the student's "
+    "latest message rewritten as one complete standalone question, with "
+    "every \"it\"/\"that\"/\"they\"/\"the other ones\"/etc. replaced by "
+    "what it refers to in the lesson so far. For example: lesson has been "
+    "about tires and rubber, student asks \"They're a single molecule?\" "
+    "-> question \"Is a tire a single molecule?\"; lesson has been about "
+    "titin being the longest molecule, student asks \"What are the other "
+    "ones?\" -> question \"What other very long molecules are there "
+    "besides titin?\". THEN give 1-3 short library search \"queries\" for "
+    "that question. Write them like encyclopedia article titles or key "
+    "terms, NOT full sentences or questions. Fix spelling. Leave out "
+    "describing words like \"biggest\", \"longest\", \"fastest\", or \"how "
+    "long\" unless they are part of a real title. If you already know the "
+    "likely answer, make that one of the queries. Do not repeat the exact "
+    "same queries as your previous turn unless the question is the same. "
+    "For example: student asks \"What's the biggest animal?\" -> question "
+    "\"What is the biggest animal?\", queries \"Blue whale\", \"Largest "
+    "animals\"; student asks \"How long is DNA?\" -> question \"How long "
+    "is DNA?\", queries \"DNA\", \"Chromosome\", \"Base pair\".]"
 )
 
 # Small cap on the forced rewrite call's own output -- it only needs to
@@ -485,6 +494,26 @@ def _clip_model_written_queries(queries: list[str]) -> list[str]:
     return cleaned
 
 
+_MODEL_QUESTION_MAX_WORDS = 30
+
+
+def _clip_model_written_question(question) -> str | None:
+    """Clip the model's optional standalone ``question`` argument
+    (``app.model_writes_search``) to a single line of at most
+    ``_MODEL_QUESTION_MAX_WORDS`` words, for safe display in the restate
+    line. Returns ``None`` when there is nothing usable."""
+    if not isinstance(question, str):
+        return None
+    q = " ".join(question.split())
+    q = q.strip().strip("\"'").strip()
+    if not q:
+        return None
+    words = q.split()
+    if len(words) > _MODEL_QUESTION_MAX_WORDS:
+        q = " ".join(words[:_MODEL_QUESTION_MAX_WORDS])
+    return q or None
+
+
 def _forced_research_tool_call(llm, messages: list[dict], *, cancel):
     """Force the model to answer this turn's next completion with exactly
     one ``research`` tool call, primarily via the OpenAI-compatible
@@ -493,10 +522,13 @@ def _forced_research_tool_call(llm, messages: list[dict], *, cancel):
     constrained plain-text completion asking for the same shape and
     synthesize an equivalent tool-call.
 
-    Returns ``(tool_call_id, queries, arguments_json)`` or ``None`` if
-    the model produced nothing usable (both paths failed, or the forced
-    call returned no queries) -- callers treat ``None`` the same as
-    "still weak" and skip straight to the not-found outcome.
+    Returns ``(tool_call_id, queries, arguments_json, question)`` or
+    ``None`` if the model produced nothing usable (both paths failed, or
+    the forced call returned no queries) -- callers treat ``None`` the
+    same as "still weak" and skip straight to the not-found outcome.
+    ``question`` is the model's optional standalone-question argument
+    (``app.model_writes_search``), unvalidated/unclipped, or ``None`` when
+    absent or when the fallback (non-tool-call) path was used.
     """
     forced_tool_choice = {"type": "function", "function": {"name": "research"}}
     text_parts: list[str] = []
@@ -524,7 +556,8 @@ def _forced_research_tool_call(llm, messages: list[dict], *, cancel):
                 [validation.arguments["query"]] if validation.arguments.get("query") else []
             )
             if queries:
-                return tool_call.id, queries, tool_call.arguments_json
+                question = validation.arguments.get("question")
+                return tool_call.id, queries, tool_call.arguments_json, question
 
     if not errored:
         # The server accepted tool_choice but the model still did not
@@ -580,7 +613,7 @@ def _forced_research_tool_call(llm, messages: list[dict], *, cancel):
     if not queries:
         return None
     arguments_json = json.dumps({"queries": queries})
-    return "forced-rewrite-fallback", queries, arguments_json
+    return "forced-rewrite-fallback", queries, arguments_json, None
 
 
 # Short instruction appended after strong merged evidence on a follow-up
@@ -627,12 +660,20 @@ _RESTATE_QUESTION_R2_INSTRUCTION = (
 )
 
 
-def _restate_question_line(original_text: str, rewritten_queries: list[str]) -> str:
-    rewritten = rewritten_queries[0] if rewritten_queries else original_text
-    return (
-        f'The student is now asking: "{original_text}" (meaning: {rewritten}). '
-        "Answer THIS question."
-    )
+def _restate_question_line(original_text: str, meaning: str | None) -> str:
+    """``meaning`` is a standalone restatement of the student's question --
+    either the model's own ``question`` argument (``app.model_writes_search``
+    mode) or, for the legacy follow-up-rewrite mode (where the rewritten
+    queries ARE standalone questions, e.g. "Is DNA a molecule"), the first
+    rewritten query. When ``meaning`` is falsy/absent the "(meaning: ...)"
+    clause is omitted entirely rather than falling back to showing raw
+    keyword search queries, which are not a restatement of the question."""
+    if meaning:
+        return (
+            f'The student is now asking: "{original_text}" (meaning: {meaning}). '
+            "Answer THIS question."
+        )
+    return f'The student is now asking: "{original_text}". Answer THIS question.'
 
 
 def _has_prior_turns(session, use_log: bool, log, messages: list[dict] | None) -> bool:
@@ -664,6 +705,7 @@ def _run_forced_rewrite_round(
     restate_question_text: str | None = None,
     restate_question_instruction: bool = False,
     clip_model_queries: bool = False,
+    require_question_for_restate: bool = False,
 ):
     """Run one forced ``research`` tool-call round (see
     ``_forced_research_tool_call``), append the resulting assistant
@@ -677,20 +719,41 @@ def _run_forced_rewrite_round(
     wrong-topic) text. Otherwise the rewrite's own queries are merged
     against each other by RRF only (``_merge_dedupe_passages``), matching
     the original weak-evidence rewrite behaviour.
+
+    ``require_question_for_restate``, when True (turn 1 under
+    ``app.model_writes_search``, which has no prior turn to restate a
+    question against otherwise), suppresses the restate line entirely
+    unless the model's forced call also supplied a usable ``question``.
     """
     research_calls_delta = 0
     wire_messages = _to_wire_messages(log.render()) if use_log else messages
     forced = _forced_research_tool_call(llm, wire_messages, cancel=cancel)
+    model_question: str | None = None
+    if forced is not None:
+        model_question = _clip_model_written_question(forced[3])
     if forced is not None and clip_model_queries:
-        tool_call_id, raw_queries, _arguments_json = forced
+        tool_call_id, raw_queries, _arguments_json, _raw_question = forced
         cleaned_queries = _clip_model_written_queries(raw_queries)
         if not cleaned_queries:
             # Nothing usable after validation/clipping -- fall back to
             # today's not-found behaviour exactly as if the model had
             # produced no usable call at all.
             forced = None
+            model_question = None
         else:
-            forced = (tool_call_id, cleaned_queries, json.dumps({"queries": cleaned_queries}))
+            forced = (
+                tool_call_id,
+                cleaned_queries,
+                json.dumps({"queries": cleaned_queries}),
+                _raw_question,
+            )
+    elif forced is not None:
+        # Legacy (non-model_writes_search) forced-rewrite modes never ask
+        # the model for a standalone ``question`` -- even if one somehow
+        # showed up, ignore it so the restate line keeps using the
+        # rewritten query (already a standalone question in that mode),
+        # matching today's behaviour exactly.
+        model_question = None
 
     if forced is None:
         merged_response = _MergedResult([])
@@ -716,7 +779,7 @@ def _run_forced_rewrite_round(
         emit({"kind": "tool_result", "name": "research", "ok": False})
         return level_after, [], research_calls_delta
 
-    tool_call_id, rewritten_queries, arguments_json = forced
+    tool_call_id, rewritten_queries, arguments_json, _model_question_raw = forced
     emit(
         {
             "kind": "status",
@@ -836,8 +899,13 @@ def _run_forced_rewrite_round(
         tool_text = f"{searched_for_line}\n{evidence_text}"
         if strong_suffix:
             tool_text = f"{tool_text}\n\n{strong_suffix}"
-        if restate_question_text is not None:
-            restate_line = _restate_question_line(restate_question_text, rewritten_queries)
+        if restate_question_text is not None and (
+            not require_question_for_restate or model_question
+        ):
+            meaning = model_question if clip_model_queries else (
+                rewritten_queries[0] if rewritten_queries else None
+            )
+            restate_line = _restate_question_line(restate_question_text, meaning)
             if restate_question_instruction:
                 restate_line = f"{restate_line} {_RESTATE_QUESTION_R2_INSTRUCTION}"
             tool_text = f"{tool_text}\n\n{restate_line}"
@@ -987,11 +1055,12 @@ def run_turn(
                 reuse_prior_passages=reuse_prior_passages,
                 restate_question_text=(
                     user_input.text
-                    if restate_question_last and has_prior_turns
+                    if restate_question_last and (has_prior_turns or do_model_writes_search)
                     else None
                 ),
                 restate_question_instruction=restate_question_instruction,
                 clip_model_queries=do_model_writes_search,
+                require_question_for_restate=not has_prior_turns,
             )
             research_calls += delta
             # _run_forced_rewrite_round always leaves the log in a valid,
