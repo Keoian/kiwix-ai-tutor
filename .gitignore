@@ -34,3 +34,6 @@ Thumbs.db
 .retrieval_eval_cache/
 docs/.hybrid_matrix_cache/
 docs/.soak_run.log
+
+# Claude Code agent worktrees (local only)
+.claude/
