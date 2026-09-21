@@ -553,3 +553,103 @@ optional) would reliably get a small model to fill it is unmeasured and
 is the natural next step; this run only confirms the fallback path (no
 `question` -> no fabricated "(meaning: ...)") is safe.
 
+
+## Model may skip the search
+
+`app.model_may_skip_search` (default `True`, only meaningful when
+`app.model_writes_search` is also `True`): the forced `research` call's
+schema gets a `needs_search` boolean, first property, nothing
+schema-required (see "Cache-safe tool schema" below). A short host-note
+addition (`_MODEL_MAY_SKIP_SEARCH_NOTE`, appended right after
+`_MODEL_WRITES_SEARCH_HOST_NOTE`) asks the model to set it:
+
+> Also set "needs_search" first: false when the student is chatting,
+> talking about themselves, thanking you, or asking you to
+> explain/rephrase/simplify something already covered, or the sources
+> already shown above in this lesson already answer it; otherwise true.
+> When false, leave "queries" empty.
+
+When `needs_search` is `false`, no search runs at all -- not even the
+turn's own raw pre-search backfill (which still always runs before the
+forced call for cache/ordering reasons, but its result is simply
+discarded) -- and the host appends a short conversational tool result
+instead of evidence:
+
+> No library search needed for this message. Reply to the student
+> conversationally, using the lesson so far. Do not invent facts.
+
+The turn's evidence level becomes `"skipped"` (a new value alongside
+`strong`/`weak`/`empty`), threaded through `TurnResult.evidence`, the
+`attributions`/`done` SSE events, and `tutor/ui/app.js` (no "Searched
+for: ..." line, no "did not find anything in the library" note for that
+turn). The weak-evidence second round never fires for a `"skipped"` turn
+(it only fires on `level_before in ("weak", "empty")`). Setting the flag
+`False` reproduces today's bytes exactly -- a `needs_search: false`
+argument is simply ignored and an empty `queries` array falls back to the
+existing not-found behaviour, the same as before this feature existed.
+
+Motivating owner transcript: after a lesson about the fastest animal and
+Usain Bolt, the student asked "How fast am I?" then "But what about me
+personally?" -- no library search can ever answer a question about the
+student's own speed, so the tutor kept re-running the same Usain Bolt
+search instead of just answering conversationally.
+
+### Cache-safe tool schema (2026-09-21)
+
+Live measurement while building this feature found a second,
+independent bug: the forced round used to send a narrower
+`FORCED_RESEARCH_TOOL` schema while the answer round sent the full
+`TOOLS` list. llama-server renders the `tools` block near the top of the
+prompt, so the two calls had different prefixes and the whole lesson had
+to be re-read from scratch on every single call -- with no partial reuse
+after the divergence for a hybrid/recurrent model. Fixed by unifying into
+one `research` schema (see `tutor/tools/schemas.py`) sent byte-identical
+on every call in a turn; `FORCED_RESEARCH_TOOL` is now just an alias.
+Live-verified on Ling 3.0 Tiny: `cached_tokens` now grows monotonically
+call-over-call within a lesson instead of resetting.
+
+### Live smoke (`data/ling_skip_smoke.py`, real llama-server on `:8080`,
+Ling 3.0 Tiny, `config/dev.ling.toml`, 1 rep, after the cache fix)
+
+| Turn | Student text | `needs_search` | `queries` | evidence | Answer (first sentence) |
+|---|---|---|---|---|---|
+| 1 | What's the fastest animal? | true | What is the fastest animal | strong | The fastest animal is the peregrine falcon. |
+| 2 | What about humans though? | *(none -- fell back to old not-found path)* | *(empty)* | empty | The fastest animal overall is the peregrine falcon... (from memory, correctly hedged) |
+| 3 | How fast am I? | true | Human sprinting speed | strong | I can't look up your exact top speed from the library, but here's what I know... |
+| 4 | But what about me personally? | *(none)* | *(empty)* | empty | I can't look up your personal running speed from the library... |
+| 5 | lol ok thanks | *(none)* | *(empty)* | empty | You're welcome! |
+| 6 | Why is the falcon so fast? | true | Why is peregrine falcon fast; Peregrine falcon speed anatomy | strong | The peregrine falcon is so fast because of its body shape, wings, and hunting technique. |
+
+Per-call cache reuse for turns 2 and 5 (`prompt_n` = new tokens this
+call actually had to read; `cached_tokens` = running total reused from
+the KV cache):
+
+- Turn 2: `prompt_n` 361, 135, 140 across the turn's 3 LLM calls;
+  `cached_tokens` 2582 -> 2971 -> 3102 (monotonic, no reset).
+- Turn 5: `prompt_n` 359, 134, 140; `cached_tokens` 5402 -> 5789 -> 5919.
+
+**Measured**: the cache fix works -- confirmed live, `cached_tokens`
+never resets across calls within or between these turns, and each
+call's `prompt_n` stays small (roughly the new message/evidence, not the
+whole lesson). The `needs_search`/`skip` mechanism itself also works
+end-to-end when the model actually sets `needs_search: false` (turn 5 in
+an earlier rep, before this table's rep, produced `evidence_level_after
+== "skipped"` and a clean "You're welcome!" with zero extra search
+calls -- see `data/ling_skip_smoke.json` history).
+
+**Not verified / negative result**: Ling 3.0 Tiny's `needs_search`
+decision is inconsistent rep-to-rep -- in the rep shown above it never
+set `needs_search: false` at all (it instead searched with no usable
+queries, which the existing weak-evidence fallback already handles
+gracefully, so the user-facing answers were still fine); in another rep
+turns 3-5 all skipped correctly, and in an intermediate wording
+experiment the model over-corrected and skipped every turn including
+"Why is the falcon so fast?" (a real new factual question). The note
+wording was adjusted once (added a literal "How fast am I?" example) and
+reverted after that over-correction; per the task's stopping rule ("adjust
+the note wording at most twice, then report as-is") this is reported
+as-is rather than tuned further. A smaller/more literal model like this
+one may need either a stronger example set or a different mechanism
+(e.g. a lightweight classifier) to make `needs_search` reliable; the
+host-side mechanics (schema, skip path, evidence threading, UI) are
+solid regardless of how well the model uses them.
