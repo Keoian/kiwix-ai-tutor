@@ -1,5 +1,6 @@
-"""Tests for ``app.model_writes_search`` (default False) -- see
-docs/rewrite_on_weak_evidence.md, "Model writes every search": the model
+"""Tests for ``app.model_writes_search`` (default True, adopted -- see
+docs/model_writes_search_measure.md and docs/rewrite_on_weak_evidence.md,
+"Model writes every search": the model
 crafts the library search on EVERY turn, including turn 1, using
 short/title-like queries rather than the raw student text or a
 full-sentence rewrite. Mirrors tests/test_agent_loop_followup.py's
@@ -145,9 +146,11 @@ def _strong_response(n: int, title: str = "Titin") -> _Response:
     )
 
 
-def test_off_by_default_reproduces_old_bytes_on_turn_one():
-    """``model_writes_search`` defaults to False -- turn 1 with strong raw
-    evidence never fires a forced round (old, byte-identical behaviour)."""
+def test_off_reproduces_old_bytes_on_turn_one():
+    """``model_writes_search=False`` -- turn 1 with strong raw evidence
+    never fires a forced round (old, byte-identical behaviour). Default
+    is now True (docs/model_writes_search_measure.md "Decision"), so this
+    test passes the flag explicitly rather than relying on the default."""
     session, budget = _mk_session()
     llm = FakeLlmClient([_final("Titin is the largest protein [S1].")])
     research = ScriptedResearchEngine([_strong_response(1)])
@@ -165,6 +168,7 @@ def test_off_by_default_reproduces_old_bytes_on_turn_one():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        model_writes_search=False,
     )
 
     assert result.status == "ok"

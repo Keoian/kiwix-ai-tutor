@@ -211,7 +211,8 @@ def test_lesson1_pre_retrieve_happens_before_model_is_called():
         calc=calc,
         budget=_budget(),
         emit=events.append,
-    )
+
+        model_writes_search=False,)
 
     assert research.call_count == 1
     assert llm.call_count == 1
@@ -244,7 +245,8 @@ def test_lesson1_pre_retrieve_emits_a_tool_event_before_the_first_model_call():
         calc=calc,
         budget=_budget(),
         emit=events.append,
-    )
+
+        model_writes_search=False,)
 
     kinds = [
         (e.get("kind"), e.get("name")) if isinstance(e, dict) else (e.kind, None)
@@ -266,7 +268,8 @@ def test_lesson1_evidence_appended_before_first_model_call():
         calc=calc,
         budget=_budget(),
         emit=lambda e: None,
-    )
+
+        model_writes_search=False,)
 
     # The first (and only) model call's message log must already contain
     # the pre-retrieved evidence somewhere.
@@ -298,7 +301,8 @@ def test_lesson2_single_followup_research_is_call_two_of_two():
         calc=calc,
         budget=_budget(),
         emit=lambda e: None,
-    )
+
+        model_writes_search=False,)
 
     assert research.call_count == 2
     assert llm.call_count == 2
@@ -331,7 +335,8 @@ def test_lesson3_third_research_request_is_cap_reached_not_executed():
         calc=calc,
         budget=_budget(),
         emit=lambda e: None,
-    )
+
+        model_writes_search=False,)
 
     # Pre-retrieve (1) + one follow-up (2) = cap; the second follow-up must
     # NOT reach the real research engine a third time.
@@ -366,7 +371,8 @@ def test_lesson4_action_never_retrieves_and_routes_as_action(action):
         calc=calc,
         budget=_budget(),
         emit=lambda e: None,
-    )
+
+        model_writes_search=False,)
 
     if action == "research_this":
         # research_this is explicitly an explicit-lookup action per spec
@@ -392,7 +398,8 @@ def test_lesson4_simpler_action_route_is_exactly_action():
         calc=calc,
         budget=_budget(),
         emit=lambda e: None,
-    )
+
+        model_writes_search=False,)
 
     assert research.call_count == 0
     assert result.route == "action"
@@ -422,7 +429,8 @@ def test_lesson5_calc_tool_called_and_result_in_answer():
         calc=calc,
         budget=_budget(),
         emit=lambda e: None,
-    )
+
+        model_writes_search=False,)
 
     assert calc.call_count == 1
     assert result.calc_calls == 1
@@ -456,7 +464,8 @@ def test_assistant_tool_call_message_uses_openai_wire_format():
         calc=calc,
         budget=_budget(),
         emit=lambda e: None,
-    )
+
+        model_writes_search=False,)
 
     # llm.calls[1] is the messages list passed to the SECOND stream_chat
     # call, i.e. after the assistant's tool-call turn was appended.
@@ -492,7 +501,8 @@ def test_lesson5_calc_calls_do_not_count_toward_research_cap():
         calc=calc,
         budget=_budget(),
         emit=lambda e: None,
-    )
+
+        model_writes_search=False,)
 
     assert calc.call_count == 1
     # pre-retrieve (1) + the one research follow-up (2) still fits the cap.
@@ -515,7 +525,8 @@ def test_lesson5_fifth_calc_call_in_same_turn_hits_cap():
         calc=calc,
         budget=_budget(),
         emit=lambda e: None,
-    )
+
+        model_writes_search=False,)
 
     # Only 4 of the 5 requested calc calls reach the real sandboxed calc.
     assert calc.call_count == 4
@@ -553,7 +564,8 @@ def test_lesson6_invalid_json_arguments_not_executed_validation_error_returned()
         calc=calc,
         budget=_budget(),
         emit=lambda e: None,
-    )
+
+        model_writes_search=False,)
 
     assert calc.call_count == 0
     assert result.status == "ok"
@@ -583,7 +595,8 @@ def test_lesson6_unknown_tool_name_not_executed_validation_error_returned():
         calc=calc,
         budget=_budget(),
         emit=lambda e: None,
-    )
+
+        model_writes_search=False,)
 
     assert calc.call_count == 0
     assert research.call_count == 1  # only the pre-retrieve; tool itself never ran
@@ -614,7 +627,8 @@ def test_lesson6_schema_violation_extra_field_not_executed():
         calc=calc,
         budget=_budget(),
         emit=lambda e: None,
-    )
+
+        model_writes_search=False,)
 
     assert calc.call_count == 0
     assert result.status == "ok"
@@ -637,7 +651,8 @@ def test_lesson6_prose_that_looks_like_a_tool_call_is_never_parsed_or_executed()
         calc=calc,
         budget=_budget(),
         emit=lambda e: None,
-    )
+
+        model_writes_search=False,)
 
     assert calc.call_count == 0
     assert research.call_count == 1  # only the ordinary pre-retrieve
@@ -663,7 +678,8 @@ def test_llm_error_event_yields_error_status_no_exception():
         calc=calc,
         budget=_budget(),
         emit=lambda e: None,
-    )
+
+        model_writes_search=False,)
 
     assert result.status == "error"
     assert isinstance(result.answer_text, str)
@@ -686,7 +702,8 @@ def test_cancel_event_yields_cancelled_status():
         budget=_budget(),
         emit=lambda e: None,
         cancel=cancel,
-    )
+
+        model_writes_search=False,)
 
     assert result.status == "cancelled"
 
@@ -710,7 +727,8 @@ def test_emitted_events_include_token_deltas_tool_activity_and_citations():
         calc=calc,
         budget=_budget(),
         emit=events.append,
-    )
+
+        model_writes_search=False,)
 
     kinds = [
         getattr(e, "kind", None) or (e.get("kind") if isinstance(e, dict) else None)
@@ -733,7 +751,8 @@ def test_turn_result_logs_route_calc_calls_research_calls_and_cached_tokens():
         calc=calc,
         budget=_budget(),
         emit=lambda e: None,
-    )
+
+        model_writes_search=False,)
 
     assert hasattr(result, "route")
     assert hasattr(result, "calc_calls")
@@ -774,7 +793,8 @@ def test_researched_passages_are_retained_on_the_session_for_citation_resolution
         calc=calc,
         budget=_budget(),
         emit=lambda e: None,
-    )
+
+        model_writes_search=False,)
 
     assert session.retained, "expected the pre-retrieved passages to be retained"
     assert any(p.get("label") == "S1" for p in session.retained)
@@ -811,7 +831,8 @@ def test_every_stream_chat_call_passes_budget_generation_as_max_tokens():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
-    )
+
+        model_writes_search=False,)
 
     assert len(llm.max_tokens_calls) == 2
     assert all(mt == budget.generation for mt in llm.max_tokens_calls)
@@ -832,7 +853,8 @@ def test_finish_reason_length_is_reported_as_max_tokens_truncation():
         calc=calc,
         budget=_budget(),
         emit=lambda e: None,
-    )
+
+        model_writes_search=False,)
 
     assert result.status == "ok"
     assert result.truncated == "max_tokens"
@@ -856,7 +878,8 @@ def test_repetition_loop_stops_generation_and_trims_to_first_occurrence():
         calc=calc,
         budget=_budget(),
         emit=lambda e: None,
-    )
+
+        model_writes_search=False,)
 
     assert result.status == "ok"
     assert result.truncated == "repetition"
@@ -908,7 +931,8 @@ def test_repetition_guard_sets_a_cancel_event_the_fake_llm_can_observe():
         calc=calc,
         budget=_budget(),
         emit=lambda e: None,
-    )
+
+        model_writes_search=False,)
 
     assert llm.stopped_early
     assert result.status == "ok"
@@ -937,6 +961,7 @@ def test_a_real_user_cancel_mid_repetition_is_still_reported_as_cancelled():
         budget=_budget(),
         emit=lambda e: None,
         cancel=cancel,
-    )
+
+        model_writes_search=False,)
 
     assert result.status == "cancelled"

@@ -104,7 +104,7 @@ def _run(session, budget, llm, research, text, **kwargs):
         emit=lambda e: None,
         rewrite_on_followup=False,
         rewrite_on_weak_evidence=False,
-        **kwargs,
+        **{"model_writes_search": False, **kwargs},
     )
 
 

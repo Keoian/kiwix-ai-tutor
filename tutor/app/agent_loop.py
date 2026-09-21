@@ -218,7 +218,8 @@ _FOLLOWUP_HOST_NOTE = (
     "it is a yes/no question), then explain.]"
 )
 
-# Host note for ``app.model_writes_search`` (default False; see
+# Host note for ``app.model_writes_search`` (default True, adopted --
+# see docs/model_writes_search_measure.md; originally see
 # docs/rewrite_on_weak_evidence.md, "Model writes every search"): fires on
 # EVERY turn, including turn 1, replacing both the weak-evidence rewrite
 # and the follow-up rewrite for that turn. Root cause this targets: the
@@ -872,7 +873,7 @@ def run_turn(
     concise_followup_note: bool = False,
     restate_question_last: bool = True,
     restate_question_instruction: bool = False,
-    model_writes_search: bool = False,
+    model_writes_search: bool = True,
 ) -> TurnResult:
     research_calls = 0
     calc_calls = 0

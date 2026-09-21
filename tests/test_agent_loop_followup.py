@@ -185,6 +185,7 @@ def test_followup_fires_on_second_turn_even_with_strong_raw_evidence():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        model_writes_search=False,
     )
 
     result = run_turn(
@@ -195,6 +196,7 @@ def test_followup_fires_on_second_turn_even_with_strong_raw_evidence():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        model_writes_search=False,
     )
 
     assert result.status == "ok"
@@ -232,6 +234,7 @@ def test_followup_never_fires_on_first_turn():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        model_writes_search=False,
     )
 
     assert result.status == "ok"
@@ -261,6 +264,7 @@ def test_setting_off_disables_followup_rewrite_on_second_turn():
         budget=budget,
         emit=lambda e: None,
         rewrite_on_followup=False,
+        model_writes_search=False,
     )
 
     result = run_turn(
@@ -272,6 +276,7 @@ def test_setting_off_disables_followup_rewrite_on_second_turn():
         budget=budget,
         emit=lambda e: None,
         rewrite_on_followup=False,
+        model_writes_search=False,
     )
 
     assert result.status == "ok"
@@ -317,6 +322,7 @@ def test_followup_forced_round_pastes_pointer_for_held_passage():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        model_writes_search=False,
     )
     run_turn(
         session,
@@ -326,6 +332,7 @@ def test_followup_forced_round_pastes_pointer_for_held_passage():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        model_writes_search=False,
     )
 
     assert "pid-1" in session.log.held_ids()
@@ -349,6 +356,7 @@ def test_followup_forced_round_pastes_pointer_for_held_passage():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        model_writes_search=False,
     )
 
     rendered = session.log.render()
@@ -394,6 +402,7 @@ def test_followup_forced_round_off_setting_pastes_full_text_every_time():
         budget=budget,
         emit=lambda e: None,
         reuse_prior_passages=False,
+        model_writes_search=False,
     )
     run_turn(
         session,
@@ -404,6 +413,7 @@ def test_followup_forced_round_off_setting_pastes_full_text_every_time():
         budget=budget,
         emit=lambda e: None,
         reuse_prior_passages=False,
+        model_writes_search=False,
     )
 
     rendered = session.log.render()
@@ -451,6 +461,7 @@ def test_no_passage_pasted_twice_in_full_within_one_followup_turn():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        model_writes_search=False,
     )
     run_turn(
         session,
@@ -460,6 +471,7 @@ def test_no_passage_pasted_twice_in_full_within_one_followup_turn():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        model_writes_search=False,
     )
 
     rendered = session.log.render()
@@ -503,6 +515,7 @@ def test_concise_followup_note_default_is_off_uses_plain_directness_note():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        model_writes_search=False,
     )
     run_turn(
         session,
@@ -512,6 +525,7 @@ def test_concise_followup_note_default_is_off_uses_plain_directness_note():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        model_writes_search=False,
     )
 
     rendered = session.log.render()
@@ -551,6 +565,7 @@ def test_concise_followup_note_true_opts_into_stronger_wording():
         budget=budget,
         emit=lambda e: None,
         concise_followup_note=True,
+        model_writes_search=False,
     )
     run_turn(
         session,
@@ -561,6 +576,7 @@ def test_concise_followup_note_true_opts_into_stronger_wording():
         budget=budget,
         emit=lambda e: None,
         concise_followup_note=True,
+        model_writes_search=False,
     )
 
     rendered = session.log.render()
@@ -596,6 +612,7 @@ def test_restate_question_last_off_reproduces_plain_bytes():
         budget=budget,
         emit=lambda e: None,
         restate_question_last=False,
+        model_writes_search=False,
     )
     run_turn(
         session,
@@ -606,6 +623,7 @@ def test_restate_question_last_off_reproduces_plain_bytes():
         budget=budget,
         emit=lambda e: None,
         restate_question_last=False,
+        model_writes_search=False,
     )
 
     rendered = session.log.render()
@@ -641,6 +659,7 @@ def test_restate_question_last_r1_lands_on_followup_turn_only():
         budget=budget,
         emit=lambda e: None,
         restate_question_last=True,
+        model_writes_search=False,
     )
     run_turn(
         session,
@@ -651,6 +670,7 @@ def test_restate_question_last_r1_lands_on_followup_turn_only():
         budget=budget,
         emit=lambda e: None,
         restate_question_last=True,
+        model_writes_search=False,
     )
 
     rendered = session.log.render()
@@ -694,6 +714,7 @@ def test_restate_question_r2_adds_instruction_sentence():
         emit=lambda e: None,
         restate_question_last=True,
         restate_question_instruction=True,
+        model_writes_search=False,
     )
     run_turn(
         session,
@@ -705,6 +726,7 @@ def test_restate_question_r2_adds_instruction_sentence():
         emit=lambda e: None,
         restate_question_last=True,
         restate_question_instruction=True,
+        model_writes_search=False,
     )
 
     rendered = session.log.render()
@@ -771,6 +793,7 @@ def test_forced_rewrite_round_labels_are_unique_and_sequential():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        model_writes_search=False,
     )
     run_turn(
         session,
@@ -780,6 +803,7 @@ def test_forced_rewrite_round_labels_are_unique_and_sequential():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        model_writes_search=False,
     )
 
     rendered = session.log.render()

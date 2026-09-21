@@ -89,9 +89,11 @@ def test_app_table_defaults_when_missing(tmp_path):
     # off by default.
     assert cfg.app.restate_question_last is True
     assert cfg.app.restate_question_instruction is False
-    # docs/rewrite_on_weak_evidence.md, "Model writes every search": not
-    # yet measured against a live model, so default is False.
-    assert cfg.app.model_writes_search is False
+    # docs/model_writes_search_measure.md "Decision": ON clearly beat OFF
+    # on gold_in_evidence and correctness for L1-L5 (superlative) turn 1,
+    # did not hurt the L6/L7 controls, mean added wall time ~1.7s/turn --
+    # adopted, default is True.
+    assert cfg.app.model_writes_search is True
 
 
 def test_app_table_model_writes_search_is_configurable(tmp_path):
@@ -99,13 +101,13 @@ def test_app_table_model_writes_search_is_configurable(tmp_path):
     config_dir.mkdir()
     text = _BASE + """
 [app]
-model_writes_search = true
+model_writes_search = false
 """
     config_path = _write_toml(config_dir / "dev.toml", text)
 
     cfg = load_config(config_path)
 
-    assert cfg.app.model_writes_search is True
+    assert cfg.app.model_writes_search is False
 
 
 def test_app_table_restate_question_settings_are_configurable(tmp_path):

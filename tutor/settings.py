@@ -173,7 +173,7 @@ class AppConfig:
     still selectable (``True``) for further experimentation, but
     **default is False**: reproduces the plain, pre-existing
     ``_FOLLOWUP_DIRECTNESS_NOTE`` wording byte-for-byte."""
-    model_writes_search: bool = False
+    model_writes_search: bool = True
     """Force a model-written ``research`` tool call BEFORE answering on
     EVERY turn, including turn 1, rather than only on weak evidence
     (``rewrite_on_weak_evidence``) or turn >= 2 (``rewrite_on_followup``,
@@ -388,7 +388,7 @@ def load_config(path: Path) -> Config:
         concise_followup_note=_app_bool("concise_followup_note", False),
         restate_question_last=_app_bool("restate_question_last", True),
         restate_question_instruction=_app_bool("restate_question_instruction", False),
-        model_writes_search=_app_bool("model_writes_search", False),
+        model_writes_search=_app_bool("model_writes_search", True),
     )
 
     # [embedding] is optional, like [app]; when present every key is

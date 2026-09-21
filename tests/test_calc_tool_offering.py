@@ -62,6 +62,7 @@ def _run(user_text: str, answer_text: str) -> _CapturingLlmClient:
         calc=calc,
         budget=_budget(),
         emit=lambda evt: None,
+        model_writes_search=False,
     )
     return llm
 

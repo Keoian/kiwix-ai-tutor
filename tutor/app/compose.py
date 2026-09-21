@@ -306,7 +306,7 @@ def _make_turn_runner(
     concise_followup_note: bool = False,
     restate_question_last: bool = True,
     restate_question_instruction: bool = False,
-    model_writes_search: bool = False,
+    model_writes_search: bool = True,
 ):
     from tutor.app.agent_loop import run_turn
 
@@ -698,7 +698,7 @@ def build_deps(cfg: Any, *, llm: Any = None, research_engine: Any = None) -> App
         concise_followup_note=getattr(cfg.app, "concise_followup_note", False),
         restate_question_last=getattr(cfg.app, "restate_question_last", True),
         restate_question_instruction=getattr(cfg.app, "restate_question_instruction", False),
-        model_writes_search=getattr(cfg.app, "model_writes_search", False),
+        model_writes_search=getattr(cfg.app, "model_writes_search", True),
     )
     status_provider = _make_status_provider(
         llm=llm,

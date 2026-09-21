@@ -58,6 +58,11 @@ def _cfg_with_unreachable_llm_and_missing_archives(tmp_path: Path):
         cfg.app,
         data_dir=(tmp_path / "data").resolve(),
         registry_path=_write_registry(tmp_path).resolve(),
+        # This module's fake LLMs script exactly the token/done events
+        # each test needs and are never set up to answer a forced
+        # tool-call round, so keep the (now-True) model_writes_search
+        # default off here -- unrelated to what these tests check.
+        model_writes_search=False,
     )
     return dataclasses.replace(cfg, server=server, app=app_cfg)
 

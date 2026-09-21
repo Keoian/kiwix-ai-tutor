@@ -163,6 +163,7 @@ def test_weak_evidence_forces_research_tool_choice_and_rewrites():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        model_writes_search=False,
     )
 
     assert result.status == "ok"
@@ -212,6 +213,7 @@ def test_still_weak_after_rewrite_gets_not_found_instruction():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        model_writes_search=False,
     )
 
     assert result.status == "ok"
@@ -244,6 +246,7 @@ def test_tool_choice_rejected_falls_back_to_json_schema():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        model_writes_search=False,
     )
 
     assert result.status == "ok"
@@ -267,6 +270,7 @@ def test_strong_evidence_never_triggers_rewrite():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        model_writes_search=False,
     )
 
     assert result.status == "ok"
@@ -291,6 +295,7 @@ def test_action_route_never_rewrites():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        model_writes_search=False,
     )
 
     assert result.status == "ok"
@@ -317,6 +322,7 @@ def test_setting_off_is_byte_identical_to_no_rewrite_support():
         budget=budget,
         emit=lambda e: None,
         rewrite_on_weak_evidence=False,
+        model_writes_search=False,
     )
 
     assert result.status == "ok"
@@ -353,6 +359,7 @@ def test_rewritten_evidence_is_evictable_and_prefix_stable():
         budget=budget,
         emit=lambda e: None,
         rewrite_on_followup=False,
+        model_writes_search=False,
     )
     turn1_final_prompt = serialize_messages(llm.calls[-1] + [
         {"role": "assistant", "content": "The solar system has eight planets [S1]."}
@@ -367,6 +374,7 @@ def test_rewritten_evidence_is_evictable_and_prefix_stable():
         budget=budget,
         emit=lambda e: None,
         rewrite_on_followup=False,
+        model_writes_search=False,
     )
     turn2_first_prompt = serialize_messages(llm.calls[-1])
 

@@ -128,6 +128,7 @@ def test_run_turn_log_order_user_evidence_assistant():
         budget=budget,
         emit=lambda e: None,
         rewrite_on_followup=False,
+        model_writes_search=False,
     )
 
     rendered = session.log.render()
@@ -153,6 +154,7 @@ def test_turn_two_messages_start_with_turn_one_messages_byte_for_byte_when_no_ev
         budget=budget,
         emit=lambda e: None,
         rewrite_on_followup=False,
+        model_writes_search=False,
     )
     call1_messages = llm.calls[0]
 
@@ -165,6 +167,7 @@ def test_turn_two_messages_start_with_turn_one_messages_byte_for_byte_when_no_ev
         budget=budget,
         emit=lambda e: None,
         rewrite_on_followup=False,
+        model_writes_search=False,
     )
     call2_messages = llm.calls[1]
 
@@ -191,7 +194,8 @@ def test_small_ceiling_forces_eviction_before_model_call_and_reports_event():
             budget=budget,
             emit=lambda e: None,
         rewrite_on_followup=False,
-        )
+        model_writes_search=False,
+    )
         assert result.status == "ok"
         if result.events:
             saw_eviction = True
@@ -222,7 +226,8 @@ def test_evicted_evidence_still_cited_is_protected_in_next_model_call():
             budget=budget,
             emit=lambda e: None,
         rewrite_on_followup=False,
-        )
+        model_writes_search=False,
+    )
 
     rendered = session.log.render()
     cited_labels = set()
@@ -269,6 +274,7 @@ def test_evidence_not_resent_duplicate_across_turns_when_same_passage():
         budget=budget,
         emit=lambda e: None,
         rewrite_on_followup=False,
+        model_writes_search=False,
     )
     run_turn(
         session,
@@ -279,6 +285,7 @@ def test_evidence_not_resent_duplicate_across_turns_when_same_passage():
         budget=budget,
         emit=lambda e: None,
         rewrite_on_followup=False,
+        model_writes_search=False,
     )
 
     full_text = json.dumps(session.log.render())
@@ -303,6 +310,7 @@ def test_action_appends_user_entry_and_no_evidence():
         budget=budget,
         emit=lambda e: None,
         rewrite_on_followup=False,
+        model_writes_search=False,
     )
 
     assert research.calls == 0
@@ -351,6 +359,7 @@ def test_oversized_newest_packet_is_trimmed_not_crashed():
         budget=budget,
         emit=lambda e: None,
         rewrite_on_followup=False,
+        model_writes_search=False,
     )
 
     assert result.status == "ok"
@@ -376,7 +385,8 @@ def test_turn_logger_receives_eviction_events(tmp_path):
             budget=budget,
             emit=lambda e: None,
         rewrite_on_followup=False,
-        )
+        model_writes_search=False,
+    )
         logger.log_turn(
             lesson_id="lesson-1",
             route=result.route,
