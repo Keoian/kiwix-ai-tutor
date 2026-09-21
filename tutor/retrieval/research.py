@@ -51,6 +51,7 @@ from tutor.retrieval.hybrid.ranking import (
     apply_title_boost,
 )
 from tutor.retrieval.hybrid.rrf import rrf_fuse
+from tutor.retrieval.morph import morph_variants
 from tutor.retrieval.registry import ArchiveEntry, Registry, RegistryError
 from tutor.retrieval.snapshots import SnapshotStore
 from tutor.retrieval.zim.archive import fingerprint as fingerprint_archive
@@ -185,6 +186,29 @@ _MAX_COMPOUND_TERMS = 2
 # term -- looser than the spelling fallback's strict-zero
 # ``_SPELL_ZERO_MATCH_CEILING`` so this case is still tried for a split.
 _COMPOUND_NEAR_ZERO_CEILING = 5
+
+# Morphological-variant fallback (stemming-free lexical engine, see
+# tutor/retrieval/morph.py): a content term whose exact form is absent from
+# the corpus but a morphological relative of it is present (plural/
+# singular, -ing, -ed, -er, -ion/-tion/-ation, -ment, -ly, both directions)
+# -- e.g. "garden" query vs. "Square foot gardening" title, "erupt" vs.
+# "eruption", "freeze" vs. "freezing", "dinosaur" vs. "dinosaurs". Only
+# engages when this archive's first pass already looks weak/empty (same
+# gating style as the spelling/compound fallbacks above) so it never
+# perturbs an already-strong result. A candidate variant must clear this
+# many corpus-wide estimated_matches to be used -- low enough to admit a
+# real but less-common inflected form, high enough that pure index noise
+# (a stray one-off occurrence) is not mistaken for a real word.
+_MORPH_MATCH_FLOOR = 3
+_MAX_MORPH_TERMS = 3
+_MAX_MORPH_EXTRA_QUERIES = 3
+# The joined all-terms AND query is treated as "~zero estimated matches"
+# (and therefore a trigger for morph expansion even when some other
+# fallback already produced a handful of hits) at or below this count.
+_MORPH_AND_QUERY_ZERO_CEILING = 0
+# Set to "0" to force this fallback off entirely (default on), matching the
+# existing spelling/compound fallbacks' own toggles.
+_MORPH_VARIANTS_ENABLED = os.environ.get("TUTOR_RETRIEVAL_MORPH_VARIANTS", "1") != "0"
 
 # Reuse plan §7.2 "Dense article top 16": the dense sidecar's own
 # candidate list, fused at article level with the lexical/title rankings
@@ -666,6 +690,13 @@ class ResearchResponse:
     dense_used: bool = False
     dense_note: str | None = None
     corrected_terms: dict[str, str] = field(default_factory=dict)
+    # Morphological-variant fallback (tutor/retrieval/morph.py): additive
+    # record of which morphological variant(s) actually widened the search
+    # for a given original content term, e.g. {"garden": ["gardening"]} --
+    # only ever populated when the expansion ran AND surfaced at least one
+    # variant with real corpus-wide matches; empty otherwise (including
+    # when the toggle is off or the first pass was already strong).
+    expanded_terms: dict[str, list[str]] = field(default_factory=dict)
     # Baseline v13 (docs/retrieval_baseline.md "Baseline v13"): additive
     # evidence-strength signal (see tutor.retrieval.assessment) for the app
     # layer to branch on later (weak/empty -> ask the model to rewrite the
@@ -684,6 +715,7 @@ class ResearchResponse:
             "dense_used": self.dense_used,
             "dense_note": self.dense_note,
             "corrected_terms": self.corrected_terms,
+            "expanded_terms": self.expanded_terms,
             "assessment": self.assessment.to_dict() if self.assessment is not None else None,
         }
 
@@ -1271,6 +1303,90 @@ class ResearchEngine:
 
         return corrections, match_counts
 
+    def _cached_batch_matches(
+        self,
+        entry: ArchiveEntry,
+        worker: Any,
+        queries: list[str],
+        *,
+        deadline_s: float,
+        memo: dict[tuple[Any, ...], dict[str, Any]] | None,
+    ) -> dict[str, int]:
+        """Like :func:`_batch_estimated_matches`, but also consults/updates
+        this engine's persistent per-(archive, term) IDF cache
+        (``self._idf_cache`` -- see :meth:`_term_matches`), so a query
+        string already looked up on an earlier request (not just earlier
+        this same request, which the per-request ``memo`` already covers)
+        never re-hits the worker.
+        """
+        uniq = list(dict.fromkeys(queries))
+        if not uniq:
+            return {}
+        out: dict[str, int] = {}
+        to_fetch: list[str] = []
+        for q in uniq:
+            cache_key = (self._fingerprint_digest(entry), q)
+            cached = self._idf_cache.get(cache_key)
+            if cached is not None:
+                self._idf_cache.move_to_end(cache_key)
+                out[q] = cached
+            else:
+                to_fetch.append(q)
+        if to_fetch and deadline_s > 0:
+            fetched = self._batch_estimated_matches(
+                worker, to_fetch, deadline_s=deadline_s, memo=memo
+            )
+            for q, matches in fetched.items():
+                out[q] = matches
+                cache_key = (self._fingerprint_digest(entry), q)
+                self._idf_cache[cache_key] = matches
+                self._idf_cache.move_to_end(cache_key)
+                while len(self._idf_cache) > _IDF_CACHE_MAXSIZE:
+                    self._idf_cache.popitem(last=False)
+        else:
+            for q in to_fetch:
+                out[q] = 0
+        return out
+
+    def _expand_morph_variants(
+        self,
+        entry: ArchiveEntry,
+        worker: Any,
+        content_terms: list[str],
+        *,
+        deadline_s: float,
+        memo: dict[tuple[Any, ...], dict[str, Any]] | None,
+    ) -> tuple[dict[str, list[str]], dict[str, str]]:
+        """Rule 2: morphological-variant expansion for a weak/empty first
+        pass. ``content_terms`` should already be spelling/compound
+        corrected (the caller passes the post-correction token list).
+
+        Returns ``(expanded_terms, best_variant_by_term)`` where
+        ``expanded_terms`` maps each original term to the qualifying
+        variants found for it (``ResearchResponse.expanded_terms``, e.g.
+        ``{"garden": ["gardening"]}``) and ``best_variant_by_term`` maps
+        each term to its single highest-``estimated_matches`` variant, for
+        building substitution queries. A term with no qualifying variant
+        (see ``_MORPH_MATCH_FLOOR``) is omitted from both.
+        """
+        terms = content_terms[:_MAX_MORPH_TERMS]
+        variants_by_term = {t: morph_variants(t) for t in terms}
+        all_variants = sorted({v for vs in variants_by_term.values() for v in vs})
+        if not all_variants or deadline_s <= 0:
+            return {}, {}
+        counts = self._cached_batch_matches(
+            entry, worker, all_variants, deadline_s=deadline_s, memo=memo
+        )
+        expanded_terms: dict[str, list[str]] = {}
+        best_variant: dict[str, str] = {}
+        for term, variants in variants_by_term.items():
+            qualifying = [v for v in variants if counts.get(v, 0) >= _MORPH_MATCH_FLOOR]
+            if not qualifying:
+                continue
+            expanded_terms[term] = qualifying
+            best_variant[term] = max(qualifying, key=lambda v: counts.get(v, 0))
+        return expanded_terms, best_variant
+
     def _process_archive(
         self,
         entry: ArchiveEntry,
@@ -1281,6 +1397,7 @@ class ResearchEngine:
         query_vec: Sequence[float] | None = None,
         memo: dict[tuple[Any, ...], dict[str, Any]] | None = None,
         corrected_terms_out: dict[str, str] | None = None,
+        expanded_terms_out: dict[str, list[str]] | None = None,
     ) -> tuple[list[dict[str, Any]], bool, str | None, list[dict[str, Any]]]:
         worker = self._get_worker(entry)
         timed_out = False
@@ -1755,6 +1872,104 @@ class ResearchEngine:
             # fallback hits -- never force-inserted ahead of it.
             title_hits = _dedupe_by_path([*entity_title_hits, *title_hits])
             fulltext_hits = _dedupe_by_path([*entity_fulltext_hits, *fulltext_hits])
+        # Rule 2 (morphological-variant fallback, see tutor/retrieval/
+        # morph.py): only tried when this archive's first pass already
+        # looks weak/empty -- no fulltext/title hits at all, or the joined
+        # all-terms AND query has ~zero corpus-wide estimated matches --
+        # never on an otherwise-strong result (same gating philosophy as
+        # the spelling/compound fallbacks above, which have already run by
+        # this point and may have changed ``tokens``' effective terms via
+        # ``correction_terms``/``term_matches``).
+        if _MORPH_VARIANTS_ENABLED and tokens and remaining() > 0:
+            and_query_matches = self._cached_batch_matches(
+                entry, worker, [search_query], deadline_s=_op_deadline(), memo=memo
+            ).get(search_query, 0)
+            morph_weak = (not fulltext_hits and not title_hits) or (
+                and_query_matches <= _MORPH_AND_QUERY_ZERO_CEILING
+            )
+            if morph_weak and remaining() > 0:
+                content_terms = [
+                    t
+                    for t in dict.fromkeys(tokens)
+                    if len(t) > 2 and t not in correction_terms
+                ]
+                expanded_terms, best_variant = self._expand_morph_variants(
+                    entry, worker, content_terms, deadline_s=_op_deadline(), memo=memo
+                )
+                if expanded_terms and expanded_terms_out is not None:
+                    for term, variants in expanded_terms.items():
+                        expanded_terms_out.setdefault(term, [])
+                        for v in variants:
+                            if v not in expanded_terms_out[term]:
+                                expanded_terms_out[term].append(v)
+                if best_variant and remaining() > 0:
+                    # Up to _MAX_MORPH_EXTRA_QUERIES extra queries: the full
+                    # query with every substitutable term swapped for its
+                    # best variant, plus (space permitting) single-term
+                    # substitutions -- the title search gets the same
+                    # substituted forms. Fused into the existing hit lists
+                    # via reciprocal-rank fusion rather than a force-merge,
+                    # so a morph-only article competes on the same footing
+                    # as the original hits instead of automatically
+                    # outranking them.
+                    full_subst_tokens = [best_variant.get(t, t) for t in tokens]
+                    extra_queries = [" ".join(full_subst_tokens)]
+                    for term, variant in best_variant.items():
+                        if len(extra_queries) >= _MAX_MORPH_EXTRA_QUERIES:
+                            break
+                        subst_query = " ".join(
+                            variant if t == term else t for t in tokens
+                        )
+                        if subst_query not in extra_queries:
+                            extra_queries.append(subst_query)
+                    extra_queries = extra_queries[:_MAX_MORPH_EXTRA_QUERIES]
+                    morph_ops: list[tuple[str, dict[str, Any]]] = []
+                    for q in extra_queries:
+                        morph_ops.append(
+                            ("search_fulltext", _fulltext_kwargs(q, _FULLTEXT_LIMIT))
+                        )
+                        morph_ops.append(("search_titles", {"query": q, "limit": _TITLE_LIMIT}))
+                    morph_res = _call_worker_multi(
+                        worker, morph_ops, deadline_s=_op_deadline(), memo=memo
+                    )
+                    if morph_res is not None and morph_res.status in ("ok", "partial"):
+                        morph_ft_lists: list[list[str]] = []
+                        morph_ti_lists: list[list[str]] = []
+                        morph_hit_by_path: dict[str, Any] = {}
+                        for i in range(len(extra_queries)):
+                            ft_sub = morph_res.value[2 * i]
+                            ti_sub = morph_res.value[2 * i + 1]
+                            if ft_sub["status"] == "ok" and ft_sub["value"]:
+                                morph_ft_lists.append([h.path for h in ft_sub["value"]])
+                                for h in ft_sub["value"]:
+                                    morph_hit_by_path.setdefault(h.path, h)
+                            if ti_sub["status"] == "ok" and ti_sub["value"]:
+                                morph_ti_lists.append([h.path for h in ti_sub["value"]])
+                                for h in ti_sub["value"]:
+                                    morph_hit_by_path.setdefault(h.path, h)
+                        if morph_ft_lists:
+                            fused_ft = rrf_fuse(
+                                [[h.path for h in fulltext_hits], *morph_ft_lists]
+                            )
+                            path_to_hit = {h.path: h for h in fulltext_hits}
+                            path_to_hit.update(
+                                {p: morph_hit_by_path[p] for p in morph_hit_by_path}
+                            )
+                            fulltext_hits = [
+                                path_to_hit[p] for p, _ in fused_ft if p in path_to_hit
+                            ]
+                        if morph_ti_lists:
+                            fused_ti = rrf_fuse(
+                                [[h.path for h in title_hits], *morph_ti_lists]
+                            )
+                            path_to_hit_t = {h.path: h for h in title_hits}
+                            path_to_hit_t.update(
+                                {p: morph_hit_by_path[p] for p in morph_hit_by_path}
+                            )
+                            title_hits = [
+                                path_to_hit_t[p] for p, _ in fused_ti if p in path_to_hit_t
+                            ]
+
         # Based on the full-text fallback only: a full-text AND-of-terms
         # search failing outright is the strong signal that the query's
         # content words never co-occur in any article. Title-suggestion
@@ -2078,6 +2293,10 @@ class ResearchEngine:
         # {"heluim": "helium"}) so the UI/model can say "showing results
         # for helium" -- see ``_correct_spelling``.
         corrected_terms_out: dict[str, str] = {}
+        # Morphological-variant fallback: records, across all archives
+        # consulted this request, which variant(s) actually widened a weak
+        # search for a given content term -- see ``_expand_morph_variants``.
+        expanded_terms_out: dict[str, list[str]] = {}
 
         def _consult(entries: list[ArchiveEntry]) -> None:
             nonlocal any_timeout, dense_used
@@ -2102,6 +2321,7 @@ class ResearchEngine:
                     query_vec=query_vec,
                     memo=op_memo,
                     corrected_terms_out=corrected_terms_out,
+                    expanded_terms_out=expanded_terms_out,
                 )
                 any_timeout = any_timeout or timed_out
                 if dense_note is not None:
@@ -2234,6 +2454,7 @@ class ResearchEngine:
             dense_used=dense_used,
             dense_note="; ".join(dense_notes) if dense_notes else None,
             corrected_terms=dict(corrected_terms_out),
+            expanded_terms=dict(expanded_terms_out),
         )
         response.assessment = assess_evidence(
             query, response, corrected_terms=dict(corrected_terms_out)
