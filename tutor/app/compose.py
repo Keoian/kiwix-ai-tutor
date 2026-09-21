@@ -303,7 +303,7 @@ def _make_turn_runner(
     rewrite_on_weak_evidence: bool = True,
     rewrite_on_followup: bool = True,
     reuse_prior_passages: bool = True,
-    concise_followup_note: bool = True,
+    concise_followup_note: bool = False,
 ):
     from tutor.app.agent_loop import run_turn
 
@@ -689,7 +689,7 @@ def build_deps(cfg: Any, *, llm: Any = None, research_engine: Any = None) -> App
         rewrite_on_weak_evidence=getattr(cfg.app, "rewrite_on_weak_evidence", True),
         rewrite_on_followup=getattr(cfg.app, "rewrite_on_followup", True),
         reuse_prior_passages=getattr(cfg.app, "reuse_prior_passages", True),
-        concise_followup_note=getattr(cfg.app, "concise_followup_note", True),
+        concise_followup_note=getattr(cfg.app, "concise_followup_note", False),
     )
     status_provider = _make_status_provider(
         llm=llm,

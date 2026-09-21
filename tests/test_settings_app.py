@@ -76,6 +76,25 @@ def test_app_table_defaults_when_missing(tmp_path):
     assert cfg.app.prompt_variant == "current"
     assert cfg.app.rewrite_on_weak_evidence is True
     assert cfg.app.rewrite_on_followup is True
+    # docs/followup_answer_shape.md, "Iteration 2 (negative result)":
+    # the stronger follow-up note over-corrected (a spurious "Yes," tic
+    # on open questions, flattened "Tell me about X" answers in some
+    # rewordings), so the default is False -- the flag stays selectable.
+    assert cfg.app.concise_followup_note is False
+
+
+def test_app_table_concise_followup_note_is_configurable(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    text = _BASE + """
+[app]
+concise_followup_note = true
+"""
+    config_path = _write_toml(config_dir / "dev.toml", text)
+
+    cfg = load_config(config_path)
+
+    assert cfg.app.concise_followup_note is True
 
 
 def test_app_table_rewrite_on_weak_evidence_is_configurable(tmp_path):

@@ -540,7 +540,8 @@ _FOLLOWUP_DIRECTNESS_NOTE = (
 # ``_FOLLOWUP_DIRECTNESS_NOTE`` was missing, which is what let the model
 # fall back to re-emitting the same "Composition / Structure /
 # Replication / Function" essay turn after turn regardless of the
-# question. Gated by ``app.concise_followup_note`` (default True).
+# question. Gated by ``app.concise_followup_note`` (default False -- see
+# docs/followup_answer_shape.md, "Iteration 2 (negative result)").
 _FOLLOWUP_CONCISE_NOTE = (
     "Answer the student's question as it relates to the lesson so far: "
     "give a direct answer first (yes or no, in one clause, if it is a "
@@ -758,7 +759,7 @@ def run_turn(
     rewrite_on_weak_evidence: bool = True,
     rewrite_on_followup: bool = True,
     reuse_prior_passages: bool = True,
-    concise_followup_note: bool = True,
+    concise_followup_note: bool = False,
 ) -> TurnResult:
     research_calls = 0
     calc_calls = 0
