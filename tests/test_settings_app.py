@@ -127,6 +127,54 @@ model_may_skip_search = false
     assert cfg.app.model_may_skip_search is False
 
 
+def test_app_table_no_specifics_without_source_is_configurable(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    text = _BASE + """
+[app]
+no_specifics_without_source = false
+"""
+    config_path = _write_toml(config_dir / "dev.toml", text)
+
+    cfg = load_config(config_path)
+
+    assert cfg.app.no_specifics_without_source is False
+
+
+def test_app_table_no_specifics_without_source_defaults_true(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    config_path = _write_toml(config_dir / "dev.toml", _BASE)
+
+    cfg = load_config(config_path)
+
+    assert cfg.app.no_specifics_without_source is True
+
+
+def test_app_table_child_safe_body_topics_is_configurable(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    text = _BASE + """
+[app]
+child_safe_body_topics = false
+"""
+    config_path = _write_toml(config_dir / "dev.toml", text)
+
+    cfg = load_config(config_path)
+
+    assert cfg.app.child_safe_body_topics is False
+
+
+def test_app_table_child_safe_body_topics_defaults_true(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    config_path = _write_toml(config_dir / "dev.toml", _BASE)
+
+    cfg = load_config(config_path)
+
+    assert cfg.app.child_safe_body_topics is True
+
+
 def test_app_table_restate_question_settings_are_configurable(tmp_path):
     config_dir = tmp_path / "config"
     config_dir.mkdir()

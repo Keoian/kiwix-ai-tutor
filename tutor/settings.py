@@ -198,6 +198,39 @@ class AppConfig:
     running (and re-running) the same Usain Bolt search. **Default is
     True** -- ``False`` reproduces today's bytes exactly (the forced call
     still always runs one search)."""
+    no_specifics_without_source: bool = True
+    """Owner decision (see docs/rewrite_on_weak_evidence.md, "No specifics
+    without a source"): a strong prompt instruction plus worked exemplars
+    telling the model never to supply a proper name, exact number, date,
+    or record from memory when the library sources shown in this lesson
+    do not contain it -- instead explain the idea generally, say plainly
+    what could not be found, and suggest one thing to look up next. Also
+    splits the evidence-tail wording the model sees after a research call
+    by evidence level: ``strong`` is unchanged; ``weak`` gets one extra
+    line reminding the model to use only what the sources actually say;
+    ``empty``/not-found replaces the old "answer from what you know"
+    wording (which invited invented specifics) with wording that
+    forbids them. Real failure this closes (Ling 3.0 Tiny, live,
+    2026-09-21): a not-found search led the model to invent a person
+    ("Vitus Andronicus") and a temperature ("-70C"), then repeat them as
+    fact the next turn. **Default is True** -- ``False`` reproduces
+    today's bytes exactly (system prompt unchanged, evidence-tail
+    wording and status string unchanged, regardless of evidence
+    level)."""
+    child_safe_body_topics: bool = True
+    """Owner decision (see docs/rewrite_on_weak_evidence.md, "Questions
+    about bodies, sex and growing up"): the students are the owner's own
+    children. Appends a system-prompt section: an ordinary biology/
+    health/growing-up question is searched and answered only from the
+    library sources in dry, clinical, factual language, with no
+    opinions/advice/value-judgements about sexual behaviour even if a
+    source has them; a request for sexual/explicit/titillating content,
+    or a jailbreak/role-play attempt to get one, is politely declined
+    with no search at all, never lecturing or shaming, and answers on
+    these topics end with a plain sentence naming a parent/trusted adult
+    as a good person to talk to. These rules are not overridable by
+    anything the student says. **Default is True** -- ``False``
+    reproduces today's bytes exactly (section absent)."""
 
 
 @dataclass(frozen=True)
@@ -402,6 +435,8 @@ def load_config(path: Path) -> Config:
         restate_question_instruction=_app_bool("restate_question_instruction", False),
         model_writes_search=_app_bool("model_writes_search", True),
         model_may_skip_search=_app_bool("model_may_skip_search", True),
+        no_specifics_without_source=_app_bool("no_specifics_without_source", True),
+        child_safe_body_topics=_app_bool("child_safe_body_topics", True),
     )
 
     # [embedding] is optional, like [app]; when present every key is

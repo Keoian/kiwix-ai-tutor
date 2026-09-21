@@ -214,6 +214,7 @@ def test_still_weak_after_rewrite_gets_not_found_instruction():
         budget=budget,
         emit=lambda e: None,
         model_writes_search=False,
+        no_specifics_without_source=False,
     )
 
     assert result.status == "ok"

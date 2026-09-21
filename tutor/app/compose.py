@@ -308,6 +308,8 @@ def _make_turn_runner(
     restate_question_instruction: bool = False,
     model_writes_search: bool = True,
     model_may_skip_search: bool = True,
+    no_specifics_without_source: bool = True,
+    child_safe_body_topics: bool = True,
 ):
     from tutor.app.agent_loop import run_turn
 
@@ -378,6 +380,8 @@ def _make_turn_runner(
                 restate_question_instruction=restate_question_instruction,
                 model_writes_search=model_writes_search,
                 model_may_skip_search=model_may_skip_search,
+                no_specifics_without_source=no_specifics_without_source,
+                child_safe_body_topics=child_safe_body_topics,
             )
         except Exception:  # noqa: BLE001 - never leak a traceback to the student
             emit("error", {"message": _STUDENT_SAFE_ERROR})
@@ -703,6 +707,8 @@ def build_deps(cfg: Any, *, llm: Any = None, research_engine: Any = None) -> App
         restate_question_instruction=getattr(cfg.app, "restate_question_instruction", False),
         model_writes_search=getattr(cfg.app, "model_writes_search", True),
         model_may_skip_search=getattr(cfg.app, "model_may_skip_search", True),
+        no_specifics_without_source=getattr(cfg.app, "no_specifics_without_source", True),
+        child_safe_body_topics=getattr(cfg.app, "child_safe_body_topics", True),
     )
     status_provider = _make_status_provider(
         llm=llm,
