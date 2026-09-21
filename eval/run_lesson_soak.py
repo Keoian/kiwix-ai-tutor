@@ -187,6 +187,11 @@ class TurnRecord:
     stated arithmetic against the sandboxed calc evaluator, independent of
     whether the model itself called the `calc` tool."""
     attribution_event: dict | None = None
+    evidence: dict | None = None
+    """Additive (docs/rewrite_on_weak_evidence.md): the turn's
+    ``{level_before, level_after, rewritten_queries, corrected_terms}``
+    from the ``done`` event's own ``evidence`` field, or ``None`` for a
+    non-factual turn or an older server without this field."""
     """The server's own ``attributions`` SSE event for this turn (commit
     26c14d0, ``tutor/app/compose.py``): ``{"attributions": [...],
     "unbacked": [...]}``, dumped verbatim from
@@ -321,7 +326,24 @@ def aggregate(records: list[TurnRecord]) -> dict[str, Any]:
 
     slow_turns = [r.index for r in records if r.wall_s > 300]
 
+    # Additive (docs/rewrite_on_weak_evidence.md): fraction of factual
+    # turns where a forced rewrite round actually ran (evidence present
+    # and rewritten_queries non-empty), and, of those, the fraction that
+    # ended up "strong" (weak/empty -> strong "rescued" by the rewrite).
+    with_evidence = [r for r in factual if r.evidence]
+    rewritten = [r for r in with_evidence if r.evidence.get("rewritten_queries")]
+    rescued = [
+        r
+        for r in rewritten
+        if r.evidence.get("level_before") in ("weak", "empty")
+        and r.evidence.get("level_after") == "strong"
+    ]
+    rewrite_rate = (len(rewritten) / len(with_evidence)) if with_evidence else None
+    rescued_rate = (len(rescued) / len(rewritten)) if rewritten else None
+
     return {
+        "rewrite_rate": rewrite_rate,
+        "rescued_rate": rescued_rate,
         "turns_completed": len(records),
         "turns_ok": len(ok),
         "turns_errored": len(errored),
@@ -691,6 +713,7 @@ def process_turn_stream(lines: Any, t0: float, now: Any) -> dict:
         "evidence_dump": False,
         "truncated": None,
         "attribution_event": None,
+        "evidence": None,
     }
     event_name = None
     for line in lines:
@@ -734,6 +757,7 @@ def process_turn_stream(lines: Any, t0: float, now: Any) -> dict:
             state["citation_quality"] = data.get("citation_quality")
             state["evidence_dump"] = bool(data.get("evidence_dump"))
             state["truncated"] = data.get("truncated")
+            state["evidence"] = data.get("evidence")
             if data.get("calc_calls") is not None:
                 state["calc_calls"] = data["calc_calls"]
         elif event_name == "error":
@@ -882,6 +906,7 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
                 citation_quality = parsed.get("citation_quality")
                 evidence_dump = parsed.get("evidence_dump", False)
                 truncated = parsed.get("truncated")
+                evidence = parsed.get("evidence")
                 attribution_event = parsed.get("attribution_event")
 
                 wall = time.monotonic() - t0
@@ -933,6 +958,7 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
                         citation_quality=citation_quality,
                         evidence_dump=evidence_dump,
                         truncated=truncated,
+                        evidence=evidence,
                         # See TurnRecord.passages docstring: the wire
                         # protocol has no passage text for the fallback
                         # path, but attribution_event (below) carries the

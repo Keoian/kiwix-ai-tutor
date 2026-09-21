@@ -158,7 +158,11 @@
   // have to account for markdown syntax being stripped: they are computed
   // against the untouched raw text before any slice reaches here.
   // -----------------------------------------------------------------------
-  const MARKDOWN_RE = /(\*\*([^*\n]+)\*\*)|(\*([^*\n]+)\*)|(`([^`\n]+)`)|(<br\s*\/?>)|(\n)/gi;
+  // Italic requires no whitespace directly inside the delimiters (standard
+  // markdown rule) so that a lone "*" used as multiplication in math like
+  // "3 * 4 * 5" is never mistaken for italic -- "* 4 *" has a space right
+  // after/before the asterisks and must stay plain text.
+  const MARKDOWN_RE = /(\*\*([^*\n]+)\*\*)|(\*(\S(?:[^*\n]*\S)?)\*)|(`([^`\n]+)`)|(<br\s*\/?>)|(\n)/gi;
 
   // Inline-only tokenizer: bold/italic/code plus a literal "<br>" token
   // (some model answers put a literal <br> inside a table cell) both
@@ -901,6 +905,41 @@
     chat.scrollTop = chat.scrollHeight;
   }
 
+  // Additive (docs/rewrite_on_weak_evidence.md): `doneData.evidence` is
+  // `{level_before, level_after, rewritten_queries, corrected_terms}`,
+  // present only for factual (pre-retrieval) turns. Shows a single muted
+  // "Searched for: ..." line above the answer when the host forced a
+  // query rewrite, and one of two not-found notes when the rewritten
+  // search still came back weak/empty. Uses textContent DOM nodes only.
+  function appendSearchedForLine(tutorNode, evidence) {
+    if (!evidence) return;
+    const queries = evidence.rewritten_queries || [];
+    const correctedTerms = evidence.corrected_terms || {};
+    const correctedList = Object.keys(correctedTerms).map(function (k) {
+      return k + "→" + correctedTerms[k];
+    });
+    const parts = queries.slice();
+    if (queries.length === 0 && correctedList.length > 0) {
+      parts.push.apply(parts, correctedList);
+    }
+    if (parts.length > 0) {
+      const line = el("div", {
+        className: "searched-for-note",
+        text: "Searched for: " + parts.join(", "),
+      });
+      tutorNode.insertBefore(line, tutorNode.firstChild);
+    }
+    if (queries.length > 0 && (evidence.level_after === "weak" || evidence.level_after === "empty")) {
+      const note = el("div", { className: "msg msg-note" });
+      const text =
+        evidence.level_after === "empty"
+          ? "The tutor still could not find this in the library after searching again."
+          : "The tutor searched again but only found weak matches for this question.";
+      note.appendChild(el("span", { className: "unsupported-note", text: text }));
+      chat.appendChild(note);
+    }
+  }
+
   function applyCitationQuality(tutorNode, doneData, citationsEvent, attributionsEvent) {
     if (doneData && doneData.evidence_dump) {
       collapseEvidenceDump(tutorNode);
@@ -1229,6 +1268,7 @@
       }
     } else if (eventName === "done") {
       lastTurnMeta = data;
+      appendSearchedForLine(tutorNode, data.evidence);
       applyCitationQuality(tutorNode, data, lastCitationsEvent, lastAttributionsEvent);
       refreshStatus();
     }
@@ -1572,6 +1612,22 @@
   // test harness, when one is loading this file as a CommonJS module. A
   // real browser never defines `module`, so this is a no-op there.
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { mapAnswerToBlocks: mapAnswerToBlocks };
+    module.exports = {
+      mapAnswerToBlocks: mapAnswerToBlocks,
+      appendInlineMarkdown: appendInlineMarkdown,
+      appendMarkdownText: appendMarkdownText,
+      renderBlocksToDom: renderBlocksToDom,
+      renderInlineSegment: renderInlineSegment,
+      appendMarkersInRange: appendMarkersInRange,
+      findBestSentenceSpan: findBestSentenceSpan,
+      attributionMarkers: attributionMarkers,
+      hasHostBackedContent: hasHostBackedContent,
+      formatComputedNumber: formatComputedNumber,
+      el: el,
+      renderTextWithCitations: renderTextWithCitations,
+      renderAnswerWithAttribution: renderAnswerWithAttribution,
+      renderCitationChip: renderCitationChip,
+      renderUnresolvedLabel: renderUnresolvedLabel,
+    };
   }
 })();

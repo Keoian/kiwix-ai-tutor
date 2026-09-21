@@ -90,6 +90,11 @@ class AnswerRecord:
     this answer, already computed by the caller (``run_variant`` below)
     since it needs the retrieval packet's passages, which this record does
     not otherwise carry."""
+    evidence: dict | None = None
+    """Additive (docs/rewrite_on_weak_evidence.md): the turn's
+    ``TurnResult.evidence`` -- ``{level_before, level_after,
+    rewritten_queries, corrected_terms}``, or ``None`` for a non-factual
+    turn."""
     passages: list[dict] = field(default_factory=list)
     """The turn's known passages (same shape as ``resolve_citations``'s
     ``packet_passages``: dicts with "label"/"id"/"text"/"path"/... keys),
@@ -143,6 +148,7 @@ def score_answer(record: AnswerRecord) -> dict:
         "unbacked_sentences": attribution["unbacked_sentences"],
         "has_unbacked_number": attribution["has_unbacked_number"],
         "backed_sentence_rate": attribution["backed_sentence_rate"],
+        "evidence": record.evidence,
     }
 
 
@@ -183,11 +189,22 @@ def aggregate(scores: list[dict]) -> dict:
             "avg_answer_len_chars": 0.0,
             "backed_sentence_rate": 0.0,
             "unbacked_number_rate": 0.0,
+            "rewrite_rate": 0.0,
+            "rescued_rate": 0.0,
         }
     backed_rate = micro_average_backed_sentence_rate(scores)
     number_rate = _unbacked_number_rate(scores)
+    with_evidence = [s["evidence"] for s in scores if s.get("evidence")]
+    rewritten = [e for e in with_evidence if e.get("rewritten_queries")]
+    rescued = [
+        e
+        for e in rewritten
+        if e.get("level_before") in ("weak", "empty") and e.get("level_after") == "strong"
+    ]
     return {
         "n": n,
+        "rewrite_rate": (len(rewritten) / len(with_evidence)) if with_evidence else 0.0,
+        "rescued_rate": (len(rescued) / len(rewritten)) if rewritten else 0.0,
         "citation_rate": sum(s["has_citation"] for s in scores) / n,
         "all_resolve_rate": sum(s["all_resolve"] for s in scores) / n,
         "supported_citation_rate": sum(s["all_supported"] for s in scores) / n,
@@ -305,6 +322,7 @@ def run_variant(
                     result.answer_text, resolved_citations, known_passages
                 ),
                 passages=known_passages,
+                evidence=result.evidence,
             )
             scored = score_answer(record)
             scored["calc_calls"] = result.calc_calls
