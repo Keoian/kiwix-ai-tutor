@@ -239,6 +239,25 @@ def test_figure_absent_from_every_passage_is_unbacked_number():
     assert result.unbacked_spans[0].reason == "unbacked_number"
 
 
+def test_label_digits_are_not_flagged_as_unbacked_figures():
+    # docs/soak_v3_analysis.md §6: a sentence's own trailing [S18]-style
+    # label was being scanned as if "18" were a claimed figure, flagging
+    # it unbacked_number even though no real number was ever asserted.
+    answer = "This method is a fundamental skill in working with fractions [S18]."
+    passage = _passage("S1", "p1", "Fractions require finding a common denominator.")
+    result = attribute_sentences(answer, [passage])
+
+    assert all(u.reason != "unbacked_number" for u in result.unbacked_spans)
+
+
+def test_leading_list_number_is_not_flagged_as_unbacked_figure():
+    answer = "1. Multiply the numerator and denominator by the same nonzero value."
+    passage = _passage("S1", "p1", "Fractions require finding a common denominator.")
+    result = attribute_sentences(answer, [passage])
+
+    assert all(u.reason != "unbacked_number" for u in result.unbacked_spans)
+
+
 def test_figure_present_in_passage_with_unicode_minus_is_attributed():
     answer = "The boiling point of helium is -268.93 degrees Celsius."
     # passage uses the Unicode minus sign (−), answer uses ASCII hyphen.

@@ -7,7 +7,11 @@ on the same table row / sentence.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from tutor.app.repetition_guard import find_repetition_loop
+
+_FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def test_no_loop_in_a_normal_short_answer():
@@ -81,3 +85,63 @@ def test_custom_thresholds_are_respected():
     loop = find_repetition_loop(text, min_unit_chars=1, min_repeats=3)
     assert loop is not None
     assert loop.repeat_count == 10
+
+
+def test_real_loop_turn31_is_detected_and_trimmed_at_first_period():
+    text = (_FIXTURES / "loop_turn31.txt").read_text(encoding="utf-8")
+    loop = find_repetition_loop(text)
+    assert loop is not None
+    assert len(loop.trimmed_text) == 2363
+    assert text.startswith(loop.trimmed_text)
+
+
+def test_real_loop_turn32_is_detected_and_trimmed_at_first_period():
+    text = (_FIXTURES / "loop_turn32.txt").read_text(encoding="utf-8")
+    loop = find_repetition_loop(text)
+    assert loop is not None
+    assert len(loop.trimmed_text) == 2924
+    assert text.startswith(loop.trimmed_text)
+
+
+def test_real_loop_turn33_is_detected_and_trimmed_at_first_period():
+    text = (_FIXTURES / "loop_turn33.txt").read_text(encoding="utf-8")
+    loop = find_repetition_loop(text)
+    assert loop is not None
+    assert len(loop.trimmed_text) == 1554
+    assert text.startswith(loop.trimmed_text)
+
+
+def test_period_cycle_of_distinct_labelled_sentences_is_detected():
+    # Mirrors the real defect: N distinct sentences cycling, each carrying
+    # its own ever-incrementing invented [S#] label, repeated >= 3 times.
+    cycle = [
+        "This is the first cycled idea about fractions [S{}].",
+        "This is the second cycled idea about fractions [S{}].",
+        "This is the third cycled idea about fractions [S{}].",
+    ]
+    units = []
+    label = 1
+    for _ in range(4):
+        for template in cycle:
+            units.append(template.format(label))
+            label += 1
+    text = " ".join(units)
+    loop = find_repetition_loop(text)
+    assert loop is not None
+
+
+def test_times_table_style_answer_is_not_flagged():
+    # Distinct results each line -- must NOT trip, even though the guard
+    # now tolerates near-identical units (decided: numeric content, unlike
+    # an incrementing label, is the substance of the answer here, and
+    # rows are short enough to fall under the min-unit-length rule anyway).
+    text = "\n".join(f"3 x {i} = {3 * i}" for i in range(1, 11))
+    assert find_repetition_loop(text) is None
+
+
+def test_legit_numbered_list_of_eight_distinct_steps_is_not_flagged():
+    text = "\n".join(
+        f"Step {i}: perform distinct action number {i} in the sequence carefully."
+        for i in range(1, 9)
+    )
+    assert find_repetition_loop(text) is None

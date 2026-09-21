@@ -168,8 +168,16 @@
   }
 
   function renderCitations(container, citations) {
+    // A label the model wrote that matches no evidence passage (e.g.
+    // [S89] when only S1-S5 were ever handed to it) is `unresolved`;
+    // render it as plain muted text, not a clickable source-viewer chip,
+    // and never count it alongside real citations (see applyCitationQuality).
     (citations || []).forEach(function (citation) {
       const label = citation.label || citation;
+      if (citation.unresolved) {
+        container.appendChild(renderUnresolvedLabel(label));
+        return;
+      }
       container.appendChild(renderCitationChip(label, citation.passage_id));
     });
   }
@@ -241,10 +249,14 @@
   // both the model's own [S#] citation groups and the host's attribution
   // markers, in offset order. Only called once the answer is complete (on
   // the "attributions" event) so `text` is stable and matches the spans.
-  function renderAnswerWithAttribution(container, text, attributionsEvent) {
+  function renderAnswerWithAttribution(container, text, attributionsEvent, citationsEvent) {
     container.textContent = "";
     const markers = attributionMarkers(attributionsEvent).filter(function (m) {
       return typeof m.pos === "number" && m.pos >= 0 && m.pos <= text.length;
+    });
+    const unresolvedLabels = {};
+    ((citationsEvent && citationsEvent.citations) || []).forEach(function (c) {
+      if (c.unresolved) unresolvedLabels[c.label] = true;
     });
 
     const citationMatches = [];
@@ -280,7 +292,11 @@
       emitMarkersUpTo(citation.start);
       emitTextUpTo(citation.start);
       citation.labels.forEach(function (label) {
-        container.appendChild(renderCitationChip(label));
+        if (unresolvedLabels[label]) {
+          container.appendChild(renderUnresolvedLabel(label));
+        } else {
+          container.appendChild(renderCitationChip(label));
+        }
       });
       cursor = citation.end;
     });
@@ -349,14 +365,32 @@
     if (doneData && doneData.evidence_dump) {
       collapseEvidenceDump(tutorNode);
     }
-    const citations = (citationsEvent && citationsEvent.citations) || [];
-    const unsupportedLabels = (citationsEvent && citationsEvent.unsupported_labels) || [];
+    // An unresolved label (matches no evidence passage) never counts as a
+    // real citation for the "every citation was unsupported" check below --
+    // it isn't a citation at all, just an invented label.
+    const citations = ((citationsEvent && citationsEvent.citations) || []).filter(
+      function (c) { return !c.unresolved; }
+    );
+    const unresolvedLabels = ((citationsEvent && citationsEvent.citations) || [])
+      .filter(function (c) { return c.unresolved; })
+      .map(function (c) { return c.label; });
+    const unsupportedLabels = ((citationsEvent && citationsEvent.unsupported_labels) || []).filter(
+      function (label) { return unresolvedLabels.indexOf(label) === -1; }
+    );
     if (citations.length > 0 && unsupportedLabels.length === citations.length) {
       appendUnsupportedSourcesNote();
     }
     if (doneData && doneData.truncated) {
       appendTruncatedNote();
     }
+  }
+
+  function renderUnresolvedLabel(label) {
+    return el("span", {
+      className: "citation-label-unresolved",
+      text: "[" + label + "]",
+      attrs: { "aria-label": "citation label not found in the evidence for this turn" },
+    });
   }
 
   function renderCitationChip(label, passageId) {
@@ -512,7 +546,7 @@
       renderCitations(tutorNode, data.citations);
     } else if (eventName === "attributions") {
       lastAttributionsEvent = data;
-      renderAnswerWithAttribution(tutorNode, getTutorLine(), data);
+      renderAnswerWithAttribution(tutorNode, getTutorLine(), data, lastCitationsEvent);
       renderCitations(tutorNode, lastCitationsEvent && lastCitationsEvent.citations);
     } else if (eventName === "eviction") {
       appendEvictionNote(data);

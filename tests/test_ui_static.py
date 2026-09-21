@@ -131,6 +131,20 @@ def test_app_js_renders_citation_chips():
     assert has_render_fn or has_regex_pattern
 
 
+def test_app_js_renders_unresolved_labels_as_plain_text_not_a_chip():
+    # An [S#] label that resolves to no evidence passage (e.g. [S89] when
+    # only S1-S5 exist) must render as plain muted text, never a clickable
+    # citation-chip <button> (docs/soak_v3_analysis.md, label spam finding).
+    text = _read(APP_JS)
+    assert "unresolved" in text
+    assert "renderUnresolvedLabel" in text
+
+
+def test_app_js_excludes_unresolved_labels_from_citation_quality_counts():
+    text = _read(APP_JS)
+    assert re.search(r"function applyCitationQuality[\s\S]*?unresolved", text)
+
+
 def test_app_js_never_uses_innerhtml():
     text = _read(APP_JS)
     assert "innerHTML" not in text

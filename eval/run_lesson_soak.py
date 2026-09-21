@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import re
 import statistics
 import threading
 import time
@@ -162,6 +163,12 @@ class TurnRecord:
     unsupported_labels: list[str] = field(default_factory=list)
     citation_quality: str | None = None
     evidence_dump: bool = False
+    truncated: str | None = None
+    """Mirrors ``tutor.app.agent_loop.TurnResult.truncated``: ``None``,
+    ``"repetition"``, or ``"max_tokens"``. Carried into the per-turn JSON
+    dump (``write_turns_dump``) so a runaway-answer defect like the one in
+    docs/soak_v3_analysis.md ("Three huge turns") is visible without
+    re-running the soak."""
     passages: list[dict] = field(default_factory=list)
     """The turn's known passages (same shape ``resolve_citations``/
     ``attribute_sentences`` take), used by ``aggregate`` to compute
@@ -204,23 +211,63 @@ def _percentile(values: list[float], p: float) -> float | None:
     return s[f] + (s[c] - s[f]) * (k - f)
 
 
-def _contains_approx(text: str, value: float, *, tol: float = 0.01) -> bool:
-    import re
+_RELATIVE_TOL = 1e-3
 
-    for match in re.findall(r"-?\d[\d,]*\.?\d*", text):
+# docs/soak_v3_analysis.md "Calc misses": two of v2's three flagged misses
+# and one of v3's were CORRECT answers graded False only because the model
+# gave a fraction ("5/6") where `expected_calc` is the decimal (0.8333...),
+# or the reverse. `_candidate_values` below extracts both plain decimals
+# (with thousands separators/units stripped) AND `a/b` fraction tokens
+# (evaluated to a float), so either form matches.
+_NUMBER_RE = re.compile(r"-?\d[\d,]*\.?\d*")
+_FRACTION_RE = re.compile(r"(-?\d+)\s*/\s*(\d+)")
+_PERCENT_NUMBER_RE = re.compile(r"(-?\d[\d,]*\.?\d*)\s*%")
+
+
+def _matches(found: float, value: float, tol: float) -> bool:
+    return abs(found - value) <= max(tol, abs(value) * 0.005, abs(value) * _RELATIVE_TOL)
+
+
+def _candidate_values(text: str) -> list[float]:
+    """Every number ``score_calc`` should consider as a possible answer in
+    ``text``: plain decimals (commas stripped), `a/b` fractions evaluated
+    to a float, and a percent figure's `/100` form (so "75%" also matches
+    an ``expected_calc`` of 0.75)."""
+    values: list[float] = []
+    for match in _NUMBER_RE.findall(text):
         cleaned = match.replace(",", "")
         try:
-            found = float(cleaned)
+            values.append(float(cleaned))
         except ValueError:
             continue
-        if abs(found - value) <= max(tol, abs(value) * 0.005):
-            return True
-    return False
+    for num, den in _FRACTION_RE.findall(text):
+        try:
+            denominator = float(den)
+            if denominator != 0:
+                values.append(float(num) / denominator)
+        except ValueError:
+            continue
+    for match in _PERCENT_NUMBER_RE.findall(text):
+        cleaned = match.replace(",", "")
+        try:
+            values.append(float(cleaned) / 100.0)
+        except ValueError:
+            continue
+    return values
+
+
+def _contains_approx(text: str, value: float, *, tol: float = 0.01) -> bool:
+    return any(_matches(found, value, tol) for found in _candidate_values(text))
 
 
 def score_calc(answer_text: str, expected: float) -> bool:
     """True if ``answer_text`` surfaces a number approximately equal to
-    ``expected`` (rounding-tolerant: matches within 1% or 0.01 absolute)."""
+    ``expected``: rounding-tolerant (1% relative / 0.01 absolute / 1e-3
+    relative, whichever is loosest) and format-tolerant -- a fraction
+    ("5/6"), a percent ("75%" against an ``expected_calc`` of 0.75), a
+    thousands-separated number ("1,250.5"), and a trailing unit ("40.8
+    degrees") are all recognised (docs/soak_v3_analysis.md, "Calc
+    misses")."""
     return _contains_approx(answer_text, expected)
 
 
@@ -633,6 +680,7 @@ def process_turn_stream(lines: Any, t0: float, now: Any) -> dict:
         "unsupported_labels": [],
         "citation_quality": None,
         "evidence_dump": False,
+        "truncated": None,
         "attribution_event": None,
     }
     event_name = None
@@ -676,6 +724,7 @@ def process_turn_stream(lines: Any, t0: float, now: Any) -> dict:
             state["answer_text"] = data.get("answer") or state["answer_text"]
             state["citation_quality"] = data.get("citation_quality")
             state["evidence_dump"] = bool(data.get("evidence_dump"))
+            state["truncated"] = data.get("truncated")
             if data.get("calc_calls") is not None:
                 state["calc_calls"] = data["calc_calls"]
         elif event_name == "error":
@@ -823,6 +872,7 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
                 unsupported_labels = parsed.get("unsupported_labels", [])
                 citation_quality = parsed.get("citation_quality")
                 evidence_dump = parsed.get("evidence_dump", False)
+                truncated = parsed.get("truncated")
                 attribution_event = parsed.get("attribution_event")
 
                 wall = time.monotonic() - t0
@@ -873,6 +923,7 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
                         unsupported_labels=unsupported_labels,
                         citation_quality=citation_quality,
                         evidence_dump=evidence_dump,
+                        truncated=truncated,
                         # See TurnRecord.passages docstring: the wire
                         # protocol has no passage text for the fallback
                         # path, but attribution_event (below) carries the

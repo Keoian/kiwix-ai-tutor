@@ -84,6 +84,61 @@ def test_score_calc_no_numbers_is_false():
     assert score_calc("I'm not sure.", 75.0) is False
 
 
+def test_score_calc_matches_fraction_form_v2_idx30():
+    # data/granite_soak10_v2.turns.json idx 30: correct answer given as a
+    # fraction ("5/6"), graded False before the fix because expected_calc
+    # is the decimal 0.8333...
+    answer = (
+        "To add fractions like 2/3 and 1/6, you need a common denominator. "
+        "The least common multiple of 3 and 6 is 6. Convert 2/3 to 4/6, "
+        "then add 4/6 + 1/6 = 5/6. So, 2/3 + 1/6 = 5/6. [S1]"
+    )
+    assert score_calc(answer, 5 / 6) is True
+
+
+def test_score_calc_matches_fraction_form_v2_idx35():
+    # data/granite_soak10_v2.turns.json idx 35: "3/4" vs expected 0.75.
+    answer = (
+        "To simplify the fraction 9/12, find the greatest common divisor "
+        "(GCD) of 9 and 12, which is 3. Divide both the numerator and the "
+        "denominator by 3: (9 ÷ 3) / (12 ÷ 3) = 3/4. So, 9/12 "
+        "simplified is 3/4"
+    )
+    assert score_calc(answer, 0.75) is True
+
+
+def test_score_calc_matches_fraction_form_v3_idx30():
+    answer = (
+        "To add 2/3 and 1/6, first find a common denominator. The least "
+        "common multiple of 3 and 6 is 6. Convert 2/3 to a fraction with a "
+        "denominator of 6: (2/3) × (2/2) = 4/6. Now add 4/6 + 1/6 = "
+        "5/6. The sum of 2/3 and 1/6 is 5/6 [S1]."
+    )
+    assert score_calc(answer, 5 / 6) is True
+
+
+def test_score_calc_real_miss_v3_idx32_stays_false():
+    # This one is a genuine wrong answer (arithmetic error carried over
+    # from an earlier turn), not a formatting mismatch -- must stay False.
+    answer = (
+        "12.5% of 640 is calculated by multiplying 640 by 0.17 (since 17% "
+        "is 17/100 or 0.17) to get 108.8 [S1]."
+    )
+    assert score_calc(answer, 80.0) is False
+
+
+def test_score_calc_handles_thousands_separator():
+    assert score_calc("The total comes to 1,250.5 units.", 1250.5) is True
+
+
+def test_score_calc_handles_percent_sign_equivalent_to_decimal():
+    assert score_calc("That's 75%.", 0.75) is True
+
+
+def test_score_calc_handles_trailing_units():
+    assert score_calc("The answer is 40.8 degrees.", 40.8) is True
+
+
 # ---------------------------------------------------------------------------
 # aggregate
 # ---------------------------------------------------------------------------
@@ -356,6 +411,29 @@ def test_process_turn_stream_still_counts_eviction_and_calc():
     result = process_turn_stream(lines, t0=0.0, now=lambda: 1.0)
     assert result["eviction_events"] == 1
     assert result["calc_calls"] == 1
+
+
+def test_process_turn_stream_captures_truncated_reason():
+    lines = _sse("done", {"status": "ok", "answer": "...", "truncated": "repetition"})
+    result = process_turn_stream(lines, t0=0.0, now=lambda: 0.5)
+    assert result["truncated"] == "repetition"
+
+
+def test_process_turn_stream_truncated_defaults_to_none():
+    lines = _sse("done", {"status": "ok", "answer": "Hi."})
+    result = process_turn_stream(lines, t0=0.0, now=lambda: 0.5)
+    assert result["truncated"] is None
+
+
+def test_turn_record_dump_carries_truncated_and_calc_calls(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    records = [
+        _rec(index=0, truncated="max_tokens", calc_calls=2),
+    ]
+    path = write_turns_dump(records, "docs/x/q_soak.md")
+    dumped = json.loads(path.read_text(encoding="utf-8"))
+    assert dumped[0]["truncated"] == "max_tokens"
+    assert dumped[0]["calc_calls"] == 2
 
 
 def test_write_turns_dump_carries_passages_for_offline_rescoring(tmp_path, monkeypatch):

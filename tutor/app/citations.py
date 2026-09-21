@@ -261,10 +261,28 @@ def _normalize_minus(text: str) -> str:
     return text.replace("−", "-")
 
 
+_LEADING_LIST_NUMBER_RE = re.compile(r"^\s*\d+[.)](?:\s+|$)")
+
+
+def _strip_label_noise(text: str) -> str:
+    """Strip ``[S123]``-style citation labels and a leading list-numbering
+    marker ("1. ", "2) ") before scanning for figures -- otherwise the
+    label's own digits (or a list item's ordinal) get flagged as an
+    "unbacked number" the model never actually claimed. Measured:
+    docs/soak_v3_analysis.md §6 -- most `unbacked_number` flags in the
+    turns-31-33 loops were the sentence's own trailing ``[S12]``/``[S18]``
+    label digits, not content."""
+    text = _LABEL_GROUP_RE.sub("", text)
+    text = _LEADING_LIST_NUMBER_RE.sub("", text)
+    return text
+
+
 def _figures(text: str) -> set[str]:
     """The set of number tokens (sign + digits + optional decimal) in
-    ``text``, with Unicode minus normalized to ASCII hyphen-minus."""
-    return set(_FIGURE_RE.findall(_normalize_minus(text)))
+    ``text``, with Unicode minus normalized to ASCII hyphen-minus, and
+    ``[S#]`` label digits / a leading list-number marker stripped first
+    (see ``_strip_label_noise``)."""
+    return set(_FIGURE_RE.findall(_normalize_minus(_strip_label_noise(text))))
 
 
 def _sentence_spans(text: str) -> list[tuple[int, int]]:
@@ -297,6 +315,10 @@ def _is_short_non_claim(sentence: str) -> bool:
     if s.endswith("?"):
         return True
     if s.endswith("!") and len(re.findall(r"\w+", s)) <= _NON_CLAIM_MAX_WORDS:
+        return True
+    # A bare list-numbering marker ("1.", "2)") split off as its own
+    # "sentence" by the punctuation-based splitter -- not a claim itself.
+    if _LEADING_LIST_NUMBER_RE.match(s) and _LEADING_LIST_NUMBER_RE.sub("", s) == "":
         return True
     return False
 
