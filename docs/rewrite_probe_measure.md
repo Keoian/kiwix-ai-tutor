@@ -198,3 +198,75 @@ kid16, kid18, ool07, ool10 -- pre-existing, not targeted this round.
 New false-weak: sw42 ("two" excluded as a fallback candidate to keep sw21
 fixed; no other candidate matches). For tuning misses like sw21/sw22 a weak
 verdict is DESIRED: it triggers the model-forced rewrite, not a failure.
+
+## Assessor v4 -- superlatives
+
+Root cause (measured live, no LLM: `data/turn1_evidence_investigation.md`,
+worktree agent-a942420959338de9): `assess_evidence` rated turn-1 packets
+"strong" for kid superlative questions when the packet contained ZERO
+relevant facts, because a bare superlative/comparative modifier ("biggest",
+"fastest", "largest") was treated as an ordinary key/topic term -- it
+trivially title-matches wholly unrelated archive articles that happen to
+reuse the same common English adjective ("The Biggest Loser", "World's
+Biggest Coffee Morning", "Fastest lap" motorsport stat), and coverage could
+be satisfied piecemeal by the modifier in one passage and the head noun
+("bird", "animal") in a completely different, unrelated passage.
+
+Fix (narrow, superlative-only -- NOT a re-try of the rejected Assessor v3
+"(d) co-occurrence" generic rule, which cost ~14 false-weak project-wide):
+1. `_SUPERLATIVE_WORDS` (explicit list: biggest/largest/smallest/tallest/
+   longest/fastest/slowest/oldest/heaviest/hottest/coldest/highest/deepest/
+   most/least/best/worst/first/last/record/... plus comparative forms) +
+   `_is_superlative_word` (conservative regular "-est" rule, >=6 letters,
+   guarded by a `_NON_SUPERLATIVE_EST_WORDS` suffix-exceptions list so
+   "forest"/"rainforest"/"interest"/"request"/... are never misclassified).
+2. Modifiers are excluded from `_topic_candidates`' pool (they can no
+   longer be picked as the "main topic" phrase on their own -- fixes
+   "biggest animal" directly, since "animal" then correctly fails to
+   topic-match either junk passage).
+3. New `_superlative_gate_ok` co-occurrence check, applied ONLY as a final
+   downgrade when the question contains a modifier AND the assessment
+   would otherwise be "strong": requires some one top-checked passage to
+   contain BOTH a head-noun term (question's key terms minus the modifier
+   words) AND a superlative/extreme cue (any `_SUPERLATIVE_WORDS` member,
+   or a synonym phrase like "most massive"/"record holder") in that SAME
+   passage. This is what catches "fastest bird" (bird found only in a
+   disjoint "state birds" list, "fastest" found only in an unrelated
+   motorsport article -- gate fails, forced weak) where topic-candidate
+   exclusion alone is not enough (the head noun "bird" alone still
+   title-matches the wrong passage).
+4. A `reasons` entry is added whenever a question modifier is detected,
+   and a distinct one when the gate itself forces a downgrade.
+5. Also fixed in passing: a stray single-character key term ("s", leaking
+   in from `tokenize`'s apostrophe handling on "What's") could trivially
+   substring-match almost any passage text and was being picked as the
+   topic phrase ahead of the real head noun -- length-1 tokens are now
+   excluded from the topic-candidate pool.
+
+Unit tests (`tests/test_assessment.py`, pure, hand-built fake passages, no
+archive/LLM): the three measured junk cases (biggest animal / fastest bird
+/ largest molecule) now assert `!= "strong"`; "smallest planet" (Mercury:
+"smallest planet in the Solar System") and "tallest mountain" (Everest:
+"tallest mountain in the world") stay `"strong"` since the head noun and
+the cue genuinely co-occur; a non-superlative regression case ("What is a
+volcano?") is unaffected; a reason string containing "superlative" is
+asserted on the forced downgrade.
+
+Labelled-set regression (`data/assessor_labelled.py --score`, 84 cached
+questions, cache copied read-only into this worktree's `data/`, main's own
+code re-run identically for the baseline number): **no change** --
+false-strong 16 -> 16 (identical 16 ids, confusion tables per source file
+byte-identical), false-weak 3 -> 3 (identical ids: sw42, sw46, msp03). None
+of the 4 probe/eval files happen to contain a "biggest X"/"fastest X"-shape
+question whose gold-should is "strong" with a real modifier+head-noun
+co-occurrence at risk of being downgraded, so the gate's only observed
+effect on this particular 84-question set is descriptive (new `reasons`
+entries on sw71 "largest planet" and ool10 "biggest number", both
+pre-existing false-strong left unchanged since their gate check still
+passes -- the retrieved passage genuinely does say "largest planet"/
+contains "biggest" alongside the head noun).
+
+Not verified: end-to-end effect on live turn-1 answers for the three
+measured junk questions (would require the forced weak-evidence rewrite
+path in `agent_loop.py` plus a live archive + llama-server run, both out of
+scope for this retrieval-only, no-LLM task).

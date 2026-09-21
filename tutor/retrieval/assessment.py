@@ -203,6 +203,214 @@ _STRUCTURAL_WORDS = frozenset(
 )
 
 
+# Assessor v4 (docs/rewrite_probe_measure.md "Assessor v4 -- superlatives"):
+# superlative/comparative size/speed/age modifiers ("biggest", "fastest",
+# "largest", ...) are common English adjectives reused across unrelated
+# archive articles (a reality show titled "The Biggest Loser", a
+# motorsport "Fastest lap" stat) -- a bare match on the modifier word
+# alone, with no real connection to the question's actual topic, must
+# never by itself certify a passage as covering the question. These are
+# MODIFIERS, not topic terms: the topic is the head noun ("animal",
+# "bird", "molecule"), and a superlative question only counts as
+# genuinely answered when a passage contains BOTH the head noun AND a
+# superlative/extreme cue word IN THE SAME passage (see
+# ``_superlative_gate_ok`` below). Explicit list first (covers irregular
+# forms leading with a consonant-doubling or "good"/"bad"-style
+# suppletion, none of which the conservative "-est" rule below would
+# catch), then a conservative regex rule for regular "-est" adjectives
+# guarded by an exceptions list of common English words that merely END
+# in "-est" without being a superlative at all ("forest", "interest",
+# ...).
+_SUPERLATIVE_WORDS = frozenset(
+    {
+        "biggest",
+        "bigger",
+        "largest",
+        "larger",
+        "smallest",
+        "smaller",
+        "tallest",
+        "taller",
+        "longest",
+        "longer",
+        "shortest",
+        "shorter",
+        "fastest",
+        "faster",
+        "slowest",
+        "slower",
+        "oldest",
+        "older",
+        "youngest",
+        "younger",
+        "heaviest",
+        "heavier",
+        "lightest",
+        "lighter",
+        "hottest",
+        "hotter",
+        "coldest",
+        "colder",
+        "highest",
+        "higher",
+        "lowest",
+        "lower",
+        "deepest",
+        "deeper",
+        "widest",
+        "wider",
+        "narrowest",
+        "narrower",
+        "strongest",
+        "stronger",
+        "loudest",
+        "louder",
+        "brightest",
+        "brighter",
+        "most",
+        "least",
+        "best",
+        "worst",
+        "worse",
+        "better",
+        "first",
+        "last",
+        "record",
+    }
+)
+
+# Common English words that end in "-est" but are NOT a superlative
+# adjective -- the conservative regex rule below must never treat these as
+# modifiers.
+_NON_SUPERLATIVE_EST_WORDS = frozenset(
+    {
+        "forest",
+        "interest",
+        "interested",
+        "interests",
+        "harvest",
+        "request",
+        "requests",
+        "honest",
+        "modest",
+        "protest",
+        "protests",
+        "manifest",
+        "suggest",
+        "suggests",
+        "digest",
+        "contest",
+        "contests",
+        "invest",
+        "invests",
+        "quest",
+        "quests",
+        "wrest",
+        "chest",
+        "guest",
+        "guests",
+        "nest",
+        "nests",
+        "pest",
+        "pests",
+        "rest",
+        "test",
+        "tests",
+        "vest",
+        "vests",
+        "west",
+        "zest",
+        "arrest",
+        "arrests",
+        "crest",
+        "crests",
+    }
+)
+
+# Extra multi-word/alternate superlative cue phrases (Assessor v4): a
+# passage may express the extreme fact without using one of the bare
+# ``_SUPERLATIVE_WORDS`` tokens (e.g. "the most massive molecule known").
+_SUPERLATIVE_CUE_PHRASES = (
+    "most massive",
+    "record holder",
+    "record-holding",
+    "record breaking",
+    "record-breaking",
+)
+
+
+def _is_superlative_word(word: str) -> bool:
+    """True if ``word`` (already lowercased) is a superlative/comparative
+    size/speed/age modifier -- see ``_SUPERLATIVE_WORDS`` above for why
+    these must never count as a topic term on their own."""
+    w = word.lower()
+    if w in _SUPERLATIVE_WORDS:
+        return True
+    # Suffix check (not just exact membership): a compound noun like
+    # "rainforest" ends in the exact letters of the non-superlative word
+    # "forest" without being an exact match to it, and must be excluded
+    # the same way.
+    if any(w.endswith(exc) for exc in _NON_SUPERLATIVE_EST_WORDS):
+        return False
+    # Conservative regular "-est" rule: at least 6 letters (rules out
+    # "best"/"rest"-length false positives not already in the exceptions
+    # list) and not one of the curated non-superlative exceptions above.
+    return len(w) >= 6 and w.endswith("est")
+
+
+def _passage_has_superlative_cue(passage: Any) -> bool:
+    """True if this passage's title+text contains any superlative/extreme
+    cue word or phrase (see ``_SUPERLATIVE_WORDS`` and
+    ``_SUPERLATIVE_CUE_PHRASES``)."""
+    title, text = _passage_title_text(passage)
+    combined = f"{title} {text}"
+    lowered = combined.lower()
+    for phrase in _SUPERLATIVE_CUE_PHRASES:
+        if phrase in lowered:
+            return True
+    tokens = {singularize(t) for t in tokenize(combined)}
+    return any(_is_superlative_word(t) for t in tokens)
+
+
+def _superlative_gate_ok(
+    key_terms: frozenset[str], passages: list[Any]
+) -> tuple[bool, list[str]]:
+    """Assessor v4 co-occurrence gate for superlative questions (Assessor
+    v3's generic same-passage co-occurrence rule was tried project-wide
+    and REJECTED for ~14 new false-weak; this is deliberately NARROW --
+    it applies only when the question itself contains a superlative/
+    comparative modifier, not to every question).
+
+    A superlative question's head noun(s) are the question's key terms
+    minus the modifier words themselves. The gate passes if some one of
+    the top-checked passages contains BOTH a head-noun term AND a
+    superlative/extreme cue, in that SAME passage -- title match OR body
+    text, either counts, since the point here is only to rule out
+    coverage satisfied piecemeal by unrelated passages (a modifier word
+    alone in one passage's title, a head noun alone in a different,
+    unrelated passage). Returns ``(gate_ok, modifier_words_found)``; when
+    no modifier is present in the question at all, the gate trivially
+    passes (this check is inert for non-superlative questions).
+    """
+    modifiers = [t for t in key_terms if _is_superlative_word(t)]
+    if not modifiers:
+        return True, []
+    head_terms = frozenset(
+        singularize(t) for t in key_terms if not _is_superlative_word(t) and len(t) > 1
+    )
+    if not head_terms:
+        # A question that is ENTIRELY modifier words carries no head noun
+        # to anchor on; nothing here to gate.
+        return True, modifiers
+    for passage in passages[:_TOP_PASSAGES_CHECKED]:
+        passage_terms = _passage_terms(passage)
+        if not (head_terms & passage_terms):
+            continue
+        if _passage_has_superlative_cue(passage):
+            return True, modifiers
+    return False, modifiers
+
+
 _RAW_WORD_RE = re.compile(r"[A-Za-z']+")
 
 
@@ -365,8 +573,24 @@ def _topic_candidates(
         phrases = [v.lower() for v in corrected_terms.values() if v]
         if phrases:
             return sorted(phrases, key=lambda p: (-len(p), p))
-    candidates = [t.lower() for t in key_terms if t.lower() not in _GENERIC_SINGLE_WORDS]
-    pool = candidates or [t.lower() for t in key_terms]
+    # Assessor v4: a bare superlative/comparative modifier ("biggest",
+    # "fastest", ...) must never be picked as the question's "main topic"
+    # phrase on its own -- it is a near-universal English adjective that
+    # trivially title-matches unrelated articles ("The Biggest Loser").
+    # Also drop stray single-character tokens (e.g. "s" leaking in from an
+    # apostrophe contraction like "What's" -- ``tokenize`` splits on \w+,
+    # which doesn't include the apostrophe): a length-1 token is never a
+    # genuine topic word, and worse, ``_phrase_in_passage``'s substring
+    # check trivially "finds" a single letter in almost any text.
+    non_modifier = [
+        t for t in key_terms if not _is_superlative_word(t.lower()) and len(t) > 1
+    ]
+    candidates = [
+        t.lower()
+        for t in non_modifier
+        if t.lower() not in _GENERIC_SINGLE_WORDS
+    ]
+    pool = candidates or [t.lower() for t in non_modifier] or [t.lower() for t in key_terms]
     return sorted(pool, key=lambda p: (-len(p), p))
 
 
@@ -614,8 +838,28 @@ def assess_evidence(
             f"topic phrase {topic_phrase!r} {'found' if topic_ok else 'NOT found'} "
             "in top passages' title/text"
         )
+    question_modifiers = sorted(t for t in key_terms if _is_superlative_word(t))
+    if question_modifiers:
+        reasons.append(
+            f"superlative modifier(s) {question_modifiers!r} detected -- excluded "
+            "from topic-phrase selection and coverage-alone credit (Assessor v4)"
+        )
 
     if coverage >= _COVERAGE_STRONG_THRESHOLD and topic_ok:
+        gate_ok, modifiers = _superlative_gate_ok(key_terms, list(passages))
+        if not gate_ok:
+            reasons.append(
+                "verdict: weak (superlative modifier "
+                f"{sorted(modifiers)!r} matched separately from the head "
+                "noun topic; no passage has both in the same passage)"
+            )
+            return EvidenceAssessment(
+                level="weak",
+                reasons=reasons,
+                key_terms=key_terms,
+                covered_terms=covered_terms,
+                coverage=coverage,
+            )
         reasons.append("verdict: strong")
         return EvidenceAssessment(
             level="strong",
