@@ -26,6 +26,7 @@ from typing import Any
 from tutor.retrieval.hybrid.lexical import (
     QUESTION_SHAPE_FILLERS as _QUESTION_FILLERS,
 )
+from tutor.retrieval.hybrid.lexical import is_superlative_word as _is_superlative_word
 from tutor.retrieval.hybrid.lexical import singularize, strip_instruction_words, tokenize
 
 # Baseline v13 (measured on the 42-question tuning split, see
@@ -214,122 +215,20 @@ _STRUCTURAL_WORDS = frozenset(
 # "bird", "molecule"), and a superlative question only counts as
 # genuinely answered when a passage contains BOTH the head noun AND a
 # superlative/extreme cue word IN THE SAME passage (see
-# ``_superlative_gate_ok`` below). Explicit list first (covers irregular
-# forms leading with a consonant-doubling or "good"/"bad"-style
+# ``_superlative_gate_ok`` below). Retrieval v16: ``_SUPERLATIVE_WORDS``,
+# ``_NON_SUPERLATIVE_EST_WORDS`` and ``_is_superlative_word`` now live in
+# ``tutor.retrieval.hybrid.lexical`` (imported above) so the retrieval
+# pipeline (``tutor.retrieval.research``) shares the exact same modifier
+# definition -- only re-exported here under their original names so the
+# rest of this module (and any external caller importing them from here)
+# is unaffected. What follows historically documented the explicit list
+# (covers irregular forms leading with a consonant-doubling or "good"/
+# "bad"-style
 # suppletion, none of which the conservative "-est" rule below would
 # catch), then a conservative regex rule for regular "-est" adjectives
 # guarded by an exceptions list of common English words that merely END
 # in "-est" without being a superlative at all ("forest", "interest",
 # ...).
-_SUPERLATIVE_WORDS = frozenset(
-    {
-        "biggest",
-        "bigger",
-        "largest",
-        "larger",
-        "smallest",
-        "smaller",
-        "tallest",
-        "taller",
-        "longest",
-        "longer",
-        "shortest",
-        "shorter",
-        "fastest",
-        "faster",
-        "slowest",
-        "slower",
-        "oldest",
-        "older",
-        "youngest",
-        "younger",
-        "heaviest",
-        "heavier",
-        "lightest",
-        "lighter",
-        "hottest",
-        "hotter",
-        "coldest",
-        "colder",
-        "highest",
-        "higher",
-        "lowest",
-        "lower",
-        "deepest",
-        "deeper",
-        "widest",
-        "wider",
-        "narrowest",
-        "narrower",
-        "strongest",
-        "stronger",
-        "loudest",
-        "louder",
-        "brightest",
-        "brighter",
-        "most",
-        "least",
-        "best",
-        "worst",
-        "worse",
-        "better",
-        "first",
-        "last",
-        "record",
-    }
-)
-
-# Common English words that end in "-est" but are NOT a superlative
-# adjective -- the conservative regex rule below must never treat these as
-# modifiers.
-_NON_SUPERLATIVE_EST_WORDS = frozenset(
-    {
-        "forest",
-        "interest",
-        "interested",
-        "interests",
-        "harvest",
-        "request",
-        "requests",
-        "honest",
-        "modest",
-        "protest",
-        "protests",
-        "manifest",
-        "suggest",
-        "suggests",
-        "digest",
-        "contest",
-        "contests",
-        "invest",
-        "invests",
-        "quest",
-        "quests",
-        "wrest",
-        "chest",
-        "guest",
-        "guests",
-        "nest",
-        "nests",
-        "pest",
-        "pests",
-        "rest",
-        "test",
-        "tests",
-        "vest",
-        "vests",
-        "west",
-        "zest",
-        "arrest",
-        "arrests",
-        "crest",
-        "crests",
-    }
-)
-
-# Extra multi-word/alternate superlative cue phrases (Assessor v4): a
-# passage may express the extreme fact without using one of the bare
-# ``_SUPERLATIVE_WORDS`` tokens (e.g. "the most massive molecule known").
 _SUPERLATIVE_CUE_PHRASES = (
     "most massive",
     "record holder",
@@ -337,25 +236,6 @@ _SUPERLATIVE_CUE_PHRASES = (
     "record breaking",
     "record-breaking",
 )
-
-
-def _is_superlative_word(word: str) -> bool:
-    """True if ``word`` (already lowercased) is a superlative/comparative
-    size/speed/age modifier -- see ``_SUPERLATIVE_WORDS`` above for why
-    these must never count as a topic term on their own."""
-    w = word.lower()
-    if w in _SUPERLATIVE_WORDS:
-        return True
-    # Suffix check (not just exact membership): a compound noun like
-    # "rainforest" ends in the exact letters of the non-superlative word
-    # "forest" without being an exact match to it, and must be excluded
-    # the same way.
-    if any(w.endswith(exc) for exc in _NON_SUPERLATIVE_EST_WORDS):
-        return False
-    # Conservative regular "-est" rule: at least 6 letters (rules out
-    # "best"/"rest"-length false positives not already in the exceptions
-    # list) and not one of the curated non-superlative exceptions above.
-    return len(w) >= 6 and w.endswith("est")
 
 
 def _passage_has_superlative_cue(passage: Any) -> bool:

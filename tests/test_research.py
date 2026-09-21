@@ -1080,3 +1080,106 @@ def test_research_many_costs_far_less_than_sum_of_sequential_calls(
     # Generous bound (2.5x, not 2x) to keep this robust on a loaded CI box;
     # the old sequential path would be close to 3x.
     assert many_elapsed <= max(single_elapsed * 2.5, single_elapsed + 1.0)
+
+
+# ---------------------------------------------------------------------------
+# Retrieval v16: modifiers ("longest", "biggest", "how long", ...) are not
+# topics -- unit tests with fakes for the drop rule and the coverage-gate
+# rule. See docs/retrieval_baseline.md "v16".
+# ---------------------------------------------------------------------------
+
+
+def test_drop_modifier_only_candidates_removes_title_only_modifier_match():
+    from tutor.retrieval.research import _drop_modifier_only_candidates
+
+    candidates = [
+        {"title": "The Longest Ride", "text": "A 2015 American romantic drama film."},
+        {"title": "DNA", "text": "DNA is the longest molecule found in living cells."},
+    ]
+    kept = _drop_modifier_only_candidates(
+        candidates, frozenset({"dna", "molecule"}), frozenset({"longest"})
+    )
+    titles = [c["title"] for c in kept]
+    assert "The Longest Ride" not in titles
+    assert "DNA" in titles
+
+
+def test_drop_modifier_only_candidates_no_op_without_modifiers():
+    from tutor.retrieval.research import _drop_modifier_only_candidates
+
+    candidates = [{"title": "The Longest Ride", "text": "A film."}]
+    kept = _drop_modifier_only_candidates(candidates, frozenset({"dna"}), frozenset())
+    assert kept == candidates
+
+
+def test_drop_modifier_only_candidates_never_empties_the_list():
+    from tutor.retrieval.research import _drop_modifier_only_candidates
+
+    candidates = [{"title": "The Longest Ride", "text": "A film about the longest ride."}]
+    kept = _drop_modifier_only_candidates(
+        candidates, frozenset({"river"}), frozenset({"longest"})
+    )
+    assert kept == candidates
+
+
+def test_drop_modifier_only_candidates_keeps_candidate_with_no_overlap_at_all():
+    from tutor.retrieval.research import _drop_modifier_only_candidates
+
+    candidates = [{"title": "Unrelated topic", "text": "Nothing to do with either term."}]
+    kept = _drop_modifier_only_candidates(
+        candidates, frozenset({"river"}), frozenset({"longest"})
+    )
+    assert kept == candidates
+
+
+def test_coverage_terms_excludes_bare_superlative_modifier():
+    from tutor.retrieval.research import _coverage_terms
+
+    terms = _coverage_terms("What's the longest river?")
+    assert "longest" not in terms
+    assert "river" in terms
+
+
+def test_coverage_terms_excludes_how_long_modifier():
+    from tutor.retrieval.research import _coverage_terms
+
+    terms = _coverage_terms("How long is DNA?")
+    assert "long" not in terms
+    assert "dna" in terms
+
+
+def test_coverage_terms_unaffected_for_non_modifier_query():
+    from tutor.retrieval.research import _coverage_terms
+
+    assert _coverage_terms("What is the capital of France?") == frozenset(
+        {"capital", "france"}
+    )
+
+
+def test_query_terms_excludes_modifier_for_title_boost():
+    from tutor.retrieval.research import _query_terms
+
+    terms = _query_terms("What's the biggest animal?", None)
+    assert "biggest" not in terms
+    assert "animal" in terms
+
+
+def test_drop_modifier_only_candidates_ignores_stray_single_char_topic_token():
+    from tutor.retrieval.research import _drop_modifier_only_candidates
+
+    # "s" (from an apostrophe contraction like "What's") must never count
+    # as a real topic term -- otherwise a possessive like "World's" in an
+    # unrelated candidate's title trivially "matches" it.
+    candidates = [
+        {
+            "title": "World's Biggest Coffee Morning",
+            "text": "World's Biggest Coffee Morning is a fundraising event.",
+        },
+        {"title": "Animal", "text": "An animal is a living thing."},
+    ]
+    kept = _drop_modifier_only_candidates(
+        candidates, frozenset({"s", "animal"}), frozenset({"biggest"})
+    )
+    titles = [c["title"] for c in kept]
+    assert "World's Biggest Coffee Morning" not in titles
+    assert "Animal" in titles

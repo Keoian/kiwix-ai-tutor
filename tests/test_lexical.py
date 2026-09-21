@@ -217,3 +217,40 @@ def test_rank_terms_by_rarity_empty():
     from tutor.retrieval.hybrid.lexical import rank_terms_by_rarity
 
     assert rank_terms_by_rarity({}) == []
+
+
+def test_question_modifier_terms_bare_superlative():
+    from tutor.retrieval.hybrid.lexical import question_modifier_terms
+
+    assert question_modifier_terms("What's the biggest animal?") == frozenset({"biggest"})
+    assert question_modifier_terms("What's the longest river?") == frozenset({"longest"})
+    assert question_modifier_terms("Is DNA the longest molecule?") == frozenset({"longest"})
+
+
+def test_question_modifier_terms_how_measure_word():
+    from tutor.retrieval.hybrid.lexical import question_modifier_terms
+
+    assert question_modifier_terms("How long is DNA?") == frozenset({"long"})
+    assert question_modifier_terms("How tall is the mountain?") == frozenset({"tall"})
+    assert question_modifier_terms("How many legs does a spider have?") == frozenset({"many"})
+
+
+def test_question_modifier_terms_measure_word_not_after_how_is_not_a_modifier():
+    from tutor.retrieval.hybrid.lexical import question_modifier_terms
+
+    # "long" here isn't preceded by "how" -- must not be treated as a
+    # modifier (it's plausibly real question content in other phrasings).
+    assert question_modifier_terms("Tell me about the long jump.") == frozenset()
+
+
+def test_question_modifier_terms_no_modifier():
+    from tutor.retrieval.hybrid.lexical import question_modifier_terms
+
+    assert question_modifier_terms("What is the capital of France?") == frozenset()
+
+
+def test_is_superlative_word_exported_from_lexical():
+    from tutor.retrieval.hybrid.lexical import is_superlative_word
+
+    assert is_superlative_word("biggest")
+    assert not is_superlative_word("forest")

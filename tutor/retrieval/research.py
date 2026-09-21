@@ -37,6 +37,7 @@ from tutor.retrieval.hybrid.diversity import cap_per_article
 from tutor.retrieval.hybrid.lexical import (
     BM25,
     QUESTION_SHAPE_FILLERS,
+    question_modifier_terms,
     rank_terms_by_rarity,
     singularize,
     strip_instruction_words,
@@ -243,11 +244,16 @@ def _query_terms(query: str, topic_hint: str | None) -> set[str]:
     abstention/coverage gate -- see :func:`_coverage_terms`, since unioning
     the topic_hint in there let a subject hint alone satisfy coverage for an
     off-topic question (review pass 2, finding 2).
+
+    Retrieval v16: a bare modifier word (see ``question_modifier_terms``)
+    is excluded -- it must never be used for title boost/suggest (a
+    "longest" query term title-boosting "The Longest Ride" is exactly the
+    bug this fixes). No-op for a non-modifier query.
     """
     terms = set(tokenize(strip_instruction_words(query)))
     if topic_hint:
         terms |= set(tokenize(topic_hint))
-    return terms
+    return terms - question_modifier_terms(query)
 
 
 # A query is treated as "elliptical" (too little content of its own to
@@ -317,13 +323,29 @@ def _coverage_terms(query: str, topic_hint: str | None = None) -> frozenset[str]
     subject's article. A query with more content terms of its own is
     judged strictly on those -- a topic_hint can never single-handedly
     manufacture coverage for it (that was the bug: a subject hint alone
-    making an off-topic candidate look "covered")."""
+    making an off-topic candidate look "covered").
+
+    Retrieval v16: a bare modifier word ("longest", "biggest", "how long",
+    ...; see ``question_modifier_terms``) is stripped from this set before
+    it is returned. Requiring a modifier as one of the coverage terms was
+    the root cause of "What's the longest river?" returning an EMPTY
+    result -- a real river article's title/text rarely contains the
+    literal word "longest", so counting it as a required term dragged
+    term_coverage below the strong/weak threshold even though the right
+    article was found. Modifiers carry no topic content of their own (see
+    ``tutor.retrieval.hybrid.lexical``'s module docstring for why), so
+    dropping them here never removes real signal -- only ever removes a
+    term that should never have been required in the first place. A
+    non-modifier query's coverage terms are unchanged (the set difference
+    is a no-op when no modifier is present)."""
     own = frozenset(tokenize(strip_instruction_words(query)))
     if topic_hint and (
         _elliptical_term_count(query) <= _ELLIPTICAL_TERM_COUNT or _has_anaphora(query)
     ):
-        return own | frozenset(tokenize(topic_hint))
-    return own
+        terms = own | frozenset(tokenize(topic_hint))
+    else:
+        terms = own
+    return terms - question_modifier_terms(query)
 
 
 # Coverage is checked over the top few candidates, not just the single
@@ -453,6 +475,62 @@ def _damerau_levenshtein(a: str, b: str, max_dist: int = 2) -> int:
             ):
                 d[i][j] = min(d[i][j], d[i - 2][j - 2] + 1)
     return d[la][lb]
+
+
+def _drop_modifier_only_candidates(
+    candidates: list[dict[str, Any]],
+    topic_terms: frozenset[str],
+    modifier_terms: frozenset[str],
+) -> list[dict[str, Any]]:
+    """Retrieval v16: drop any candidate whose only overlap with the
+    question's content terms is a bare modifier word ("longest",
+    "biggest", "how long", ...; see ``question_modifier_terms``) -- i.e.
+    it matches NO topic term (head noun) at all, in either title or text.
+    This is what actually keeps junk like "The Longest Ride" (a movie),
+    "The Biggest Loser"/"World's Biggest Coffee Morning", or "Fastest
+    lap" out of the returned passages even when they slipped through
+    candidate generation (e.g. via a fulltext hit on the modifier word
+    alone): their title/text carries the modifier but never the real
+    topic ("DNA"/"molecule", "animal", "bird").
+
+    A candidate that also matches at least one topic term is always kept
+    (topic terms keep today's behaviour unchanged), and a candidate is
+    also kept whenever it doesn't match a modifier at all -- this rule
+    only ever removes "modifier-only" candidates, never anything else. A
+    non-modifier question (``modifier_terms`` empty) is a no-op, keeping
+    every such question's results byte-identical to before this rule
+    existed. Never drops every candidate outright (falls back to the
+    original list) so a request never turns empty solely because of this
+    rule -- ``_best_coverage``/the relevance cutoff remain the real
+    abstention gate.
+    """
+    if not modifier_terms or not topic_terms:
+        return candidates
+    # A stray single-character token (e.g. "s" leaking in from an
+    # apostrophe contraction like "What's" -- ``tokenize`` splits on \w+,
+    # which doesn't include the apostrophe) is never a genuine topic word;
+    # worse, it trivially "matches" almost any text (a possessive like
+    # "World's" tokenizes to "world"+"s" too), which would make nearly
+    # every candidate look like it has real topic overlap and defeat this
+    # whole rule. Same fix as ``tutor.retrieval.assessment._topic_candidates``.
+    norm_topic = {singularize(t) for t in topic_terms if len(t) > 1}
+    norm_modifier = {singularize(t) for t in modifier_terms}
+    if not norm_topic:
+        return candidates
+    kept: list[dict[str, Any]] = []
+    for c in candidates:
+        combined = {
+            singularize(t)
+            for t in tokenize(f"{c.get('title', '')} {c.get('text', '')}")
+        }
+        if combined & norm_topic:
+            kept.append(c)
+            continue
+        if combined & norm_modifier:
+            # Modifier overlap only, no topic term at all -- drop.
+            continue
+        kept.append(c)
+    return kept or candidates
 
 
 def _term_role_weights(query: str) -> dict[str, float]:
@@ -1442,6 +1520,20 @@ class ResearchEngine:
         # search-worthy content -- otherwise the AND-of-terms search query
         # built below can require a word like "way" that the correct
         # article never contains (see QUESTION_SHAPE_FILLERS).
+        # Retrieval v16 note: a bare modifier word ("longest", "biggest",
+        # "how long", ...) is deliberately NOT stripped from this
+        # candidate-generation query -- unlike QUESTION_SHAPE_FILLERS, a
+        # modifier can be genuine BM25/fulltext signal (e.g. Jupiter's own
+        # article text literally says "the largest planet"), so removing it
+        # here regressed misspelling_probes.jsonl (Jupiter fell from rank 3
+        # to rank 6 once "largest" no longer contributed to fulltext
+        # scoring -- measured, see docs/retrieval_baseline.md "v16").
+        # Instead, junk that a modifier-only title-suggest hit can surface
+        # (e.g. "The Longest Ride") is removed post-ranking by
+        # ``_drop_modifier_only_candidates`` below, and modifiers are kept
+        # out of the coverage gate (``_coverage_terms``) and title boost
+        # (``_query_terms``) only -- narrower fixes that do not touch
+        # candidate generation at all.
         tokens = [
             t
             for t in tokenize(strip_instruction_words(query))
@@ -2427,6 +2519,18 @@ class ResearchEngine:
                     coverage_terms = coverage_terms | frozenset(corrected_terms_out.values())
 
         candidates.sort(key=lambda c: -c["score"])
+        # Retrieval v16: drop any candidate whose only overlap with the
+        # question's content terms is a bare modifier word (see
+        # ``_drop_modifier_only_candidates``) -- applied right after the
+        # global score sort/fusion and before any ranking refinement below,
+        # so a modifier-only junk candidate is never in the pool for title
+        # boost/diversity cap/packing to promote in the first place. No-op
+        # for a non-modifier query (``query_modifier_terms`` empty).
+        query_modifier_terms = question_modifier_terms(query)
+        if query_modifier_terms:
+            candidates = _drop_modifier_only_candidates(
+                candidates, frozenset(query_terms), query_modifier_terms
+            )
         # WP-B8 ranking refinements (reuse plan §7.5-7.6): documented
         # no-ops unless their flag is enabled, applied here -- after the
         # per-archive RRF fusion and the global score sort, before the

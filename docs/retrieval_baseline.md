@@ -1633,3 +1633,118 @@ squarefoot case is now fixed); misspelling_probes 5/10=0.500, unchanged.
 test_fallbacks_compose_squarefoot_garden_right_way` (fake worker requiring
 filler-strip + compound-split + morph-on-top-of-compound to all compose)
 plus the existing morph/research suites, all green.
+
+## v16 -- modifiers are not topics
+
+**Root cause (measured, real archive, `config/archives.simplewiki_only.toml`,
+`data/probe_v16_real.py`)**: a describing/measure word in a kid question
+("longest", "biggest", "fastest", "tallest", "how long") was matched by
+the pipeline as if it were a topic term -- it was a required AND-search
+token, a title-boost/title-suggest term, and part of the coverage-gate's
+required-term set. Since these are common English adjectives reused
+across unrelated archive articles, junk whose TITLE contains only the
+modifier reached and was cited: "Is DNA the longest molecule?" ->
+"The Longest Ride" (a movie); "What's the biggest animal?" ->
+"World's Biggest Coffee Morning"; "What's the fastest bird?" -> "Fastest
+lap" (motorsport); "How long is DNA?" -> "Long Island (disambiguation)";
+"What's the tallest mountain?" -> "List of tallest buildings in
+Australia" ranked ahead of "Mountain". "What's the longest river?"
+specifically returned status `empty` (ZERO passages): `_coverage_terms`
+required BOTH "longest" and "river" to be covered, but a real river
+article's own text rarely contains the literal word "longest", so
+`term_coverage` (1 of 2 terms) fell below `_COVERAGE_STRONG_THRESHOLD`
+even once the right article ("Kapuas River") was already found and
+ranked -- the modifier being a REQUIRED coverage term, not the modifier
+being absent from search, was the actual empty-result cause.
+
+**Fix (narrow, three parts)**: one shared modifier definition,
+`tutor.retrieval.hybrid.lexical.question_modifier_terms` (moved/extended
+from Assessor v4's `_SUPERLATIVE_WORDS`/`_is_superlative_word`, now
+imported by both `assessment.py` and `research.py` -- no import cycle,
+since `assessment` already imports `lexical` and `research` already
+imports `assessment`), extended with "how long/tall/old/far/big/fast/
+heavy/deep/high/many/much" ONLY when the word directly follows "how" in
+the raw question text. (1) `research._coverage_terms` and
+`research._query_terms` (used for title boost) now subtract modifier
+terms -- a modifier is never required for the coverage gate and never
+used for title boost. (2) `research._drop_modifier_only_candidates`, run
+right after the global score sort and before any ranking refinement:
+drops a candidate whose ONLY overlap with the question's content terms
+(title or text) is a modifier word -- i.e. it matches no topic term
+(head noun) at all. This is what actually removes junk that a
+modifier-only title-suggest/fulltext hit surfaces. (3) Deliberately did
+**NOT** strip modifiers from the AND-of-terms fulltext/title-suggest
+search query built in `_process_archive` -- an early attempt to do so
+regressed `misspelling_probes.jsonl` (msp08, "Name the largest planet,
+jupiterr..."): "largest" is genuine BM25 signal (Jupiter's own article
+text says "the largest planet"), and removing it from the search/BM25
+query dropped Jupiter from rank 3 to rank 6. Topic terms (head nouns:
+animal, bird, molecule, DNA, river, mountain) keep today's behaviour
+throughout.
+
+**Acceptance** (real archive, `data/probe_v16_real.py`, `PYTHONPATH=.
+python data/probe_v16_real.py`):
+- "Is DNA the longest molecule?" -> `DNA`, `DNA`, `Molecule`, `DNA
+  replication`, `Molecule`, `DNA polymerase` (no "The Longest Ride")
+- "What's the biggest animal?" -> `Anime`, `Animal Crossing`, `Animal
+  Crossing`, `Ingrid Newkirk`, `Ingrid Newkirk`, `S` (no "World's Biggest
+  Coffee Morning"/"The Biggest Loser" -- residual ranking-quality gap,
+  not a junk-title regression: none of the top hits are wrong-topic
+  junk, though none is "Animal" either)
+- "What's the fastest bird?" -> `List of U.S. state birds` (x2),
+  `Common eider` (x2), `Ostrich` (x2) (no "Fastest lap")
+- "How long is DNA?" -> `DNA`, `DNA`, `DNA methylation`, `DNA
+  replication`, `DNA replication`, `Nuclear DNA` (no "Long Island
+  (disambiguation)")
+- "What's the tallest mountain?" -> `Mountain`, `Mountain`, `Eucalyptus
+  regnans`, `Jeju Volcanic Island and Lava Tubes` (x2), `Eucalyptus
+  regnans` (no "List of tallest buildings in Australia")
+- "What's the longest river?" -> status `ok`, `The Longest Time`, `The
+  Longest Time`, `List of rivers of Brazil` (x2), `Kapuas River`,
+  `Whanganui River`, `S` -- NON-EMPTY (root cause fixed); "The Longest
+  Time" survives only because that song article's text happens to
+  literally mention "The River of Dreams" (a real, if coincidental,
+  topic-term overlap the drop rule cannot and should not distinguish
+  from genuine coverage) -- not one of the six originally-reported junk
+  titles.
+
+Verified by `tests/test_research_modifiers_real_archive.py`
+(`@pytest.mark.integration`, real archive): none of the six originally-
+reported junk titles is ever returned for these six questions, and
+"What's the longest river?" is non-empty.
+
+**Tuning split** (`eval.run_retrieval_eval`, n=42, real archive,
+`config/archives.simplewiki_only.toml`), measured before (clean HEAD via
+a throwaway `git worktree`, commit f0f8755) vs. after this change:
+
+| | recall@1 | recall@3 | recall@5 | MRR | mean latency (s) |
+|---|---|---|---|---|---|
+| before (`data/v16_before.md`) | 0.595 | 0.690 | 0.762 | 0.645 | 0.733 |
+| after (`data/v16_after.md`) | 0.595 | 0.690 | 0.762 | 0.645 | 0.753 |
+
+Byte-identical recall/MRR (no tuning-split question is a modifier
+question); latency delta well within noise.
+
+**Probes**, before vs. after (same before/after method):
+- `kid_phrasing_probes.jsonl` (n=18): 0.167/0.222/0.222 -> 0.167/0.222/
+  0.222, unchanged (`data/v16_kid_before.md`, `data/v16_kid_probes.md`).
+- `misspelling_probes.jsonl` (n=10): 0.300/0.400/0.500 -> 0.300/0.400/
+  0.500, unchanged (`data/v16_misspelling_before.md`,
+  `data/v16_misspelling_probes.md`) -- this is the number that caught the
+  Jupiter regression from the rejected "strip modifiers from the search
+  query too" version of the fix (see part (3) above); this is the
+  narrowed, non-regressing version.
+
+Measured vs. inferred, not verified: the acceptance bullet points above
+and every table number are measured directly against the real simplewiki
+archive on this machine; the claim that no OTHER modifier phrasing
+anywhere in the corpus is still capable of surfacing junk is inferred
+from the rule's design, not exhaustively verified.
+
+**Regression tests**: `tests/test_lexical.py` (`question_modifier_terms`,
+`is_superlative_word` export), `tests/test_research.py`
+(`_drop_modifier_only_candidates`, `_coverage_terms`/`_query_terms`
+modifier exclusion, including the stray single-character-token edge
+case), `tests/test_research_modifiers_real_archive.py`
+(`@pytest.mark.integration`, real archive, the six questions), plus the
+full existing `test_assessment.py`/`test_research.py` suites, all green.
