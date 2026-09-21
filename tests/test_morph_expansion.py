@@ -200,6 +200,126 @@ class _StrongFakeWorker:
         pass
 
 
+class _SquarefootFakeWorker:
+    """Baseline v15: "how to squarefoot garden the right way?" needs THREE
+    fallbacks to compose in sequence -- filler stripping ("right"/"way"
+    dropped from the AND query), compound split ("squarefoot" -> "square
+    foot"), and morph expansion on top of the corrected phrase ("garden"
+    -> "gardening", since the fake article -- like the real one -- only
+    contains "gardening"). The joined AND query only ever succeeds once
+    ALL THREE have happened: "square foot gardening" (no "right"/"way",
+    no "squarefoot", no bare "garden").
+    """
+
+    _MATCHES = {
+        "square": 8109,
+        "foot": 2515,
+        "squarefoot": 0,
+        "garden": 0,
+        "gardening": 450,
+        "right": 50000,
+        "way": 60000,
+    }
+    _HTML = (
+        "<html><head><title>Square foot gardening</title></head>"
+        "<body><h1>Square foot gardening</h1>"
+        "<p>Square foot gardening is a method of gardening in small "
+        "spaces.</p></body></html>"
+    )
+
+    def __init__(self, archive_path: Path) -> None:
+        self.fulltext_queries: list[str] = []
+
+    def request(self, op: str, *, deadline_s: float, **kwargs) -> WorkerResult:
+        if op == "multi":
+            results = []
+            for sub_op, sub_kwargs in kwargs.get("ops", []):
+                sub_res = self.request(sub_op, deadline_s=deadline_s, **sub_kwargs)
+                results.append(
+                    {"status": sub_res.status, "value": sub_res.value, "error": sub_res.error}
+                )
+            return WorkerResult(status="ok", value=results, error=None, elapsed_s=0.0)
+        if op == "estimated_matches":
+            term = kwargs["term"].strip('"')
+            return WorkerResult(
+                status="ok", value=self._MATCHES.get(term, 0), error=None, elapsed_s=0.0
+            )
+        if op == "search_fulltext":
+            self.fulltext_queries.append(kwargs["query"])
+            terms = set(kwargs["query"].split())
+            if {"square", "foot", "gardening"} <= terms and "right" not in terms:
+                return WorkerResult(
+                    status="ok",
+                    value=_hits(
+                        [("Square_foot_gardening", "Square foot gardening")], "fulltext"
+                    ),
+                    error=None,
+                    elapsed_s=0.0,
+                )
+            return WorkerResult(status="ok", value=[], error=None, elapsed_s=0.0)
+        if op == "search_titles":
+            terms = set(kwargs["query"].split())
+            if {"square", "foot", "gardening"} <= terms and "right" not in terms:
+                return WorkerResult(
+                    status="ok",
+                    value=_hits(
+                        [("Square_foot_gardening", "Square foot gardening")], "title"
+                    ),
+                    error=None,
+                    elapsed_s=0.0,
+                )
+            return WorkerResult(status="ok", value=[], error=None, elapsed_s=0.0)
+        if op == "fetch_entry":
+            from tutor.retrieval.zim.search import FetchedEntry
+
+            return WorkerResult(
+                status="ok",
+                value=FetchedEntry(
+                    path="Square_foot_gardening",
+                    title="Square foot gardening",
+                    mimetype="text/html",
+                    html=self._HTML,
+                    hops=(),
+                ),
+                error=None,
+                elapsed_s=0.0,
+            )
+        return WorkerResult(status="error", value=None, error=f"unknown op {op}", elapsed_s=0.0)
+
+    def close(self) -> None:
+        pass
+
+
+def test_fallbacks_compose_squarefoot_garden_right_way(registry_toml, snapshot_store, tmp_path):
+    """Baseline v15 regression: compound-split and morph-expansion must
+    compose on the SAME (filler-stripped, corrected) term list, in
+    sequence, not evaluate the morph fallback against the stale original
+    tokens ("squarefoot", "right", "way")."""
+    from tutor.retrieval.registry import load_registry
+
+    registry = load_registry(registry_toml)
+    engine = _engine(
+        registry_toml,
+        snapshot_store,
+        tmp_path,
+        worker_factory=lambda p: _SquarefootFakeWorker(p),
+    )
+    entry = registry.for_subject(None)[0]
+    corrected_terms_out: dict[str, str] = {}
+    expanded_terms_out: dict[str, list[str]] = {}
+    candidates, _timed_out, _note, _key_facts = engine._process_archive(
+        entry,
+        "how to squarefoot garden the right way?",
+        lambda: 5.0,
+        corrected_terms_out=corrected_terms_out,
+        expanded_terms_out=expanded_terms_out,
+    )
+    paths = {c["path"] for c in candidates}
+    assert "Square_foot_gardening" in paths, candidates
+    assert corrected_terms_out.get("squarefoot") == "square foot"
+    assert "gardening" in expanded_terms_out.get("garden", [])
+
+
 def test_morph_expansion_finds_gardening_article(registry_toml, snapshot_store, tmp_path):
     from tutor.retrieval.registry import load_registry
 

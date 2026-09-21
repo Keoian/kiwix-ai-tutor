@@ -36,6 +36,7 @@ from tutor.retrieval.hybrid.dense import DenseIndex
 from tutor.retrieval.hybrid.diversity import cap_per_article
 from tutor.retrieval.hybrid.lexical import (
     BM25,
+    QUESTION_SHAPE_FILLERS,
     rank_terms_by_rarity,
     singularize,
     strip_instruction_words,
@@ -565,6 +566,7 @@ def _best_coverage(
     query_terms: set[str],
     topic_hint_terms: frozenset[str],
     own_term_count: int = 0,
+    term_variants: Mapping[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     """The least-weak :func:`compute_coverage` result among the top-scored
     ``_COVERAGE_CANDIDATES_CHECKED`` candidates (any one of them being a
@@ -581,7 +583,12 @@ def _best_coverage(
     """
     if not candidates:
         return compute_coverage(
-            query_terms, None, None, hint_terms=topic_hint_terms, own_term_count=own_term_count
+            query_terms,
+            None,
+            None,
+            hint_terms=topic_hint_terms,
+            own_term_count=own_term_count,
+            term_variants=term_variants,
         )
     top = sorted(candidates, key=lambda c: -c["score"])[:_COVERAGE_CANDIDATES_CHECKED]
     best: dict[str, Any] | None = None
@@ -592,6 +599,7 @@ def _best_coverage(
             c["text"],
             hint_terms=topic_hint_terms,
             own_term_count=own_term_count,
+            term_variants=term_variants,
         )
         if not cov["weak"]:
             return cov
@@ -607,6 +615,7 @@ def compute_coverage(
     text: str | None,
     hint_terms: frozenset[str] | None = None,
     own_term_count: int = 0,
+    term_variants: Mapping[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     """Explainable coverage flags for a single candidate.
 
@@ -627,6 +636,16 @@ def compute_coverage(
     otherwise uncovered) is never sufficient by itself. Matching tolerates
     simple plural/singular differences (``singularize``) so "moon" in the
     query matches "moons" in the text.
+
+    ``term_variants`` (Baseline v15, additive): a map from an ORIGINAL
+    query term to morphological/corrected variant forms found for it
+    during this request (e.g. ``{"garden": ["gardening"]}``, ``{"squarefoot":
+    ["square", "foot"]}``) -- a term counts as covered if EITHER itself or
+    any of its accepted variants is present, without changing how many
+    terms the coverage fraction is computed over (only widens each term's
+    OWN match, never adds a brand-new required term to the denominator --
+    that previously regressed the tuning split by making some
+    already-strong candidates look weak).
     """
     if not query_terms or title is None or text is None:
         return {"term_coverage": 0.0, "title_match": False, "weak": True}
@@ -634,8 +653,19 @@ def compute_coverage(
     passage_terms = {singularize(t) for t in tokenize(text)}
     title_terms = {singularize(t) for t in tokenize(title)}
     norm_query_terms = {singularize(t) for t in query_terms}
-    term_coverage = len(norm_query_terms & passage_terms) / len(norm_query_terms)
-    title_match = bool(norm_query_terms & title_terms)
+
+    def _term_matches(term: str, corpus_terms: set[str]) -> bool:
+        if term in corpus_terms:
+            return True
+        if term_variants:
+            for variant in term_variants.get(term, ()):
+                if singularize(variant) in corpus_terms:
+                    return True
+        return False
+
+    covered_count = sum(1 for t in norm_query_terms if _term_matches(t, passage_terms))
+    term_coverage = covered_count / len(norm_query_terms)
+    title_match = any(_term_matches(t, title_terms) for t in norm_query_terms)
     if (
         title_match
         and own_term_count >= _OWN_TERM_FLOOR_MIN_COUNT
@@ -1407,7 +1437,16 @@ class ResearchEngine:
         # query can yield zero hits even when the topic is clearly present),
         # so search uses the same pinned tokenizer as BM25 rather than the
         # raw question string.
-        tokens = tokenize(strip_instruction_words(query))
+        # Baseline v15: strip generic "question-shape" words (right/way/
+        # best/...) that survive tokenize's stopword list but carry no
+        # search-worthy content -- otherwise the AND-of-terms search query
+        # built below can require a word like "way" that the correct
+        # article never contains (see QUESTION_SHAPE_FILLERS).
+        tokens = [
+            t
+            for t in tokenize(strip_instruction_words(query))
+            if t not in QUESTION_SHAPE_FILLERS
+        ]
         # Spec §7.2 step 1: "plus the model keywords if present" -- append
         # the (already-validated) model-supplied keywords to the lexical
         # query terms used for candidate generation.
@@ -1728,6 +1767,16 @@ class ResearchEngine:
                                     break
                     corrected_query = " ".join(corrected_tokens)
                     if corrected_query and corrected_query != search_query:
+                        # Baseline v15: fallbacks must COMPOSE on the
+                        # current corrected term list -- the morph-variant
+                        # fallback below reads ``tokens``/``search_query``,
+                        # so a compound split ("squarefoot" -> "square
+                        # foot") must be reflected in them BEFORE morph
+                        # runs, or morph never gets the chance to also
+                        # widen e.g. "garden" -> "gardening" on top of the
+                        # already-corrected phrase.
+                        tokens = corrected_tokens
+                        search_query = corrected_query
                         compound_res = _call_worker_multi(
                             worker,
                             [
@@ -2339,12 +2388,38 @@ class ResearchEngine:
         # ever contains the CORRECTED spelling (which is all real articles
         # do) looks like weak/no coverage of the question's own terms and
         # gets dropped as "empty" even though the right article was found.
+        def _coverage_term_variants() -> dict[str, list[str]]:
+            # Baseline v15: a corrected/expanded term must count for the
+            # coverage gate too, or a passage that only ever contains the
+            # corrected/expanded form (which every real article does)
+            # looks like weak/no coverage and gets dropped as "empty" even
+            # though the right article was found. Unlike v11's original
+            # fix (unioning corrected phrases straight into
+            # ``coverage_terms``'s set), this widens each ORIGINAL term's
+            # own match (``compute_coverage``'s ``term_variants``) instead
+            # of adding brand-new required terms to the coverage
+            # denominator -- adding new terms regressed the tuning split
+            # (0.595/0.690/0.762 -> 0.571/0.667/0.738 measured) because a
+            # morph variant firing for an unrelated, already-strong
+            # candidate made it look weaker, not stronger, by inflating
+            # how many terms had to match.
+            variants: dict[str, list[str]] = {}
+            for orig, fixed in corrected_terms_out.items():
+                variants.setdefault(orig, []).extend(tokenize(fixed))
+            for term, vs in expanded_terms_out.items():
+                variants.setdefault(term, []).extend(vs)
+            return variants
+
         if corrected_terms_out:
             coverage_terms = coverage_terms | frozenset(corrected_terms_out.values())
 
         if fallback_archives and not soft_elapsed() and remaining() > 0:
             preliminary_coverage = _best_coverage(
-                candidates, coverage_terms, topic_hint_terms, own_term_count
+                candidates,
+                coverage_terms,
+                topic_hint_terms,
+                own_term_count,
+                term_variants=_coverage_term_variants(),
             )
             if preliminary_coverage["weak"]:
                 _consult(fallback_archives)
@@ -2412,7 +2487,13 @@ class ResearchEngine:
         budget = budget_tokens if budget_tokens is not None else self._default_budget_tokens
         packed = pack(combined_passages, budget_tokens=budget, count_tokens=estimate_tokens)
 
-        coverage = _best_coverage(packed, coverage_terms, topic_hint_terms, own_term_count)
+        coverage = _best_coverage(
+            packed,
+            coverage_terms,
+            topic_hint_terms,
+            own_term_count,
+            term_variants=_coverage_term_variants(),
+        )
 
         passages: list[ResearchPassage] = []
         keep_weak_passages = relax_coverage_gate and bool(packed)

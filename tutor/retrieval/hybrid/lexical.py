@@ -42,6 +42,33 @@ def tokenize(text: str) -> list[str]:
     return [t for t in (m.group(0).lower() for m in _TOKEN_RE.finditer(text)) if t not in stopwords]
 
 
+# Extra "question-shape" words that survive ``tokenize``'s stopword list
+# (which already drops how/what/do/does/...) but still carry no content of
+# their own -- neither for coverage judgment (see
+# ``tutor.retrieval.assessment._key_terms``, the original home of this set)
+# nor for building a search AND-query (Baseline v15: "how to squarefoot
+# garden the RIGHT WAY" -- the corrected AND query "square foot garden
+# right way" never matches "Square foot gardening" because that article
+# contains neither "right" nor "way"). Shared here so both call sites use
+# exactly the same list.
+QUESTION_SHAPE_FILLERS = frozenset(
+    {
+        "right",
+        "way",
+        "ways",
+        "kind",
+        "kinds",
+        "sort",
+        "sorts",
+        "best",
+        "good",
+        "proper",
+        "properly",
+        "correctly",
+    }
+)
+
+
 # Wrapper phrases that signal "this is an instruction to the model", not a
 # topic: "tell me", "give me", "show me", "can you explain/describe/tell/
 # show/give/list", and a bare "please". Stripped from anywhere in the text

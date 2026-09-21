@@ -1574,3 +1574,62 @@ warranted absent evidence of harm.
 
 **Conclusion**: ships as default -- no tuning regression, latency within
 budget, no probe regression or improvement, no observed false expansion.
+
+## Baseline v15 -- fallbacks compose; squarefoot case
+
+**Root cause (measured, `data/squarefoot_debug.py`, real archive)**:
+`_process_archive`'s spelling/compound/morph fallbacks did not compose on
+one shared, current term list -- the compound-split correction
+("squarefoot" -> "square foot") rewrote `fulltext_hits`/`title_hits` but
+never updated the outer `tokens`/`search_query`, so the later morph
+fallback (and its AND-query rebuild) still substituted into the STALE,
+uncorrected token list. Compounding this, "right"/"way" (question-shape
+filler words that survive `tokenize`'s stopword list, already excluded
+from `assessment.py`'s coverage terms but never from the AND-query built
+here) stayed in every rebuilt query, so even a correctly-composed
+"square foot garden right way" query still failed (the article contains
+neither word).
+
+**Fix**: (1) moved the filler set to a shared
+`tutor.retrieval.hybrid.lexical.QUESTION_SHAPE_FILLERS` and strip it from
+`_process_archive`'s search tokens up front (assessment.py's coverage-term
+filler list now imports the same constant); (2) after a compound
+correction succeeds, `tokens`/`search_query` are reassigned to the
+corrected form so the morph-variant fallback (and its own extra-query
+builder) substitutes into the corrected list, not the original one; (3)
+`compute_coverage` gained an additive `term_variants` map (corrected
+phrase words + morph variants) so an original query term counts as
+covered if any accepted variant is present in the candidate, WITHOUT
+adding new required terms to the coverage denominator -- an earlier
+attempt that simply unioned corrected/expanded words into `coverage_terms`
+regressed the tuning split (0.595/0.690/0.762 -> 0.571/0.667/0.738) because
+an unrelated morph hit inflated how many terms an already-strong
+candidate had to match.
+
+**Acceptance** (real archive, `config/archives.simplewiki_only.toml`):
+"how to squarefoot garden the right way?" -> status `ok`,
+`corrected_terms={'squarefoot': 'square foot'}`, top-5 =
+`['Garden', 'Square foot gardening', 'Square foot gardening', 'Garden',
+'Garden City']` -- gold in top-5. Extra probes: "squarefoot gardening"
+PASS (rank 1); "square foot garden how" PASS (rank 1); "how do volcanos
+erupt" PASS (Volcano rank 1); "why do we have earth quakes" FAIL (top-5 is
+Earth phase/Quake -- pre-existing ranking gap, not a fallback-composition
+issue: "earthquake"/"earth quake" splitting/joining never engages since
+neither half is near-zero-match); "fotosinthesis" FAIL (status empty --
+spelling fallback needs >=1 zero-match term of length >=4 among several
+*content* terms, but here the whole one-word query has no other term to
+anchor a fallback attempt on; pre-existing, unrelated to this fix);
+"dinasors" FAIL (status empty, same single-word-query limitation).
+
+**Tuning split** (`eval.run_retrieval_eval`, n=42, real archive): recall@1/
+3/5 = 0.595/0.690/0.762, MRR 0.645 -- byte-identical to v14. Mean latency
+1.014s (v14 ~1.00s), well under the +0.05s bar.
+
+**Probes** (`data/morph_v14_probes.py`, real archive): kid_phrasing_probes
+gold-in-top5 4/18=0.222 (was 2/18=0.111 in v14's own doc entry -- kid01's
+squarefoot case is now fixed); misspelling_probes 5/10=0.500, unchanged.
+
+**Regression tests**: `tests/test_morph_expansion.py::
+test_fallbacks_compose_squarefoot_garden_right_way` (fake worker requiring
+filler-strip + compound-split + morph-on-top-of-compound to all compose)
+plus the existing morph/research suites, all green.

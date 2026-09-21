@@ -22,28 +22,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from tutor.retrieval.hybrid.lexical import singularize, strip_instruction_words, tokenize
-
-# Extra "question-shape" words that survive ``tokenize``'s stopword list
-# (which already drops how/what/do/does/...) but still carry no content of
-# their own for THIS purpose -- coverage is about the topic being asked
-# about, not the phrasing used to ask about it.
-_QUESTION_FILLERS = frozenset(
-    {
-        "right",
-        "way",
-        "ways",
-        "kind",
-        "kinds",
-        "sort",
-        "sorts",
-        "best",
-        "good",
-        "proper",
-        "properly",
-        "correctly",
-    }
+from tutor.retrieval.hybrid.lexical import (
+    QUESTION_SHAPE_FILLERS as _QUESTION_FILLERS,
 )
+from tutor.retrieval.hybrid.lexical import singularize, strip_instruction_words, tokenize
 
 # Baseline v13 (measured on the 42-question tuning split, see
 # docs/retrieval_baseline.md "Baseline v13"): a coverage fraction (of the
