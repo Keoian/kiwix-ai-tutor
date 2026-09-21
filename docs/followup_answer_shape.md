@@ -321,18 +321,85 @@ absent on turn 1, and is the last thing in the tool result), and
 `tests/test_settings_app.py` cover the TOML default (`False`/`False`)
 and override.
 
-**Not done this pass: the live measurement.** Running the full
-`data/followup_shape_measure.py`-style protocol (baseline/R1/R2 x 2
-lessons x 2 reps, strictly sequential against the single llama-server
-slot) is a multi-hour live-model workload and was out of scope for the
-time budget available in this session. So, per the task's own
-instruction to report a negative/undecided result plainly rather than
-skip or fabricate one: **R1/R2 are implemented and unit-tested but NOT
-adopted** (`restate_question_last` stays `False` by default) because
-the measured evidence needed to justify turning it on does not exist
-yet. This is a "not verified," not a "negative result" -- unlike
-iteration 2, no live run contradicted the hypothesis; none was run.
-Whoever picks this up next should run
-`data/followup_shape_measure.py` (or a small adaptation of it) with
-`app.restate_question_last`/`app.restate_question_instruction` set per
-arm before deciding whether to flip the default.
+### Measured (`data/restate_measure.py`, `data/restate_measure.json`, 2 reps x 2 lessons x 3 arms = 12 lesson runs, live against llama-server on :8080)
+
+Arms: **baseline** (both settings `False`, today's default), **R1**
+(`restate_question_last=True`), **R2** (`restate_question_last=True`,
+`restate_question_instruction=True`). Lessons: the DNA 7-turn lesson and
+a new Volcano 5-turn lesson (`"What is a volcano?"`, `"Are they
+dangerous?"`, `"Tell me about the biggest one"`, `"Why do they
+erupt?"`, `"Is lava hot?"`).
+
+First sentence / tokens / Jaccard-vs-previous-answer, DNA lesson, rep0
+(rep1 in the checkpoint JSON tells the same story):
+
+| turn | question | baseline | R1 | R2 |
+|---|---|---|---|---|
+| 2 | What about DNA? | "Yes, DNA ... is a molecule." (674 tok) | "Yes, DNA ... is a molecule." (672 tok) | "DNA is indeed a large molecule." (754 tok) |
+| 3 | Is it a molecule? | "Yes, DNA is a molecule." (629 tok, J=0.96 vs t2) | "Yes, DNA ... is a molecule." (672 tok, J=1.00 vs t2) | "Yes, DNA is a molecule." (778 tok, J=0.29 vs t2) |
+| 4 | Yes but is it a molecule? | same as t3 (629 tok, J=1.00 vs t3) | same as t3 (672 tok, J=1.00 vs t3) | same as t3 (778 tok, J=1.00 vs t3) |
+| 5 | Tell me about DNA | **"Yes,** DNA ... is a molecule." (327 tok, J=0.50 vs t4) | "DNA ... is a molecule that contains..." (no Yes; 665 tok, but J=0.995 vs t4 -- essentially the same essay) | **"Yes,** DNA ... is a molecule." (778 tok, J=1.00 vs t4) |
+| 6 | How does it copy itself? | **"Yes,** DNA replicates itself through..." (293 tok) | "DNA copies itself through a process called DNA replication." (no Yes; 856 tok) | "DNA copies itself through..." (no Yes; 717 tok) |
+| 7 | Why does that matter? | **"Yes,** DNA replication is important..." (287 tok) | "DNA copying itself matters because..." (no Yes; 842 tok) | "DNA replication is crucial because..." (no Yes; 656 tok) |
+
+Aggregate spurious-"Yes"-on-an-open-turn rate (turns 5-7 DNA, turns 3-4
+Volcano; 10 open-turn instances total across 2 lessons x 2 reps):
+**baseline 9/10**, **R1 1/10**, **R2 8/10**. R1 clearly, repeatably
+fixes the iteration-2 failure mode (open turns bleeding a spurious
+"Yes,"); R2's extra instruction sentence perversely brings the spurious
+Yes back almost to baseline levels.
+
+But R1 does **not** clear the doc's own success bar for open turns:
+"Tell me about DNA" (turn 5) stopped starting with "Yes," but its
+Jaccard overlap vs the immediately preceding answer was 0.995 (rep0)
+and 0.877-0.886 (rep1) -- essentially the same essay restated, not the
+"well under 0.8, add only what's new" the criteria call for. And no
+arm -- baseline, R1, or R2 -- ever produced a *short* yes/no
+confirmation: turns 3/4 ("Is it a molecule?" / "Yes but is it a
+molecule?") stayed 629-778 tokens with Jaccard 0.96-1.00 vs the prior
+turn in every arm, baseline included. `restate_question_last` changes
+*whether the model opens with "Yes,"* on later turns; it does not touch
+the separate, still-unsolved problem (named in iteration 2's
+conclusion) of the model re-emitting its own prior full-length answer
+regardless of what a yes/no turn actually needs.
+
+Volcano lesson replicated the same pattern: R1's open turns ("Tell me
+about the biggest one", "Why do they erupt?") did not start with
+"Yes," in either rep; baseline and R2 mostly did. `has_citation`
+([S#] present) was inconsistent across all three arms on both lessons
+(true on DNA turn 1 in every arm; false on most Volcano turns in every
+arm) -- evidence rendering/citation habits did not visibly change with
+the restate settings either way. No "wasn't able to find" text was seen
+on a turn with usable evidence in R1 or R2; one baseline rep (Volcano,
+"Are they dangerous?") answered "I could not find information about
+the danger of volcanoes..." despite `backed_sentence_rate=0.667`
+(evidence was present) -- a pre-existing baseline flaw, not something
+R1/R2 introduced or fixed.
+
+**Measured, not inferred**: the spurious-Yes counts, token counts, and
+Jaccard values above are all read directly from
+`data/restate_measure.json` (full answer text, evidence-appended
+content, and `backed_sentence_rate` stored per turn). **Not verified**:
+why R2's extra instruction sentence reverses R1's improvement (not
+diagnosed -- would need a prompt-content diff, which the checkpoint's
+`appended_content` field has but this pass did not analyze further);
+human-perceived helpfulness; any topic beyond DNA/Volcano.
+
+### Decision
+
+Neither R1 nor R2 clearly meets the doc's success criteria on both
+lessons in both reps -- R1 fixes the spurious-"Yes"-on-open-turns
+failure but not the near-verbatim-repeat failure on either open or
+yes/no turns, and R2 is worse than R1 on the metric R1 does fix. Per
+the task's decision rule, **defaults stay `False`**
+(`app.restate_question_last`, `app.restate_question_instruction`); no
+changes to `tutor/settings.py`, `tutor/app/agent_loop.py`,
+`tutor/app/compose.py`, or their tests. The restate-question-last
+mechanism is a real, measured partial improvement (open turns stop
+saying "Yes," ~9x less often) but not a complete fix, and turning it on
+by default would trade one measured problem for a smaller one rather
+than solving the doc's actual goal. The still-open problem for a future
+iteration: DNA/Volcano yes/no confirmation turns and DNA turn 5 replay
+the full previous essay almost verbatim in every arm tried so far,
+including the current default -- restating the question did not change
+that; only the model's disposition to re-emit its own prior answer did.
