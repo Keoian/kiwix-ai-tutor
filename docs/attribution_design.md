@@ -12,6 +12,27 @@ using the passage's stored character offsets; the chat pane distinguishes
 source-backed/computed/own-example styles (already referenced in
 `tutor/app/agent_loop.py`'s `uncited` docstring).
 
+## Display wording (2026-09-20 owner feedback)
+
+The internal names below ("source-backed", "computed", "own-example") stay as
+the spec's three statement kinds and the names used in code. What the UI
+*shows* the student is more precise about what actually happened: the host
+checks a sentence against the passages retrieved/retained for that turn, not
+"the whole library". A marker never claims a library-wide search was done
+when it wasn't:
+
+- ● source-backed → "Found in the sources the tutor looked up"
+- ○ own-example/unbacked → "Not found in the sources the tutor looked up —
+  this may be the tutor's own knowledge"
+- ⚠ unbacked_number → "This number is not in the sources the tutor looked up
+  — double-check it"
+- ✓ computed/verified → "Checked by the calculator"
+
+The turn-level note (shown when nothing on the turn was host-backed) also
+distinguishes "no passages came back at all for this question" from "passages
+came back but none of them backed this answer" — see the `attributions`
+event's additive `passages_available` field in `tutor/app/compose.py`.
+
 ## Names used in code/UI
 
 Matching the spec's own three terms rather than inventing new ones:

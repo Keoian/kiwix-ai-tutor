@@ -408,6 +408,12 @@ def _make_turn_runner(
                     ],
                     "unbacked": [dataclasses.asdict(u) for u in unbacked_spans],
                     "computed": computed_items,
+                    # Additive (2026-09-20 UI wording follow-up): lets the UI
+                    # tell "the library had nothing at all for this question"
+                    # apart from "some passages came back but none of them
+                    # backed anything the model said" -- two different notes.
+                    # Does not change citation_quality or any soak/eval metric.
+                    "passages_available": len(known_passages),
                 }
                 emit("attributions", attributions_payload)
             emit(

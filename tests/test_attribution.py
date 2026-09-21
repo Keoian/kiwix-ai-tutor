@@ -358,3 +358,37 @@ def test_short_non_claims_are_ignored_entirely():
     covered = "".join(answer[s:e] for s, e in all_spans)
     assert "Great question" not in covered
     assert "What do you think" not in covered
+
+
+def test_bracket_only_fragment_is_ignored_not_flagged_unbacked():
+    # 2026-09-20 owner report: Granite emitted a bogus bracket label
+    # "[Q&A]" (not an [S#] citation) after two claims already flagged
+    # unbacked_number; the punctuation-based sentence splitter split it off
+    # as its own tiny "sentence", which then got its own spurious "tutor's
+    # own words" (unbacked) marker in the UI. A fragment that is nothing
+    # but bracketed tokens carries no claim of its own.
+    answer = (
+        "Based on general knowledge, the coldest temperature a human being "
+        "has ever survived is -93°C (-135.4°F). This record was set by "
+        "Kim Bodil Sørensen in Greenland in 1975. [Q&A]"
+    )
+    result = attribute_sentences(answer, [])
+
+    all_spans = [a.sentence_span for a in result.attributions] + [
+        u.span for u in result.unbacked_spans
+    ]
+    covered = "".join(answer[s:e] for s, e in all_spans)
+    assert "[Q&A]" not in covered
+
+
+def test_trailing_bare_citation_label_fragment_is_still_a_real_citation():
+    # Unlike a bogus "[Q&A]" fragment, a bare trailing "[S1]" IS a real
+    # citation and must still be attributed (model_cited=True) -- the
+    # bracket-only-fragment fix must not swallow legitimate citations.
+    answer = "Water boils at 100 degrees Celsius at sea level. [S1]"
+    passage = _passage(
+        "S1", "p1", "Water boils at 100 degrees Celsius at standard atmospheric pressure."
+    )
+    result = attribute_sentences(answer, [passage])
+
+    assert any(a.model_cited and a.label == "S1" for a in result.attributions)

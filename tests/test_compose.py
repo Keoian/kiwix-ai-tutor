@@ -237,6 +237,51 @@ def test_turn_runner_emits_attributions_event_before_done(tmp_path):
     assert attributions_data["attributions"][0]["label"] == "S1"
 
 
+def test_attributions_event_reports_passages_available(tmp_path):
+    """2026-09-20 UI wording follow-up: the `attributions` event carries an
+    additive `passages_available` count (len(known_passages)) so the UI can
+    tell "the library had nothing at all for this question" apart from
+    "some passages came back but none backed this answer" -- two different
+    notes. Additive only: does not touch citation_quality."""
+    cfg = _cfg_with_unreachable_llm_and_missing_archives(tmp_path)
+    answer = "The mitochondria is the powerhouse of the cell. [S1]"
+    events = [
+        StreamEvent(kind="token", text=answer),
+        StreamEvent(kind="done", finish_reason="stop", usage={}),
+    ]
+    fake_llm = _FakeLlm(events)
+
+    class _PassagesResearchEngine:
+        def research(self, query, *, topic_hint=None, keywords=None):
+            return {
+                "passages": [
+                    {
+                        "label": "S1",
+                        "id": "p1",
+                        "title": "Cell biology",
+                        "path": "Biology/Cell",
+                        "text": "The mitochondria is the powerhouse of the cell.",
+                        "kind": "article",
+                    }
+                ]
+            }
+
+    deps = build_deps(cfg, llm=fake_llm, research_engine=_PassagesResearchEngine())
+    session_id = deps.sessions.create()
+    frames = []
+
+    def emit(event_name, data):
+        frames.append((event_name, data))
+
+    cancel = threading.Event()
+    deps.turn_runner(
+        session_id, _Input(kind="text", text="What is the mitochondria?"), emit, cancel
+    )
+
+    attributions_data = dict(frames)["attributions"]
+    assert attributions_data["passages_available"] == 1
+
+
 def test_turn_runner_survives_attribution_exception(tmp_path, monkeypatch):
     """A broken attribution layer must never fail the turn -- it just emits
     no `attributions` event."""

@@ -263,6 +263,10 @@ def _normalize_minus(text: str) -> str:
 
 _LEADING_LIST_NUMBER_RE = re.compile(r"^\s*\d+[.)](?:\s+|$)")
 
+# One or more bracketed tokens and nothing else -- e.g. "[Q&A]" or "[S1]"
+# left standing alone after sentence splitting.
+_BRACKET_ONLY_RE = re.compile(r"^(?:\[[^\[\]]*\]\s*)+$")
+
 
 def _strip_label_noise(text: str) -> str:
     """Strip ``[S123]``-style citation labels and a leading list-numbering
@@ -319,6 +323,16 @@ def _is_short_non_claim(sentence: str) -> bool:
     # A bare list-numbering marker ("1.", "2)") split off as its own
     # "sentence" by the punctuation-based splitter -- not a claim itself.
     if _LEADING_LIST_NUMBER_RE.match(s) and _LEADING_LIST_NUMBER_RE.sub("", s) == "":
+        return True
+    # A fragment that is nothing but one or more bracketed tokens, AND
+    # none of them is a real [S#] citation label, carries no claim of its
+    # own -- e.g. a bogus trailing "[Q&A]" the model tacked on (2026-09-20
+    # bracket-label follow-up: this used to get its own spurious unbacked
+    # ("tutor's own words") marker in the UI). A bracket-only fragment that
+    # DOES carry a real [S#] label (e.g. a lone trailing "[S1]") is left
+    # alone -- that is a legitimate citation, handled by `_labels_in`
+    # below, not noise.
+    if _BRACKET_ONLY_RE.match(s) and not _LABEL_RE.search(s):
         return True
     return False
 
