@@ -204,6 +204,18 @@ button.attribution-marker {
   font-weight: bold;
 }
 
+/* 2026-09-20 computed-statement follow-up (docs/calc_investigation.md fix
+   #1): the host verifies stated arithmetic against the calc evaluator. */
+.attribution-computed-verified {
+  color: #1e8449;
+  font-weight: bold;
+}
+
+.attribution-computed-mismatch {
+  color: #c0392b;
+  font-weight: bold;
+}
+
 #attribution-legend ul {
   list-style: none;
   padding: 0;

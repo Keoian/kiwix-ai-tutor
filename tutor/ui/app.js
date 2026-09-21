@@ -198,6 +198,15 @@
   // (out of range) is simply skipped rather than mis-highlighting.
   // -----------------------------------------------------------------------
 
+  // Renders a computed number for display: plain for an integer, rounded
+  // to 4 decimal places (trailing zeros dropped by String()) otherwise --
+  // never full float noise like 79.99999999999999.
+  function formatComputedNumber(n) {
+    if (typeof n !== "number" || !isFinite(n)) return String(n);
+    if (Number.isInteger(n)) return String(n);
+    return String(Math.round(n * 10000) / 10000);
+  }
+
   function attributionMarkers(attributionsEvent) {
     const markers = [];
     if (!attributionsEvent) return markers;
@@ -211,6 +220,19 @@
       markers.push({
         pos: span[1],
         kind: u.reason === "unbacked_number" ? "unbacked-number" : "unbacked",
+      });
+    });
+    // 2026-09-20 computed-statement follow-up (docs/calc_investigation.md
+    // fix #1): the host verifies stated arithmetic against the calc
+    // evaluator. Only items with a span land inline as markers here --
+    // a "the question asked for a number the answer never gave" item
+    // (span: null) is rendered as a separate note, see appendComputedGapNote.
+    (attributionsEvent.computed || []).forEach(function (c) {
+      if (!c.span) return;
+      markers.push({
+        pos: c.span[1],
+        kind: c.status === "verified" ? "computed-verified" : "computed-mismatch",
+        computed: c.computed,
       });
     });
     markers.sort(function (a, b) {
@@ -238,11 +260,41 @@
         attrs: { "aria-label": "number not found in the library" },
       });
     }
+    if (marker.kind === "computed-verified") {
+      return el("span", {
+        className: "attribution-marker attribution-computed-verified",
+        text: "✓ checked",
+        attrs: { "aria-label": "computed -- checked by the calculator" },
+      });
+    }
+    if (marker.kind === "computed-mismatch") {
+      return el("span", {
+        className: "attribution-marker attribution-computed-mismatch",
+        text: "The calculator gets " + formatComputedNumber(marker.computed),
+        attrs: { "aria-label": "the calculator disagrees with this number" },
+      });
+    }
     return el("span", {
       className: "attribution-marker attribution-unbacked",
       text: "○",
       attrs: { "aria-label": "the tutor's own words -- not checked against the library" },
     });
+  }
+
+  // A computed-check mismatch the host detected in the STUDENT'S QUESTION
+  // (the answer never stated the number the question asked for at all,
+  // span: null) -- rendered as its own note rather than an inline marker
+  // since there is no answer text position to attach it to. textContent
+  // only, like every other note in this file.
+  function appendComputedGapNote(computed) {
+    const wrapper = el("div", { className: "msg msg-note" });
+    const note = el("span", {
+      className: "attribution-marker attribution-computed-mismatch",
+      text: "The calculator gets " + formatComputedNumber(computed),
+    });
+    wrapper.appendChild(note);
+    chat.appendChild(wrapper);
+    chat.scrollTop = chat.scrollHeight;
   }
 
   // Rebuilds tutorNode's content from the final answer text, splitting on
@@ -548,6 +600,11 @@
       lastAttributionsEvent = data;
       renderAnswerWithAttribution(tutorNode, getTutorLine(), data, lastCitationsEvent);
       renderCitations(tutorNode, lastCitationsEvent && lastCitationsEvent.citations);
+      (data.computed || []).forEach(function (c) {
+        if (!c.span && c.status === "mismatch") {
+          appendComputedGapNote(c.computed);
+        }
+      });
     } else if (eventName === "eviction") {
       appendEvictionNote(data);
     } else if (eventName === "error") {

@@ -28,7 +28,13 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
-from tutor.app.citations import attribute_sentences, detect_evidence_dump, resolve_citations
+from tutor.app.citations import (
+    _figures,
+    attribute_sentences,
+    detect_evidence_dump,
+    resolve_citations,
+)
+from tutor.app.computed_check import check_computed_statements
 from tutor.app.lesson_state import LessonStore
 from tutor.app.llm_client import LlamaClient, LlamaError, StreamEvent
 from tutor.app.main import AppDeps
@@ -379,18 +385,29 @@ def _make_turn_runner(
             # docs/attribution_design.md): a separate SSE event, sent
             # before "done", never editing the model's own answer text.
             # Failure here must never fail an otherwise-successful turn.
+            computed_items: list[dict] = []
+            try:
+                question_text = (
+                    user_input.text if getattr(user_input, "kind", None) == "text" else None
+                )
+                computed_items = check_computed_statements(result.answer_text, question_text)
+            except Exception:  # noqa: BLE001 - computed-check is best-effort
+                _logger.exception("check_computed_statements failed for session %s", session_id)
+                computed_items = []
             try:
                 attribution_result = attribute_sentences(result.answer_text, known_passages)
             except Exception:  # noqa: BLE001 - attribution is best-effort
                 _logger.exception("attribute_sentences failed for session %s", session_id)
             else:
+                unbacked_spans = _drop_verified_number_flags(
+                    attribution_result.unbacked_spans, result.answer_text, computed_items
+                )
                 attributions_payload = {
                     "attributions": [
                         dataclasses.asdict(a) for a in attribution_result.attributions
                     ],
-                    "unbacked": [
-                        dataclasses.asdict(u) for u in attribution_result.unbacked_spans
-                    ],
+                    "unbacked": [dataclasses.asdict(u) for u in unbacked_spans],
+                    "computed": computed_items,
                 }
                 emit("attributions", attributions_payload)
             emit(
@@ -428,6 +445,47 @@ def _make_turn_runner(
                 )
 
     return turn_runner
+
+
+def _drop_verified_number_flags(unbacked_spans, answer_text, computed_items):
+    """Drop an ``"unbacked_number"`` flag for a span whose figure is the
+    ``stated``/``computed`` value of a VERIFIED computed item (docs/
+    calc_investigation.md fix #1): a number the host's own calc-backed
+    check already confirmed is not "invented", even though no evidence
+    passage contains it. Post-filter (rather than threading verified
+    numbers into ``attribute_sentences`` itself) per docs/
+    attribution_design.md -- keeps that function a pure, computed-check-
+    agnostic sentence/passage overlap check."""
+    if not computed_items:
+        return unbacked_spans
+    verified_values = [
+        float(v)
+        for item in computed_items
+        if item.get("status") == "verified"
+        for v in (item.get("stated"), item.get("computed"))
+        if v is not None
+    ]
+    if not verified_values:
+        return unbacked_spans
+
+    def _matches_verified(fig: str) -> bool:
+        try:
+            fv = float(fig)
+        except ValueError:
+            return False
+        return any(
+            abs(fv - vv) <= max(abs(vv), 1e-9) * 1e-3 or round(fv, 3) == round(vv, 3)
+            for vv in verified_values
+        )
+
+    kept = []
+    for u in unbacked_spans:
+        if u.reason == "unbacked_number":
+            span_text = answer_text[u.span[0] : u.span[1]]
+            if any(_matches_verified(fig) for fig in _figures(span_text)):
+                continue
+        kept.append(u)
+    return kept
 
 
 def _persist_turn(

@@ -351,6 +351,107 @@ class _Input:
 
 
 # ---------------------------------------------------------------------------
+# 2026-09-20 computed-statement follow-up (docs/calc_investigation.md fix
+# #1): the host verifies stated arithmetic against tutor.tools.calc_tool's
+# sandboxed evaluator and reports it as a "computed" list on the same
+# "attributions" SSE event, without ever editing the model's own text.
+# ---------------------------------------------------------------------------
+
+
+def test_turn_runner_includes_computed_mismatch_in_attributions_event(tmp_path):
+    cfg = _cfg_with_unreachable_llm_and_missing_archives(tmp_path)
+    answer = "12.5% of 640 is 108.8."
+    events = [
+        StreamEvent(kind="token", text=answer),
+        StreamEvent(kind="done", finish_reason="stop", usage={}),
+    ]
+    fake_llm = _FakeLlm(events)
+    deps = build_deps(cfg, llm=fake_llm, research_engine=_FakeResearchEngine())
+    session_id = deps.sessions.create()
+    frames = []
+
+    def emit(event_name, data):
+        frames.append((event_name, data))
+
+    cancel = threading.Event()
+    deps.turn_runner(
+        session_id, _Input(kind="text", text="What is 12.5% of 640?"), emit, cancel
+    )
+
+    attributions_data = dict(frames)["attributions"]
+    assert "computed" in attributions_data
+    mismatches = [c for c in attributions_data["computed"] if c["status"] == "mismatch"]
+    assert mismatches
+    assert mismatches[0]["computed"] == 80.0
+    assert mismatches[0]["stated"] == 108.8
+    # The host never touches the model's own text.
+    assert dict(frames)["done"]["answer"] == answer
+
+
+def test_turn_runner_survives_computed_check_exception(tmp_path, monkeypatch):
+    import tutor.app.compose as compose_module
+
+    cfg = _cfg_with_unreachable_llm_and_missing_archives(tmp_path)
+    events = [
+        StreamEvent(kind="token", text="12.5% of 640 is 108.8."),
+        StreamEvent(kind="done", finish_reason="stop", usage={}),
+    ]
+    fake_llm = _FakeLlm(events)
+    deps = build_deps(cfg, llm=fake_llm, research_engine=_FakeResearchEngine())
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(compose_module, "check_computed_statements", _boom)
+
+    session_id = deps.sessions.create()
+    frames = []
+
+    def emit(event_name, data):
+        frames.append((event_name, data))
+
+    cancel = threading.Event()
+    deps.turn_runner(session_id, _Input(kind="text", text="What is 12.5% of 640?"), emit, cancel)
+
+    names = [name for name, _ in frames]
+    assert names[-1] == "done"
+    assert dict(frames)["done"]["status"] == "ok"
+    # attributions may still fire (attribution layer is independent), but
+    # never with a "computed" list when the check itself blew up.
+    if "attributions" in names:
+        assert dict(frames)["attributions"]["computed"] == []
+
+
+def test_verified_computed_number_suppresses_unbacked_number_flag(tmp_path):
+    """docs/attribution_design.md: a figure that is the stated/computed
+    value of a VERIFIED computed item must not also be flagged
+    'unbacked_number' just because no evidence passage contains it."""
+    cfg = _cfg_with_unreachable_llm_and_missing_archives(tmp_path)
+    answer = "2 x 3 x 4 = 24, which is a fun fact about multiplication."
+    events = [
+        StreamEvent(kind="token", text=answer),
+        StreamEvent(kind="done", finish_reason="stop", usage={}),
+    ]
+    fake_llm = _FakeLlm(events)
+    deps = build_deps(cfg, llm=fake_llm, research_engine=_FakeResearchEngine())
+    session_id = deps.sessions.create()
+    frames = []
+
+    def emit(event_name, data):
+        frames.append((event_name, data))
+
+    cancel = threading.Event()
+    deps.turn_runner(session_id, _Input(kind="text", text="What is 2x3x4?"), emit, cancel)
+
+    attributions_data = dict(frames)["attributions"]
+    assert any(c["status"] == "verified" for c in attributions_data["computed"])
+    unbacked_number_reasons = [
+        u for u in attributions_data["unbacked"] if u["reason"] == "unbacked_number"
+    ]
+    assert unbacked_number_reasons == []
+
+
+# ---------------------------------------------------------------------------
 # Dense sidecar wiring (WP-B8 follow-up): build_deps opens a DenseIndex and
 # passes dense_indexes/embed_query into ResearchEngine only when the
 # sidecar is present, complete, and fingerprint-fresh; otherwise it starts

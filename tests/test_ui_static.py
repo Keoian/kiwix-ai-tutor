@@ -228,6 +228,42 @@ def test_app_css_has_attribution_marker_styles():
 
 
 # ---------------------------------------------------------------------------
+# 2026-09-20 computed-statement follow-up (docs/calc_investigation.md fix
+# #1): the host verifies stated arithmetic against the calc evaluator and
+# renders a checked/mismatch marker, never editing the model's own text.
+# ---------------------------------------------------------------------------
+
+
+def test_app_js_handles_computed_items():
+    text = _read(APP_JS)
+    assert "computed" in text
+    assert "checked" in text.lower()
+
+
+def test_app_js_shows_calculator_mismatch_text():
+    text = _read(APP_JS)
+    assert "The calculator gets" in text
+
+
+def test_app_js_computed_handling_uses_textcontent_only():
+    text = _read(APP_JS)
+    assert "innerHTML" not in text
+
+
+def test_index_html_has_computed_legend_entry():
+    text = _read(INDEX_HTML)
+    lower = text.lower()
+    assert "computed" in lower
+    assert "checked by the calculator" in lower
+
+
+def test_app_css_has_computed_marker_styles():
+    text = _read(APP_CSS)
+    assert "attribution-computed-verified" in text
+    assert "attribution-computed-mismatch" in text
+
+
+# ---------------------------------------------------------------------------
 # kiosk launch scripts
 # ---------------------------------------------------------------------------
 

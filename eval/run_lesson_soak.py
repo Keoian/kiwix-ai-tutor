@@ -179,6 +179,13 @@ class TurnRecord:
     ``citations`` SSE event carries label/path/support flags only, not
     passage bodies), so this stays ``[]`` for real soaks -- see
     ``attribution_event`` below, which a live soak *does* populate."""
+    computed_verified: int = 0
+    computed_mismatch: int = 0
+    """Counts of "computed" statement items (docs/calc_investigation.md fix
+    #1, tutor.app.computed_check) carried by this turn's own
+    ``attribution_event["computed"]`` list -- the host's verification of
+    stated arithmetic against the sandboxed calc evaluator, independent of
+    whether the model itself called the `calc` tool."""
     attribution_event: dict | None = None
     """The server's own ``attributions`` SSE event for this turn (commit
     26c14d0, ``tutor/app/compose.py``): ``{"attributions": [...],
@@ -345,6 +352,8 @@ def aggregate(records: list[TurnRecord]) -> dict[str, Any]:
         "calc_items": len(calc_items),
         "calc_correct": len(calc_correct),
         "calc_accuracy": (len(calc_correct) / len(calc_items)) if calc_items else None,
+        "computed_verified": sum(r.computed_verified for r in ok),
+        "computed_mismatch": sum(r.computed_mismatch for r in ok),
         "research_status_mix": statuses,
         "research_mean_elapsed_s": statistics.fmean(research_elapsed) if research_elapsed else None,
         "eviction_events_total": sum(r.eviction_events for r in records),
@@ -930,6 +939,16 @@ def run_soak(*, config_path: str, minutes: float, out_path: str, think_time_s: f
                         # server's own scoring for a live soak.
                         passages=[],
                         attribution_event=attribution_event,
+                        computed_verified=sum(
+                            1
+                            for c in (attribution_event or {}).get("computed", [])
+                            if c.get("status") == "verified"
+                        ),
+                        computed_mismatch=sum(
+                            1
+                            for c in (attribution_event or {}).get("computed", [])
+                            if c.get("status") == "mismatch"
+                        ),
                     )
                 )
 
