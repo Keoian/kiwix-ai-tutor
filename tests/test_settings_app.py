@@ -94,6 +94,9 @@ def test_app_table_defaults_when_missing(tmp_path):
     # did not hurt the L6/L7 controls, mean added wall time ~1.7s/turn --
     # adopted, default is True.
     assert cfg.app.model_writes_search is True
+    # docs/rewrite_on_weak_evidence.md, "Model may skip the search":
+    # default is True.
+    assert cfg.app.model_may_skip_search is True
 
 
 def test_app_table_model_writes_search_is_configurable(tmp_path):
@@ -108,6 +111,20 @@ model_writes_search = false
     cfg = load_config(config_path)
 
     assert cfg.app.model_writes_search is False
+
+
+def test_app_table_model_may_skip_search_is_configurable(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    text = _BASE + """
+[app]
+model_may_skip_search = false
+"""
+    config_path = _write_toml(config_dir / "dev.toml", text)
+
+    cfg = load_config(config_path)
+
+    assert cfg.app.model_may_skip_search is False
 
 
 def test_app_table_restate_question_settings_are_configurable(tmp_path):

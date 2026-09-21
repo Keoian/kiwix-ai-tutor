@@ -708,3 +708,114 @@ def test_list_item_with_unsupported_label_gets_unbacked_marker_end_to_end(ctx):
     # exactly one list item's claim went unsupported by its own cited
     # passage -- it must carry the "unbacked" marker class.
     assert any(m == "attribution-marker attribution-unbacked" for m in found["markers"])
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-21 owner-reported bug: a "tool" SSE event fetched the tutor node
+# (removing the working status bubble) before any answer text existed, so
+# the student saw no status through the whole search-and-read phase. Fixed
+# by handling "tool" (and "status") before ever calling getTutorNode().
+# ---------------------------------------------------------------------------
+
+
+def test_tool_event_does_not_remove_working_bubble_status_still_updates(ctx):
+    ctx.eval(
+        """
+        var _removed = false;
+        var _statusCalls = [];
+        var _getTutorNodeCalls = 0;
+        var _working = {
+          node: { remove: function () { _removed = true; } },
+          setStatus: function (stage, detail) { _statusCalls.push(detail); },
+          stop: function () {},
+        };
+        function _getTutorNode() {
+          _getTutorNodeCalls += 1;
+          return document.createElement('div');
+        }
+        var _line = '';
+        function _setTutorLine(t) { _line = t; }
+        function _getTutorLine() { return _line; }
+        """
+    )
+    ctx.eval(
+        """
+        module.exports.handleFrame(
+          'event: status' + String.fromCharCode(10) +
+            'data: {"stage":"searching","detail":"Working out what to look up..."}',
+          _getTutorNode, _setTutorLine, _getTutorLine, _working, null
+        );
+        module.exports.handleFrame(
+          'event: tool' + String.fromCharCode(10) + 'data: {"name":"research","phase":"call"}',
+          _getTutorNode, _setTutorLine, _getTutorLine, _working, null
+        );
+        module.exports.handleFrame(
+          'event: status' + String.fromCharCode(10) +
+            'data: {"stage":"reading","detail":"Found 3 passages. Reading them..."}',
+          _getTutorNode, _setTutorLine, _getTutorLine, _working, null
+        );
+        """
+    )
+    assert call(ctx, "_removed") is False
+    assert call(ctx, "_getTutorNodeCalls") == 0
+    assert call(ctx, "_statusCalls") == [
+        "Working out what to look up...",
+        "Found 3 passages. Reading them...",
+    ]
+
+    # The working bubble is removed only once real answer text starts
+    # arriving (the first "token" frame), never by a "tool" or "status"
+    # frame in between.
+    ctx.eval(
+        """
+        module.exports.handleFrame(
+          'event: token' + String.fromCharCode(10) + 'data: {"text":"Hello"}',
+          _getTutorNode, _setTutorLine, _getTutorLine, _working, null
+        );
+        """
+    )
+    assert call(ctx, "_getTutorNodeCalls") == 1
+
+
+# ---------------------------------------------------------------------------
+# app.model_may_skip_search: evidence level "skipped" -- see
+# docs/rewrite_on_weak_evidence.md, "Model may skip the search". No search
+# ran this turn, so neither the "Searched for: ..." line nor the "did not
+# find anything in the library" note should ever appear.
+# ---------------------------------------------------------------------------
+
+
+def test_searched_for_line_omitted_when_evidence_skipped(ctx):
+    ctx.eval("var _tutorNode = document.createElement('div');")
+    ctx.eval(
+        'module.exports.appendSearchedForLine(_tutorNode, '
+        '{level_before: "skipped", level_after: "skipped", rewritten_queries: [], '
+        'corrected_terms: {}});'
+    )
+    text = call(ctx, "_tutorNode.textContent")
+    assert text == ""
+    assert call(ctx, "_tutorNode.children.length") == 0
+
+
+def test_apply_citation_quality_suppresses_not_found_note_when_skipped(ctx):
+    """Baseline: with no evidence info at all (a normal turn with nothing
+    backed), applyCitationQuality DOES append a "did not find anything"
+    note to the chat pane. With evidence.level_after == "skipped", that
+    note must never appear, even though nothing was backed either."""
+    chat_children_before = call(ctx, "document.getElementById('chat').children.length")
+    ctx.eval("var _tutorNode1 = document.createElement('div');")
+    ctx.eval(
+        'module.exports.applyCitationQuality(_tutorNode1, {}, null, '
+        '{attributions: [], unbacked: [], computed: [], passages_available: 0});'
+    )
+    chat_children_after_normal = call(ctx, "document.getElementById('chat').children.length")
+    assert chat_children_after_normal == chat_children_before + 1
+
+    ctx.eval("var _tutorNode2 = document.createElement('div');")
+    ctx.eval(
+        'module.exports.applyCitationQuality(_tutorNode2, '
+        '{evidence: {level_before: "skipped", level_after: "skipped"}}, null, '
+        '{attributions: [], unbacked: [], computed: [], passages_available: 0});'
+    )
+    chat_children_after_skipped = call(ctx, "document.getElementById('chat').children.length")
+    assert chat_children_after_skipped == chat_children_after_normal

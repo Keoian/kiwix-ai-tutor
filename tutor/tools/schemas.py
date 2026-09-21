@@ -60,6 +60,13 @@ RESEARCH_TOOL: dict = {
                     ),
                     "maxLength": 300,
                 },
+                "needs_search": {
+                    "type": "boolean",
+                    "description": (
+                        "Optional: false when no library search is needed for "
+                        "this message."
+                    ),
+                },
             },
         },
     },
@@ -87,8 +94,19 @@ FORCED_RESEARCH_TOOL: dict = {
         "parameters": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["question", "queries"],
+            "required": ["needs_search", "question", "queries"],
             "properties": {
+                "needs_search": {
+                    "type": "boolean",
+                    "description": (
+                        "False when the student is chatting, talking about "
+                        "themselves, thanking you, or asking you to explain/"
+                        "rephrase/simplify something already covered, or the "
+                        "sources already shown above in this lesson already "
+                        "answer it; otherwise true. When false, leave "
+                        "'queries' empty."
+                    ),
+                },
                 "question": {
                     "type": "string",
                     "description": (
@@ -108,7 +126,7 @@ FORCED_RESEARCH_TOOL: dict = {
                         "topic."
                     ),
                     "items": {"type": "string", "maxLength": 80},
-                    "minItems": 1,
+                    "minItems": 0,
                     "maxItems": 3,
                 },
             },
@@ -198,7 +216,16 @@ def validate_tool_call(name: str, arguments_json: str) -> ValidationResult:
         )
 
     if name == "research":
-        if "query" not in arguments and "queries" not in arguments:
+        needs_search = arguments.get("needs_search", True)
+        if "needs_search" in arguments and not isinstance(needs_search, bool):
+            return ValidationResult(
+                ok=False, arguments=None, error="'needs_search' must be a boolean"
+            )
+        if (
+            needs_search is not False
+            and "query" not in arguments
+            and "queries" not in arguments
+        ):
             return ValidationResult(
                 ok=False, arguments=None, error="one of 'query' or 'queries' is required"
             )
@@ -214,7 +241,8 @@ def validate_tool_call(name: str, arguments_json: str) -> ValidationResult:
                 return ValidationResult(
                     ok=False, arguments=None, error="'queries' must be an array of strings"
                 )
-            if not (1 <= len(queries) <= 3):
+            min_items = 0 if needs_search is False else 1
+            if not (min_items <= len(queries) <= 3):
                 return ValidationResult(
                     ok=False, arguments=None, error="'queries' must have 1 to 3 items"
                 )

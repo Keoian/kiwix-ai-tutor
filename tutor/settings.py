@@ -186,6 +186,18 @@ class AppConfig:
     The model is told to write short, article-title-like queries, not
     full sentences. **Default is False** -- not yet measured against a
     live model; the measuring agent decides whether to flip it."""
+    model_may_skip_search: bool = True
+    """Only meaningful when ``model_writes_search`` is True: also let the
+    model set ``needs_search: false`` on the same forced ``research`` call
+    to skip the search entirely for this turn (see
+    docs/rewrite_on_weak_evidence.md, "Model may skip the search"). Owner
+    report: after a lesson about the fastest animal and Usain Bolt, the
+    student asked "How fast am I?" then "But what about me personally?"
+    -- no library search can ever answer a question about the student's
+    own speed, so the tutor should just answer conversationally instead of
+    running (and re-running) the same Usain Bolt search. **Default is
+    True** -- ``False`` reproduces today's bytes exactly (the forced call
+    still always runs one search)."""
 
 
 @dataclass(frozen=True)
@@ -389,6 +401,7 @@ def load_config(path: Path) -> Config:
         restate_question_last=_app_bool("restate_question_last", True),
         restate_question_instruction=_app_bool("restate_question_instruction", False),
         model_writes_search=_app_bool("model_writes_search", True),
+        model_may_skip_search=_app_bool("model_may_skip_search", True),
     )
 
     # [embedding] is optional, like [app]; when present every key is

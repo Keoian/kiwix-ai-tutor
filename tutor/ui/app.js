@@ -1921,6 +1921,7 @@
       collapseInventedLinksWithTranslate: collapseInventedLinksWithTranslate,
       appendSearchedForLine: appendSearchedForLine,
       applyCitationQuality: applyCitationQuality,
+      handleFrame: handleFrame,
     };
   }
 })();

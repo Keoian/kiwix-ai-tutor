@@ -109,24 +109,32 @@ class TurnResult:
             "second_round": 0.0,
             "answer_prefill": 0.0,
             "answer_generation": 0.0,
+            "presearch": 0.0,
+            "voluntary_tool_rounds": 0.0,
         }
     )
     """Wall-clock seconds spent per turn stage (see docs/
     rewrite_on_weak_evidence.md, "Model may skip the search" /
-    per-stage timing addendum): ``forced_call`` (the model deciding what
-    to search, first round), ``searches`` (running the research engine
-    against the model's queries), ``second_round`` (the whole weak-
-    evidence extra round, call + searches; 0.0 when it never fires),
-    ``answer_prefill`` (answer request sent -> first token), and
-    ``answer_generation`` (first token -> stream done). Always present
-    and non-negative; a slow prompt-read on constrained hardware shows
-    up here as a large ``answer_prefill``."""
+    per-stage timing addendum): ``presearch`` (the host's raw pre-search
+    before the forced round even runs), ``forced_call`` (the model
+    deciding what to search, first round), ``searches`` (running the
+    research engine against the model's queries), ``second_round`` (the
+    whole weak-evidence extra round, call + searches; 0.0 when it never
+    fires), ``answer_prefill`` (answer request sent -> first token),
+    ``answer_generation`` (first token -> stream done), and
+    ``voluntary_tool_rounds`` (time spent actually executing any
+    voluntary ``research``/``calc`` tool calls the model makes during the
+    answer phase itself, e.g. "Searching again..."; 0.0 when none).
+    Always present and non-negative; a slow prompt-read on constrained
+    hardware shows up here as a large ``answer_prefill``."""
     evidence: dict | None = None
     """Additive (see docs/rewrite_on_weak_evidence.md): ``None`` for
     non-factual routes (action/greeting-shaped turns never pre-retrieve).
     For a factual (``preretrieve*``) route, always a dict with
     ``level_before``/``level_after`` (the pre- and post-rewrite
-    ``assess_evidence`` levels -- identical when no rewrite ran),
+    ``assess_evidence`` levels -- identical when no rewrite ran; both
+    ``"skipped"`` when ``app.model_may_skip_search`` chose not to search
+    this turn at all),
     ``rewritten_queries`` (the host-executed query list, ``[]`` when no
     rewrite ran), and ``corrected_terms`` (the merged research response's
     spelling/compound corrections dict)."""
@@ -271,9 +279,35 @@ _MODEL_WRITES_SEARCH_HOST_NOTE = (
     "\"queries\" in the answer.]"
 )
 
-# Small cap on the forced rewrite call's own output -- it only needs to
-# emit one tool call, never prose.
-_FORCED_REWRITE_MAX_TOKENS = 96
+# Additive host note (``app.model_may_skip_search``, default True -- see
+# docs/rewrite_on_weak_evidence.md, "Model may skip the search"): appended
+# right after ``_MODEL_WRITES_SEARCH_HOST_NOTE`` so the model also decides
+# whether a search is needed at all THIS turn, e.g. the student chatting
+# about themselves ("How fast am I?" after a Usain Bolt lesson) rather
+# than asking a new factual question no source in the lesson can answer.
+_MODEL_MAY_SKIP_SEARCH_NOTE = (
+    " Also set \"needs_search\" first: false when the student is chatting, "
+    "talking about themselves, thanking you, or asking you to explain/"
+    "rephrase/simplify something already covered, or the sources already "
+    "shown above in this lesson already answer it; otherwise true. When "
+    "false, leave \"queries\" empty."
+)
+
+# Tool-result text for a skipped forced round (``needs_search`` false):
+# no search ran this turn, so the model must answer conversationally from
+# the lesson so far rather than inventing facts.
+_NO_SEARCH_TOOL_TEXT = (
+    "No library search needed for this message. Reply to the student "
+    "conversationally, using the lesson so far. Do not invent facts."
+)
+
+# Cap on the forced rewrite call's own output -- it only needs to emit one
+# tool call, never prose. Raised from 96 (2026-09-21 live measurement on
+# Ling 3.0 Tiny: needs_search + a full-sentence question + up to 3 queries
+# routinely exceeds 96 tokens, truncating the JSON mid-argument and
+# silently discarding the round -- see ``_salvage_truncated_research_json``
+# and its caller below for the recovery this now gets).
+_FORCED_REWRITE_MAX_TOKENS = 256
 
 # Cap on the number of passages kept after merging all rewritten queries'
 # results, matching the normal single-query evidence packet size so the
@@ -534,7 +568,34 @@ def _clip_model_written_question(question) -> str | None:
     return q or None
 
 
-def _forced_research_tool_call(llm, messages: list[dict], *, cancel):
+def _salvage_truncated_research_json(raw: str) -> dict | None:
+    """Best-effort recovery of a ``research`` tool call's JSON arguments
+    that were cut off mid-object by an output-token cap (e.g. Ling 3.0
+    Tiny, whose full ``needs_search`` + full-sentence ``question`` + up to
+    3 ``queries`` regularly exceeds a small cap). Tries the raw text as-is
+    first, then a handful of closing-bracket completions for the common
+    truncation points (mid-string, mid-array, missing closing brace).
+    Returns the parsed dict, or ``None`` if nothing here parses as a JSON
+    object."""
+    raw = (raw or "").strip()
+    if not raw.startswith("{"):
+        return None
+    candidates = [raw]
+    for suffix in ('"', '"]', '"]}', "]", "]}", "}", '"}', '""]}'):
+        candidates.append(raw + suffix)
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _forced_research_tool_call(
+    llm, messages: list[dict], *, cancel, diagnostics: dict | None = None
+):
     """Force the model to answer this turn's next completion with exactly
     one ``research`` tool call, primarily via the OpenAI-compatible
     ``tool_choice`` request field; if the server rejects that field
@@ -542,18 +603,33 @@ def _forced_research_tool_call(llm, messages: list[dict], *, cancel):
     constrained plain-text completion asking for the same shape and
     synthesize an equivalent tool-call.
 
-    Returns ``(tool_call_id, queries, arguments_json, question)`` or
-    ``None`` if the model produced nothing usable (both paths failed, or
-    the forced call returned no queries) -- callers treat ``None`` the
-    same as "still weak" and skip straight to the not-found outcome.
+    Returns ``(tool_call_id, queries, arguments_json, question,
+    needs_search)`` or ``None`` if the model produced nothing usable (both
+    paths failed, or the forced call returned no queries AND
+    ``needs_search`` was not explicitly false) -- callers treat ``None``
+    the same as "still weak" and skip straight to the not-found outcome.
     ``question`` is the model's optional standalone-question argument
     (``app.model_writes_search``), unvalidated/unclipped, or ``None`` when
     absent or when the fallback (non-tool-call) path was used.
+    ``needs_search`` (``app.model_may_skip_search``) is the model's
+    boolean decision, defaulting to ``True`` when absent.
+
+    ``diagnostics``, if given, is filled in with ``{"truncated": bool}``:
+    True when the forced call's own output hit ``finish_reason ==
+    "length"`` or its tool-call JSON failed to parse outright -- the
+    caller uses this to distinguish "the model produced nothing" (this
+    function returning ``None`` with ``truncated`` False) from "the model
+    was cut off before finishing its JSON" (``None`` with ``truncated``
+    True), which should fall back to the raw pre-search rather than
+    reporting a dead end.
     """
+    if diagnostics is not None:
+        diagnostics["truncated"] = False
     forced_tool_choice = {"type": "function", "function": {"name": "research"}}
     text_parts: list[str] = []
     tool_call = None
     errored = False
+    finish_reason: str | None = None
     for evt in llm.stream_chat(
         messages,
         tools=[FORCED_RESEARCH_TOOL],
@@ -563,6 +639,8 @@ def _forced_research_tool_call(llm, messages: list[dict], *, cancel):
     ):
         if evt.kind == "tool_call":
             tool_call = evt
+        elif evt.kind == "done":
+            finish_reason = evt.finish_reason
         elif evt.kind == "token":
             text_parts.append(evt.text or "")
         elif evt.kind == "error":
@@ -575,9 +653,43 @@ def _forced_research_tool_call(llm, messages: list[dict], *, cancel):
             queries = validation.arguments.get("queries") or (
                 [validation.arguments["query"]] if validation.arguments.get("query") else []
             )
-            if queries:
+            needs_search = validation.arguments.get("needs_search", True)
+            if not isinstance(needs_search, bool):
+                needs_search = True
+            if queries or needs_search is False:
                 question = validation.arguments.get("question")
-                return tool_call.id, queries, tool_call.arguments_json, question
+                return tool_call.id, queries, tool_call.arguments_json, question, needs_search
+
+        # Validation failed (invalid JSON, or a schema violation e.g. a
+        # 'queries' item cut off mid-string) -- if the raw JSON is at
+        # least salvageable, use whatever it does say rather than
+        # discarding a real (just truncated) answer.
+        salvaged = _salvage_truncated_research_json(tool_call.arguments_json or "")
+        if salvaged is not None:
+            raw_queries = salvaged.get("queries")
+            queries = (
+                [q for q in raw_queries if isinstance(q, str) and q.strip()][:3]
+                if isinstance(raw_queries, list)
+                else []
+            )
+            needs_search = salvaged.get("needs_search", True)
+            if not isinstance(needs_search, bool):
+                needs_search = True
+            if queries or needs_search is False:
+                question = salvaged.get("question")
+                question = question if isinstance(question, str) else None
+                if diagnostics is not None:
+                    diagnostics["truncated"] = True
+                return (
+                    tool_call.id,
+                    queries,
+                    json.dumps({"queries": queries}),
+                    question,
+                    needs_search,
+                )
+
+        if diagnostics is not None:
+            diagnostics["truncated"] = finish_reason == "length" or salvaged is not None
 
     if not errored:
         # The server accepted tool_choice but the model still did not
@@ -597,13 +709,14 @@ def _forced_research_tool_call(llm, messages: list[dict], *, cancel):
             "schema": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["question", "queries"],
+                "required": ["needs_search", "question", "queries"],
                 "properties": {
+                    "needs_search": {"type": "boolean"},
                     "question": {"type": "string", "maxLength": 300},
                     "queries": {
                         "type": "array",
                         "items": {"type": "string", "maxLength": 80},
-                        "minItems": 1,
+                        "minItems": 0,
                         "maxItems": 3,
                     },
                 },
@@ -627,18 +740,23 @@ def _forced_research_tool_call(llm, messages: list[dict], *, cancel):
         parsed = json.loads(raw)
     except json.JSONDecodeError:
         return None
-    queries = parsed.get("queries") if isinstance(parsed, dict) else None
-    if not queries or not isinstance(queries, list):
+    if not isinstance(parsed, dict):
+        return None
+    needs_search = parsed.get("needs_search", True)
+    if not isinstance(needs_search, bool):
+        needs_search = True
+    queries = parsed.get("queries")
+    if not isinstance(queries, list):
         return None
     queries = [q for q in queries if isinstance(q, str) and q.strip()][:3]
-    if not queries:
+    if not queries and needs_search is not False:
         return None
     fallback_question = parsed.get("question") if isinstance(parsed, dict) else None
-    fallback_args: dict = {"queries": queries}
+    fallback_args: dict = {"queries": queries, "needs_search": needs_search}
     if isinstance(fallback_question, str) and fallback_question.strip():
         fallback_args["question"] = fallback_question
     arguments_json = json.dumps(fallback_args)
-    return "forced-rewrite-fallback", queries, arguments_json, fallback_question
+    return "forced-rewrite-fallback", queries, arguments_json, fallback_question, needs_search
 
 
 # Short instruction appended after strong merged evidence on a follow-up
@@ -733,6 +851,7 @@ def _run_forced_rewrite_round(
     require_question_for_restate: bool = False,
     second_round: bool = False,
     timing: dict | None = None,
+    allow_skip: bool = False,
 ):
     """Run one forced ``research`` tool-call round (see
     ``_forced_research_tool_call``), append the resulting assistant
@@ -766,14 +885,20 @@ def _run_forced_rewrite_round(
     )
     wire_messages = _to_wire_messages(log.render()) if use_log else messages
     _t0 = time.monotonic()
-    forced = _forced_research_tool_call(llm, wire_messages, cancel=cancel)
+    _diagnostics: dict = {}
+    forced = _forced_research_tool_call(llm, wire_messages, cancel=cancel, diagnostics=_diagnostics)
     if timing is not None:
         timing["forced_call"] = timing.get("forced_call", 0.0) + (time.monotonic() - _t0)
     model_question: str | None = None
+    needs_search = True
     if forced is not None:
         model_question = _clip_model_written_question(forced[3])
-    if forced is not None and clip_model_queries:
-        tool_call_id, raw_queries, _arguments_json, _raw_question = forced
+        needs_search = forced[4] if len(forced) > 4 else True
+
+    skip_search = bool(allow_skip and forced is not None and needs_search is False)
+
+    if forced is not None and clip_model_queries and not skip_search:
+        tool_call_id, raw_queries, _arguments_json, _raw_question = forced[:4]
         cleaned_queries = _clip_model_written_queries(raw_queries)
         if not cleaned_queries:
             # Nothing usable after validation/clipping -- fall back to
@@ -788,13 +913,118 @@ def _run_forced_rewrite_round(
                 json.dumps({"queries": cleaned_queries}),
                 _raw_question,
             )
-    elif forced is not None:
+    elif forced is not None and not skip_search:
         # Legacy (non-model_writes_search) forced-rewrite modes never ask
         # the model for a standalone ``question`` -- even if one somehow
         # showed up, ignore it so the restate line keeps using the
         # rewritten query (already a standalone question in that mode),
         # matching today's behaviour exactly.
         model_question = None
+
+    if skip_search:
+        # ``app.model_may_skip_search``: the model decided no library
+        # search is needed for this message (student chatting, talking
+        # about themselves, thanking the tutor, asking for a
+        # rephrase/simplification, or the sources already shown above
+        # already answer it). Append the assistant tool-call + a
+        # conversational no-search tool result -- no search runs, no
+        # raw pre-search backfill is used -- and let the model answer
+        # directly from the lesson so far.
+        tool_call_id, _raw_queries, arguments_json, _raw_question = forced[:4]
+        if use_log:
+            log.append_assistant_tool_calls(
+                [
+                    {
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {"name": "research", "arguments": arguments_json},
+                    }
+                ]
+            )
+        else:
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": tool_call_id,
+                            "type": "function",
+                            "function": {"name": "research", "arguments": arguments_json},
+                        }
+                    ],
+                }
+            )
+        tool_text = _NO_SEARCH_TOOL_TEXT
+        if restate_question_text is not None and (
+            not require_question_for_restate or model_question
+        ):
+            restate_line = _restate_question_line(restate_question_text, model_question)
+            if restate_question_instruction:
+                restate_line = f"{restate_line} {_RESTATE_QUESTION_R2_INSTRUCTION}"
+            tool_text = f"{tool_text}\n\n{restate_line}"
+        if use_log:
+            log.append_tool_result(tool_call_id=tool_call_id, content=tool_text)
+        else:
+            messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_text})
+        emit({"kind": "tool_result", "name": "research", "ok": True})
+        emit(
+            {
+                "kind": "status",
+                "stage": "no_search",
+                "detail": "No need to look this up...",
+            }
+        )
+        return "skipped", [], research_calls_delta
+
+    if forced is None and _diagnostics.get("truncated") and backfill_passages is not None:
+        # The forced call's own output was cut off before it finished its
+        # JSON (see ``_salvage_truncated_research_json``'s caller) and
+        # nothing usable could be salvaged -- rather than reporting a dead
+        # end, fall back to the raw pre-search's own result (the student's
+        # own words), exactly as the host would have used before
+        # ``app.model_writes_search`` existed. No extra LLM/search call is
+        # made here -- ``backfill_passages`` were already fetched earlier
+        # this turn.
+        emit(
+            {
+                "kind": "status",
+                "stage": "planning_timeout",
+                "detail": (
+                    "Working out what to look up took too long. Searching "
+                    "with your own words..."
+                ),
+            }
+        )
+        level_after = assessment.level if assessment is not None else "strong"
+        merged_passages = _relabel_sequential(list(backfill_passages))
+        _retain_passages(session, {"passages": merged_passages})
+        synth_id = "forced-rewrite-truncated"
+        tool_call_message = {
+            "id": synth_id,
+            "type": "function",
+            "function": {"name": "research", "arguments": json.dumps({"queries": []})},
+        }
+        if use_log:
+            log.append_assistant_tool_calls([tool_call_message])
+        else:
+            messages.append(
+                {"role": "assistant", "content": None, "tool_calls": [tool_call_message]}
+            )
+        if level_after == "strong":
+            evidence_text = render_evidence({"passages": merged_passages})
+            tool_text = (
+                "Working out what to look up took too long, so this used your "
+                f"raw words instead.\n{evidence_text}"
+            )
+        else:
+            tool_text = _not_found_tool_text(searched_for=[], level_after=level_after)
+        if use_log:
+            log.append_tool_result(tool_call_id=synth_id, content=tool_text)
+        else:
+            messages.append({"role": "tool", "tool_call_id": synth_id, "content": tool_text})
+        emit({"kind": "tool_result", "name": "research", "ok": level_after == "strong"})
+        return level_after, [], research_calls_delta
 
     if forced is None:
         merged_response = _MergedResult([])
@@ -829,7 +1059,7 @@ def _run_forced_rewrite_round(
         )
         return level_after, [], research_calls_delta
 
-    tool_call_id, rewritten_queries, arguments_json, _model_question_raw = forced
+    tool_call_id, rewritten_queries, arguments_json, _model_question_raw = forced[:4]
     emit(
         {
             "kind": "status",
@@ -1002,6 +1232,7 @@ def run_turn(
     restate_question_last: bool = True,
     restate_question_instruction: bool = False,
     model_writes_search: bool = True,
+    model_may_skip_search: bool = True,
 ) -> TurnResult:
     research_calls = 0
     timings = {
@@ -1010,6 +1241,8 @@ def run_turn(
         "second_round": 0.0,
         "answer_prefill": 0.0,
         "answer_generation": 0.0,
+        "presearch": 0.0,
+        "voluntary_tool_rounds": 0.0,
     }
     calc_calls = 0
     followup_research_used = False
@@ -1048,9 +1281,11 @@ def run_turn(
             session, use_log, log, None if use_log else messages
         )
         emit({"kind": "status", "stage": "searching", "detail": "Looking in the library..."})
+        _t_presearch0 = time.monotonic()
         response = research_engine.research(
             user_input.text, topic_hint=getattr(session, "subject_hint", None)
         )
+        timings["presearch"] = time.monotonic() - _t_presearch0
         research_calls += 1
         packet = _packet_from_response(response)
         assessment = getattr(response, "assessment", None)
@@ -1072,7 +1307,10 @@ def run_turn(
         do_followup = rewrite_on_followup and has_prior_turns and not do_model_writes_search
 
         if do_model_writes_search:
-            user_text = user_input.text + _MODEL_WRITES_SEARCH_HOST_NOTE
+            note = _MODEL_WRITES_SEARCH_HOST_NOTE
+            if model_may_skip_search:
+                note = note + _MODEL_MAY_SKIP_SEARCH_NOTE
+            user_text = user_input.text + note
         elif do_followup:
             user_text = user_input.text + _FOLLOWUP_HOST_NOTE
         elif rewrite_on_weak_evidence and level_before in ("weak", "empty"):
@@ -1129,6 +1367,7 @@ def run_turn(
                 clip_model_queries=do_model_writes_search,
                 require_question_for_restate=not has_prior_turns,
                 timing=timings,
+                allow_skip=do_model_writes_search and model_may_skip_search,
             )
             research_calls += delta
             # _run_forced_rewrite_round always leaves the log in a valid,
@@ -1396,6 +1635,7 @@ def run_turn(
                     emit({"kind": "tool_result", "name": remaining_tc.name, "ok": False})
                 break
 
+            _t_voluntary0 = time.monotonic()
             try:
                 validation = validate_tool_call(tc.name, tc.arguments_json or "{}")
                 if not validation.ok:
@@ -1482,6 +1722,8 @@ def run_turn(
                     tc.id, json.dumps({"ok": False, "error": str(exc)})
                 )
                 emit({"kind": "tool_result", "name": tc.name, "ok": False})
+            finally:
+                timings["voluntary_tool_rounds"] += time.monotonic() - _t_voluntary0
 
         if use_log:
             log.validate()

@@ -565,10 +565,12 @@ def test_forced_call_schema_requires_question_first_queries_bounded():
     from tutor.tools.schemas import FORCED_RESEARCH_TOOL, RESEARCH_TOOL, validate_tool_call
 
     forced_params = FORCED_RESEARCH_TOOL["function"]["parameters"]
-    assert forced_params["required"] == ["question", "queries"]
+    assert forced_params["required"] == ["needs_search", "question", "queries"]
     prop_names = list(forced_params["properties"].keys())
+    assert prop_names.index("needs_search") < prop_names.index("question")
     assert prop_names.index("question") < prop_names.index("queries")
-    assert forced_params["properties"]["queries"]["minItems"] == 1
+    assert forced_params["properties"]["needs_search"]["type"] == "boolean"
+    assert forced_params["properties"]["queries"]["minItems"] == 0
     assert forced_params["properties"]["queries"]["maxItems"] == 3
 
     # Voluntary-call schema is untouched: question still optional.
@@ -616,3 +618,284 @@ def test_forced_call_sends_forced_schema_to_llm():
 
     forced_call_tools = llm.tools_calls[0]
     assert forced_call_tools == [FORCED_RESEARCH_TOOL]
+
+
+# ---------------------------------------------------------------------------
+# app.model_may_skip_search (default True) -- see
+# docs/rewrite_on_weak_evidence.md, "Model may skip the search".
+# ---------------------------------------------------------------------------
+
+
+def test_needs_search_false_skips_search_and_appends_no_search_result():
+    """When the model's forced call sets needs_search=false, no search
+    runs at all -- research_engine.research_many/research is never called
+    a second time (only the turn's raw pre-search, which is discarded),
+    and the tool result tells the model to answer conversationally."""
+    session, budget = _mk_session()
+    llm = FakeLlmClient(
+        [
+            _tool_call("research", {"needs_search": False, "queries": []}),
+            _final("You are asking about your own speed -- not in the library!"),
+        ]
+    )
+    research = ScriptedResearchEngine([_strong_response(1, title="Usain Bolt")])
+    calc = FakeCalc()
+
+    result = run_turn(
+        session,
+        _UserInput(kind="text", text="How fast am I?"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+        model_writes_search=True,
+        model_may_skip_search=True,
+    )
+
+    assert result.status == "ok"
+    assert research.call_count == 1  # only the raw pre-search; no real search
+    assert result.evidence["level_after"] == "skipped"
+    rendered = session.log.render()
+    tool_messages = [m for m in rendered if m["role"] == "tool"]
+    joined = "\n".join(m.get("content") or "" for m in tool_messages)
+    assert "No library search needed for this message" in joined
+    assert "Searched for:" not in joined
+
+
+def test_needs_search_false_captured_via_statuses():
+    session, budget = _mk_session()
+    llm = FakeLlmClient(
+        [
+            _tool_call("research", {"needs_search": False, "queries": []}),
+            _final("Sure thing."),
+        ]
+    )
+    research = ScriptedResearchEngine([_strong_response(1)])
+    calc = FakeCalc()
+    statuses = []
+
+    def _collect(e):
+        if isinstance(e, dict) and e.get("kind") == "status":
+            statuses.append(e)
+
+    run_turn(
+        session,
+        _UserInput(kind="text", text="lol ok thanks"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=_collect,
+        model_writes_search=True,
+        model_may_skip_search=True,
+    )
+
+    details = [s.get("detail") for s in statuses]
+    assert "No need to look this up..." in details
+    assert not any(d and d.startswith("Searching the library for") for d in details)
+
+
+def test_model_may_skip_search_off_forces_search_even_with_needs_search_false():
+    """``app.model_may_skip_search=False`` reproduces today's bytes exactly
+    -- a needs_search=false argument is simply ignored and the (now
+    empty) queries fall back to the existing not-found behaviour, never
+    a 'skipped' evidence level."""
+    session, budget = _mk_session()
+    llm = FakeLlmClient(
+        [
+            _tool_call("research", {"needs_search": False, "queries": []}),
+            _tool_call("research", {"needs_search": False, "queries": ["Usain Bolt"]}),
+            _final("I could not find that."),
+        ]
+    )
+    research = ScriptedResearchEngine([_strong_response(1), _strong_response(2)])
+    calc = FakeCalc()
+
+    result = run_turn(
+        session,
+        _UserInput(kind="text", text="How fast am I?"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+        model_writes_search=True,
+        model_may_skip_search=False,
+    )
+
+    assert result.status == "ok"
+    assert result.evidence["level_after"] != "skipped"
+
+
+def test_needs_search_true_with_empty_queries_falls_back_to_not_found():
+    """needs_search left true (or omitted) but no usable queries -- today's
+    existing fallback behaviour, unaffected by app.model_may_skip_search."""
+    session, budget = _mk_session()
+    llm = FakeLlmClient(
+        [
+            _tool_call("research", {"needs_search": True, "queries": []}),
+            _tool_call("research", {"queries": ["still nothing useful"]}),
+            _final("I could not find that in the library."),
+        ]
+    )
+    research = ScriptedResearchEngine(
+        [
+            _strong_response(1, title="Molecule"),
+            _strong_response(2, title="Molecule again"),
+        ]
+    )
+    calc = FakeCalc()
+
+    result = run_turn(
+        session,
+        _UserInput(kind="text", text="What's the largest molecule?"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+        model_writes_search=True,
+        model_may_skip_search=True,
+    )
+
+    assert result.status == "ok"
+    assert result.evidence["level_after"] != "skipped"
+    rendered = session.log.render()
+    tool_messages = [m for m in rendered if m["role"] == "tool"]
+    joined = "\n".join(m.get("content") or "" for m in tool_messages)
+    assert "No good match was found" in joined
+
+
+def test_weak_evidence_second_round_never_fires_after_skip():
+    """Once a turn's evidence level is 'skipped', the weak-evidence extra
+    round must never fire (it only fires on level in ('weak', 'empty'))."""
+    session, budget = _mk_session()
+    llm = FakeLlmClient(
+        [
+            _tool_call("research", {"needs_search": False, "queries": []}),
+            _final("Sure."),
+        ]
+    )
+    research = ScriptedResearchEngine([_strong_response(1)])
+    calc = FakeCalc()
+
+    run_turn(
+        session,
+        _UserInput(kind="text", text="thanks!"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=lambda e: None,
+        model_writes_search=True,
+        model_may_skip_search=True,
+    )
+
+    # Only 2 LLM calls total: the forced round + the final answer -- no
+    # second (weak-evidence) forced round.
+    assert llm.call_count == 2
+
+
+def test_forced_schema_response_format_fallback_includes_needs_search():
+    from tutor.app.agent_loop import _forced_research_tool_call
+
+    class _RejectingToolChoiceLlm:
+        def __init__(self):
+            self.response_format_calls = []
+
+        def stream_chat(self, messages, *, tool_choice=None, response_format=None, **kwargs):
+            if tool_choice is not None:
+                yield StreamEvent(kind="error", error="tool_choice unsupported")
+                return
+            self.response_format_calls.append(response_format)
+            yield StreamEvent(
+                kind="token",
+                text=json.dumps(
+                    {"needs_search": False, "question": "thanks", "queries": []}
+                ),
+            )
+            yield StreamEvent(kind="done", finish_reason="stop")
+
+    llm = _RejectingToolChoiceLlm()
+    forced = _forced_research_tool_call(llm, [{"role": "user", "content": "hi"}], cancel=None)
+    assert forced is not None
+    _, queries, _arguments_json, _question, needs_search = forced
+    assert queries == []
+    assert needs_search is False
+    schema = llm.response_format_calls[0]["json_schema"]["schema"]
+    assert schema["required"] == ["needs_search", "question", "queries"]
+    assert schema["properties"]["queries"]["minItems"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Truncated forced-call JSON salvage (2026-09-21 live measurement on Ling
+# 3.0 Tiny: needs_search + a full-sentence question + 3 queries can exceed
+# the forced round's own output cap, truncating the JSON mid-argument).
+# ---------------------------------------------------------------------------
+
+
+def _truncated_tool_call(raw_json: str, call_id="call_1"):
+    return [
+        StreamEvent(kind="tool_call", id=call_id, name="research", arguments_json=raw_json),
+        StreamEvent(kind="done", finish_reason="length", usage={}),
+    ]
+
+
+def test_truncated_forced_json_is_salvaged_when_possible():
+    from tutor.app.agent_loop import _forced_research_tool_call
+
+    truncated = (
+        '{"needs_search": true, "question": "What is titin", '
+        '"queries": ["Titin", "Larg'
+    )
+    llm = FakeLlmClient([_truncated_tool_call(truncated)])
+    diagnostics: dict = {}
+    forced = _forced_research_tool_call(
+        llm, [{"role": "user", "content": "hi"}], cancel=None, diagnostics=diagnostics
+    )
+    assert forced is not None
+    _, queries, _arguments_json, _question, needs_search = forced
+    assert queries == ["Titin", "Larg"]
+    assert needs_search is True
+    assert diagnostics["truncated"] is True
+
+
+def test_truncated_forced_json_with_nothing_salvageable_falls_back_to_raw_presearch():
+    """When the forced call's JSON is truncated beyond any salvage, the
+    round falls back to the raw pre-search's own passages (the student's
+    own words) instead of reporting a dead end -- no extra LLM/search call
+    is made."""
+    session, budget = _mk_session()
+    unsalvageable = '{"needs_search"'  # cut off before any usable content
+    llm = FakeLlmClient(
+        [
+            _truncated_tool_call(unsalvageable),
+            _final("Titin is a very long protein [S1]."),
+        ]
+    )
+    research = ScriptedResearchEngine([_strong_response(1, title="Titin")])
+    calc = FakeCalc()
+    statuses = []
+
+    def _collect(e):
+        if isinstance(e, dict) and e.get("kind") == "status":
+            statuses.append(e)
+
+    result = run_turn(
+        session,
+        _UserInput(kind="text", text="What is titin"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=budget,
+        emit=_collect,
+        model_writes_search=True,
+        model_may_skip_search=True,
+    )
+
+    assert result.status == "ok"
+    assert research.call_count == 1  # only the raw pre-search; no wasted retry
+    assert result.evidence["level_after"] == "strong"
+    details = [s.get("detail") for s in statuses]
+    assert any(d and "took too long" in d for d in details)

@@ -197,6 +197,8 @@ def test_timings_present_and_non_negative_normal_turn():
         "second_round",
         "answer_prefill",
         "answer_generation",
+        "presearch",
+        "voluntary_tool_rounds",
     }
     assert set(result.timings.keys()) == expected_keys
     for key, value in result.timings.items():

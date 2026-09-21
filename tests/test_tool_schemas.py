@@ -186,3 +186,23 @@ def test_validate_empty_expression_rejected():
 def test_validate_whitespace_only_expression_rejected():
     result = validate_tool_call("calc", json.dumps({"expression": "\t\n"}))
     assert result.ok is False
+
+
+def test_validate_needs_search_false_allows_empty_queries():
+    result = validate_tool_call("research", json.dumps({"needs_search": False, "queries": []}))
+    assert result.ok is True
+
+
+def test_validate_needs_search_true_still_requires_a_query():
+    result = validate_tool_call("research", json.dumps({"needs_search": True}))
+    assert result.ok is False
+
+
+def test_validate_needs_search_must_be_boolean():
+    result = validate_tool_call("research", json.dumps({"needs_search": "false", "query": "x"}))
+    assert result.ok is False
+
+
+def test_validate_needs_search_false_with_no_query_or_queries_key_at_all():
+    result = validate_tool_call("research", json.dumps({"needs_search": False}))
+    assert result.ok is True

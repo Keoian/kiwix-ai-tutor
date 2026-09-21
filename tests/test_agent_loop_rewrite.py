@@ -173,7 +173,7 @@ def test_weak_evidence_forces_research_tool_choice_and_rewrites():
         "function": {"name": "research"},
     }
     assert llm.response_format_calls[0] is None
-    assert llm.max_tokens_calls[0] == 96
+    assert llm.max_tokens_calls[0] == 256
     # Host executed the rewritten query for real.
     assert research.calls[1]["query"] == "solar system planets"
     assert result.evidence["level_before"] == "empty"
