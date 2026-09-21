@@ -211,14 +211,31 @@ def _title_terms(title: str) -> frozenset[str]:
     return frozenset(singularize(t) for t in tokenize(title or ""))
 
 
-def _is_generic_or_disambiguation(title: str, title_terms: frozenset[str]) -> bool:
-    """A title that is a disambiguation page, or shares only a single
-    generic content term with the query (e.g. "Garden", "Square"), is a
+def _is_generic_or_disambiguation(
+    title: str,
+    title_terms: frozenset[str],
+    query_term_union: frozenset[str] | None = None,
+) -> bool:
+    """A title that is a disambiguation page, shares only a single generic
+    content term with the query (e.g. "Garden", "Square"), or otherwise
+    only INCIDENTALLY overlaps the rewritten queries (e.g. "6 Foot 7 Foot",
+    a song whose title happens to contain "foot" but is not itself built
+    entirely of query terms and shares only that one word with them), is a
     weak, non-specific hit that should never outrank a multi-term article
-    match on the actual topic."""
+    match on the actual topic. The incidental-overlap check only applies
+    when ``query_term_union`` (the union of every rewritten query's own
+    terms) is given and the title is NOT itself a subset of it -- a title
+    that IS a full subset already gets ``_TITLE_BOOST`` instead and must
+    never also be penalized here."""
     if "disambiguation" in (title or "").lower():
         return True
-    return len(title_terms) <= 1
+    if len(title_terms) <= 1:
+        return True
+    if query_term_union and not (title_terms <= query_term_union):
+        overlap = title_terms & query_term_union
+        if len(overlap) <= 1:
+            return True
+    return False
 
 
 def _merge_dedupe_passages(
@@ -272,18 +289,35 @@ def _merge_dedupe_passages(
                 if title not in article_best_rank or rank < article_best_rank[title]:
                     article_best_rank[title] = rank
 
+    query_term_union: frozenset[str] = (
+        frozenset().union(*query_term_sets) if query_term_sets else frozenset()
+    )
+
     def _article_score(title: str) -> float:
         terms = _title_terms(title)
         score = article_rrf.get(title, 0.0)
         if query_term_sets and terms and any(terms <= qts for qts in query_term_sets):
             score += _TITLE_BOOST
-        if _is_generic_or_disambiguation(title, terms):
+        if _is_generic_or_disambiguation(title, terms, query_term_union):
             score -= _GENERIC_TITLE_PENALTY
         return score
+
+    # A generic/disambiguation/incidental-overlap title (e.g. a song whose
+    # title happens to share one word with the query) must sort AFTER
+    # every non-generic hit regardless of how many rewritten queries
+    # happened to surface it -- vote count alone would otherwise let it
+    # beat the one real, on-topic article a single query found (the
+    # smoke-test bug this fixes: "6 Foot 7 Foot" found by 2/3 rewritten
+    # queries outranking "Square foot gardening" found by only 1). Ties
+    # within each of those two tiers still resolve by vote count, then
+    # score, then best rank, then title, exactly as before.
+    def _is_generic_tier(title: str) -> bool:
+        return _is_generic_or_disambiguation(title, _title_terms(title), query_term_union)
 
     article_order = sorted(
         article_hits.keys(),
         key=lambda t: (
+            _is_generic_tier(t),
             -article_hits[t],
             -_article_score(t),
             article_best_rank[t],

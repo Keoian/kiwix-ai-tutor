@@ -98,6 +98,89 @@ below.
   original bug report and asserts "Square foot gardening" now sorts
   first.)
 
+### Follow-up: latency and merged-order fixes (live smoke, re-measured)
+
+Two problems remained after the fix above landed, found by re-running
+`data/rewrite_smoke.py` (now instrumented with per-LLM-request
+`timings` -- llama.cpp's own `prompt_ms`/`predicted_ms`/`*_per_second`
+block, captured additively onto `StreamEvent.usage` in
+`tutor/app/llm_client.py` -- and per-`research()`/`research_many()`
+elapsed timers) several times live against llama-server, since
+Granite's own rewrite wording is non-deterministic run to run.
+
+**Where the ~27 s outlier went / current timing.** `research_many`
+already ran its queries concurrently in threads sharing one deadline
+(confirmed empirically: a 3-query batch's own elapsed time, ~3.3 s, was
+close to its single slowest query, not the ~9.7 s sum of the three) --
+the earlier ~4.9 s "three sequential searches" estimate in the
+Before/after note above was itself measured before this batching
+landed. Repeated live runs after it land in the 9-17 s range for turn
+1 (well under the original 27.3 s outlier, which looks like a cold-run
+artifact -- no run since has approached it). The rewrite round's own
+added cost is the forced tool-call request (~2-3 s) plus the batched
+`research_many` call (~3-4 s, bounded by its slowest query) -- close to
+the ~5 s target, and a large improvement on the ~8.3 s this doc
+previously measured for the sequential-search path.
+
+**Why "...basics" (and similar model-written rewrites) came back
+completely empty.** Not a retrieval miss: `research()`'s own AND-of-terms
+fallback (`_search_with_fallback`) already degrades gracefully and found
+real candidates -- `square foot gardening basics` alone returns 5
+full-text hits and 10 title hits once the exact-phrase AND query fails.
+The candidates were found and packed, then silently discarded by
+`research()`'s own coverage gate: `assess`-like coverage is computed
+against the QUERY STRING'S OWN terms (`coverage_terms`), and a query the
+model wrote by appending one more of its own words ("basics") to an
+otherwise-good query can end up with a real, on-topic passage set that
+doesn't itself contain that one extra word -- coverage looks "weak", and
+the (perfectly good) passages get dropped to `[]` before ever reaching
+`research_many`'s caller. This is exactly the class of problem the
+merge/re-assessment already exists to solve one level up (in
+`agent_loop`, via `rewritten_queries`/`healthy_terms`) -- but the
+passages never got that far because `research()` zeroed them out first.
+Fix: `ResearchEngine.research()` takes a new keyword-only
+`relax_coverage_gate: bool = False` (default off, so the single/legacy
+call path is unchanged byte-for-byte); `research_many()` passes
+`relax_coverage_gate=True` for every one of its (already
+model-authored, already-spelled) queries, which keeps the packed
+passages even when that one query's own coverage looks weak, trusting
+the caller's own merged re-assessment to judge real coverage. Verified
+directly against the live archive: `research("square foot gardening
+basics")` alone now returns real passages (`6 Foot 7 Foot`, `Square
+foot`, `Garden`, `Companion planting`, ...) instead of `[]`.
+
+**Final merged order.** Even once a query like "square foot gardening"
+alone returned "Square foot gardening" as its OWN top-ranked passage
+(rank 0 of 6, confirmed by direct engine call), `_merge_dedupe_passages`
+still put it last behind `6 Foot 7 Foot` and `Square (disambiguation)`
+in one single-query live run, and the RRF vote-count-first sort could let
+`6 Foot 7 Foot` (found by 2 of 3 rewritten queries, since it happens to
+share the word "foot") outrank the target (found by only 1) in a
+three-query run. `_is_generic_or_disambiguation` only ever penalized
+disambiguation pages and single-generic-term titles; a multi-word but
+still purely-incidental title (a song sharing exactly one word with the
+query, and none of its OTHER terms) was never penalized. Fix: it now
+also flags a title as generic/incidental when it is NOT itself a subset
+of any rewritten query's own terms (so a genuine `_TITLE_BOOST` subset
+match is never double-penalized) AND its overlap with the union of all
+rewritten queries' terms is at most one word. `_merge_dedupe_passages`'s
+article sort now buckets by this flag FIRST, ahead of raw vote count, so
+an incidental/generic hit can never outrank a real one purely on being
+found by more queries. New regression test:
+`tests/test_agent_loop_rewrite.py::test_rrf_merge_incidental_multi_hit_never_beats_single_query_target`,
+reproducing the exact "6 Foot 7 Foot found by 2 queries vs. Square foot
+gardening found by 1" shape from the live smoke run. Verified live:
+a single-query "square foot gardening" rewrite now merges to
+`['Square foot gardening', '6 Foot 7 Foot', 'Square (disambiguation)',
+...]` (target first). Residual, out of scope for this fix: when the
+model's OWN rewrite wording never retrieves the target article at all as
+a candidate in the first place (e.g. it rewrites to the verb "garden"
+rather than "gardening", which the archive's search does not stem
+together), no merge-order fix can rank in a passage that was never a
+candidate -- that is a retrieval-recall question, not a scoring one, and
+the tuning-split recall/MRR numbers below confirm `research()`'s own
+recall is unchanged by everything in this section.
+
 ## Not-found instruction
 
 When the merged, re-assessed evidence is still `weak`/`empty`, the single

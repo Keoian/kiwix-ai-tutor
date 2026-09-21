@@ -1983,9 +1983,33 @@ class ResearchEngine:
         deadline_s: float | None = None,
         soft_deadline_s: float | None = None,
         topic_hint: str | None = None,
+        relax_coverage_gate: bool = False,
     ) -> ResearchResponse:
+        # ``relax_coverage_gate`` (only set True by ``research_many``): a
+        # query passed to ``research_many`` is one of the MODEL's own
+        # rewritten queries -- already correctly spelled, unlike the
+        # student's original question -- so requiring every one of ITS OWN
+        # terms (e.g. "basics" in "square foot gardening basics") to show
+        # real coverage in the packed passages is too strict: the caller
+        # (``agent_loop``'s forced-rewrite path) re-runs its own
+        # ``assess_evidence`` against the MERGED evidence from all
+        # rewritten queries together, using ``rewritten_queries`` +
+        # ``healthy_terms`` for real coverage judgment. Dropping an
+        # otherwise-good, already-ranked/packed passage set here just
+        # because this one query's own literal terms don't all appear
+        # denies that merge step evidence it would otherwise correctly
+        # judge as strong (see docs/rewrite_on_weak_evidence.md, "why
+        # '...basics' was empty"). Never changes the single/legacy
+        # ``research()`` call path (default False).
         keywords_key = tuple(keywords) if keywords else None
-        cache_key = (query, keywords_key, budget_tokens, deadline_s, topic_hint)
+        cache_key = (
+            query,
+            keywords_key,
+            budget_tokens,
+            deadline_s,
+            topic_hint,
+            relax_coverage_gate,
+        )
         cached = self._response_cache.get(cache_key)
         if cached is not None:
             self._response_cache.move_to_end(cache_key)
@@ -2171,7 +2195,8 @@ class ResearchEngine:
         coverage = _best_coverage(packed, coverage_terms, topic_hint_terms, own_term_count)
 
         passages: list[ResearchPassage] = []
-        if not coverage["weak"]:
+        keep_weak_passages = relax_coverage_gate and bool(packed)
+        if not coverage["weak"] or keep_weak_passages:
             for entry_dict in packed:
                 rp = ResearchPassage(
                     label=entry_dict["label"],
@@ -2270,6 +2295,7 @@ class ResearchEngine:
                     deadline_s=remaining,
                     soft_deadline_s=soft_deadline_s,
                     topic_hint=topic_hint,
+                    relax_coverage_gate=True,
                 )
                 return {"query": q, "status": "ok", "response": resp, "error": None}
             except Exception as exc:  # pragma: no cover - defensive, per-query isolation

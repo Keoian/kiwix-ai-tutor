@@ -234,6 +234,7 @@ class LlamaClient:
         tool_calls: dict[int, dict] = {}
         finish_reason: str | None = None
         usage: dict = {}
+        last_timings: dict | None = None
         cancelled = False
         done_marker_seen = False
 
@@ -297,6 +298,8 @@ class LlamaClient:
                         finish_reason = fr
                     if obj.get("usage") is not None:
                         usage = obj["usage"]
+                    if obj.get("timings") is not None:
+                        last_timings = obj["timings"]
                 if done_marker_seen:
                     break
 
@@ -316,5 +319,10 @@ class LlamaClient:
             details = normalized_usage.get("prompt_tokens_details")
             if isinstance(details, dict) and "cached_tokens" in details:
                 normalized_usage["cached_tokens"] = details["cached_tokens"]
+        if last_timings is not None and "timings" not in normalized_usage:
+            # llama.cpp-specific diagnostic block (prompt/predicted ms,
+            # tokens-per-second): passed through additively for latency
+            # investigation, never required by any caller.
+            normalized_usage["timings"] = last_timings
 
         yield StreamEvent(kind="done", finish_reason=final_finish_reason, usage=normalized_usage)

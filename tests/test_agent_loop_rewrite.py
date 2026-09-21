@@ -418,6 +418,43 @@ def test_rrf_merge_puts_multi_query_target_article_first():
     assert merged[0]["title"] == "Square foot gardening"
 
 
+def test_rrf_merge_incidental_multi_hit_never_beats_single_query_target():
+    """Reproduces the live smoke bug (docs/rewrite_on_weak_evidence.md,
+    "final merged order"): "6 Foot 7 Foot" (a song, incidentally sharing
+    only the word "foot" with the query) found by 2 of 3 rewritten
+    queries must never outrank "Square foot gardening" (the actual
+    target, a full title-term subset of one rewritten query) found by
+    only 1 -- vote count must not override an incidental/generic title's
+    penalty tier."""
+    rewritten_queries = [
+        "square foot gardening",
+        "square foot gardening how to",
+        "square foot gardening basics",
+    ]
+    list1 = [
+        _p("sixfoot-1", "6 Foot 7 Foot", "q1"),
+        _p("sixfoot-1b", "6 Foot 7 Foot", "q1"),
+        _p("sfg-1", "Square foot gardening", "q1"),
+        _p("sfg-1b", "Square foot gardening", "q1"),
+        _p("square-1", "Square (disambiguation)", "q1"),
+        _p("square-1b", "Square (disambiguation)", "q1"),
+    ]
+    list2 = [
+        _p("sixfoot-2", "6 Foot 7 Foot", "q2"),
+        _p("sixfoot-2b", "6 Foot 7 Foot", "q2"),
+        _p("square-2", "Square (disambiguation)", "q2"),
+        _p("square-2b", "Square (disambiguation)", "q2"),
+        _p("sfoot-2", "Square foot", "q2"),
+    ]
+    merged = _merge_dedupe_passages(
+        [list1, list2], _MERGE_CAP, rewritten_queries=rewritten_queries
+    )
+    assert merged[0]["title"] == "Square foot gardening"
+    titles = [p["title"] for p in merged]
+    assert titles.index("Square foot gardening") < titles.index("6 Foot 7 Foot")
+    assert titles.index("Square foot gardening") < titles.index("Square (disambiguation)")
+
+
 def test_rrf_merge_multi_query_hit_outranks_single_query_hit():
     list1 = [_p("a1", "Some Other Article", "q1")]  # rank 0 in one query only
     list2 = [
