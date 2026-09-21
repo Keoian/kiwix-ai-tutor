@@ -11,6 +11,7 @@ works end to end. No live LLM calls anywhere in this file.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -230,19 +231,22 @@ def test_evaluator_returning_garbage_is_tolerated():
 
 
 # ---------------------------------------------------------------------------
-# Real soak data fixtures (data/*.turns.json) -- counts reported by the
-# calling agent, not asserted rigidly here since the exact answers are
-# recorded transcripts, but at least the known error must be caught.
+# Real soak answers, verbatim -- but from a small COMMITTED fixture, never
+# from data/*.turns.json: data/ is gitignored, so a test that opens it
+# passes locally (where a real soak run has been done) and raises
+# FileNotFoundError on a clean checkout / CI (windows + ubuntu). See
+# tests/fixtures/computed_check_answers.json (copied verbatim from
+# data/granite_soak10_v2.turns.json / data/granite_soak10_v3.turns.json;
+# the full soak fixture tally itself is a manual/eval-time check, not a
+# suite test -- see the handback report for those counts).
 # ---------------------------------------------------------------------------
 
+_FIXTURES_FILE = Path(__file__).resolve().parent / "fixtures" / "computed_check_answers.json"
+_FIXTURE_ANSWERS = json.loads(_FIXTURES_FILE.read_text(encoding="utf-8"))
 
-def _load_answer_by_question(path, question_text):
-    with open(path, encoding="utf-8") as fh:
-        data = json.load(fh)
-    for turn in data:
-        if turn.get("input_text") == question_text:
-            return turn.get("input_text"), turn.get("answer_text")
-    raise AssertionError(f"{question_text!r} not found in {path}")
+
+def _load_answer_by_question(soak_name, question_text):
+    return question_text, _FIXTURE_ANSWERS[soak_name][question_text]
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +264,7 @@ def _load_answer_by_question(path, question_text):
 
 def test_no_false_mismatch_when_correct_value_is_in_a_later_sentence_12_5_percent():
     question, answer = _load_answer_by_question(
-        "data/granite_soak10_v2.turns.json", "What is 12.5% of 640?"
+        "granite_soak10_v2", "What is 12.5% of 640?"
     )
     items = check_computed_statements(answer, question, evaluate=_stub_evaluate)
     mismatches = [i for i in items if i["status"] == "mismatch"]
@@ -270,7 +274,7 @@ def test_no_false_mismatch_when_correct_value_is_in_a_later_sentence_12_5_percen
 
 def test_no_false_mismatch_when_correct_value_is_in_a_later_sentence_250_percent():
     question, answer = _load_answer_by_question(
-        "data/granite_soak10_v2.turns.json", "What is 250% of 40?"
+        "granite_soak10_v2", "What is 250% of 40?"
     )
     items = check_computed_statements(answer, question, evaluate=_stub_evaluate)
     mismatches = [i for i in items if i["status"] == "mismatch"]
@@ -304,7 +308,7 @@ def test_temperature_mismatch_suppressed_when_correct_value_appears_elsewhere():
 
 def test_soak_v3_index_32_is_the_108_8_error():
     question, answer = _load_answer_by_question(
-        "data/granite_soak10_v3.turns.json", "What is 12.5% of 640?"
+        "granite_soak10_v3", "What is 12.5% of 640?"
     )
     items = [
         i
@@ -316,3 +320,30 @@ def test_soak_v3_index_32_is_the_108_8_error():
         i["stated"] == pytest.approx(108.8) and i["computed"] == pytest.approx(80.0)
         for i in items
     )
+
+
+# ---------------------------------------------------------------------------
+# Dedupe: the answer-scan and the question-gap check must never both flag
+# the SAME underlying error -- one real mistake, one item.
+# ---------------------------------------------------------------------------
+
+
+def test_question_gap_check_does_not_duplicate_an_answer_scan_mismatch():
+    question = "What is 12.5% of 640?"
+    answer = "12.5% of 640 is calculated by multiplying 640 by 0.17 to get 108.8."
+    items = [
+        i
+        for i in check_computed_statements(answer, question, evaluate=_stub_evaluate)
+        if i["status"] == "mismatch" and i["computed"] == pytest.approx(80.0)
+    ]
+    assert len(items) == 1, items
+
+
+def test_question_gap_check_still_fires_when_answer_scan_found_nothing():
+    question = "What is 12.5% of 640?"
+    answer = "That's a great question about percentages! Let's think about it."
+    items = check_computed_statements(answer, question, evaluate=_stub_evaluate)
+    mismatches = [i for i in items if i["status"] == "mismatch"]
+    assert len(mismatches) == 1
+    assert mismatches[0]["span"] is None
+    assert mismatches[0]["computed"] == pytest.approx(80.0)

@@ -328,6 +328,20 @@ def test_no_passages_everything_unbacked():
 # ---------------------------------------------------------------------------
 
 
+def test_load_granite_paragraph_falls_back_when_data_file_is_absent(monkeypatch, tmp_path):
+    """data/granite_soak10_v2.turns.json is gitignored -- it won't exist on
+    a clean checkout or CI (windows + ubuntu). Confirm the "when present,
+    else built-in" fallback in ``_load_granite_paragraph`` really takes
+    over then, without moving/deleting anything in data/: point the module
+    constant at a path that never exists."""
+    import tests.test_attribution as this_module
+
+    monkeypatch.setattr(this_module, "_DATA_FILE", tmp_path / "does-not-exist.turns.json")
+    text = this_module._load_granite_paragraph()
+    assert text.startswith("Photosynthesis is the process")
+    assert text.rstrip().endswith("[S1]")
+
+
 def test_short_non_claims_are_ignored_entirely():
     answer = (
         "Water boils at 100 degrees Celsius at sea level [S1]. Great question! "

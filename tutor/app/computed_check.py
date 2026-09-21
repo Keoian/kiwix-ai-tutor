@@ -321,10 +321,19 @@ def _answer_has_number_near(text: str, value: float) -> bool:
 
 
 def _question_gap_items(
-    question_text: str | None, answer_text: str, evaluate: EvaluateFn
+    question_text: str | None,
+    answer_text: str,
+    evaluate: EvaluateFn,
+    already_flagged_values: list[float] | None = None,
 ) -> list[dict]:
+    """``already_flagged_values``: the ``computed`` value of every item the
+    answer-scan already produced (verified or mismatch) for this turn --
+    one real arithmetic error/claim should only ever surface ONE item, not
+    both an answer-scan mismatch AND a duplicate question-gap mismatch for
+    the same computed value (2026-09-20 dedupe follow-up)."""
     if not question_text:
         return []
+    already_flagged_values = already_flagged_values or []
     items = []
     for m in _PERCENT_BARE_RE.finditer(question_text):
         p_str, n_str = m.group(1), m.group(2)
@@ -333,6 +342,8 @@ def _question_gap_items(
         if computed is None:
             continue
         if _answer_has_number_near(answer_text, computed):
+            continue
+        if any(_within_tolerance(v, computed, str(computed)) for v in already_flagged_values):
             continue
         items.append(
             {
@@ -374,6 +385,9 @@ def check_computed_statements(
         items.append(item)
 
     items.extend(_temp_items(answer_text, evaluate))
-    items.extend(_question_gap_items(question_text, answer_text, evaluate))
+    already_flagged_values = [it["computed"] for it in items]
+    items.extend(
+        _question_gap_items(question_text, answer_text, evaluate, already_flagged_values)
+    )
     items.sort(key=lambda it: (it["span"] is None, it["span"] or (0, 0)))
     return items
