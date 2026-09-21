@@ -50,9 +50,12 @@ jobs:
         if: runner.os == 'Linux'
         id: unit_tests_linux
         continue-on-error: true
+        env:
+          CI: "true"
         run: |
           set +e
           mkdir -p data
+          echo "ulimit -n: $(ulimit -n)"
           timeout -s INT -k 60 600 python -m pytest -m "not integration" -v -p no:cacheprovider \
             --timeout=120 --timeout-method=signal -o faulthandler_timeout=90 -x \
             2>&1 | tee data/pytest.log
@@ -101,6 +104,16 @@ jobs:
           PSOUT=$(ps -ef --forest 2>/dev/null | grep -i python | grep -v grep)
           if [ -n "$PSOUT" ]; then
             emit "ci-hang-ps" "$PSOUT"
+          fi
+
+          ULIMIT_N=$(ulimit -n)
+          emit "ci-ulimit-n" "$ULIMIT_N"
+
+          DFOUT=$(df -h /tmp "$RUNNER_TEMP" 2>&1)
+          emit "ci-df" "$DFOUT"
+
+          if [ -f data/fd_growth.txt ]; then
+            emit "ci-fd-growth" "$(cat data/fd_growth.txt)"
           fi
 
           rc="${{ steps.unit_tests_linux.outputs.rc }}"
