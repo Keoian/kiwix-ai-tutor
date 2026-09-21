@@ -25,10 +25,13 @@ from __future__ import annotations
 
 from pathlib import Path as _Path
 
+import pytest
+
 from tutor.app.citations import (
     Citation,
     _sentence_spans,
     extract_labels,
+    find_model_source_block_ranges,
     render_evidence,
     resolve_citations,
 )
@@ -468,3 +471,68 @@ def test_quick_tips_list_items_are_their_own_units():
     assert any(u.startswith("- Water consistently") for u in units)
     assert any(u.startswith("- Rotate crops") for u in units)
     assert any(u.startswith("- Thin seedlings") for u in units)
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-21 model-authored source-list block (owner-reported live bug): the
+# model sometimes writes its OWN fake "Sources:" list with invented passage
+# descriptions. The host must never turn the heading line or the label-led
+# list lines that follow it into attribution sentence units -- no ○/●
+# marker on them, and they must not count toward backed/unbacked rates.
+# Text after the block (e.g. a trailing "Short answer: ...") still gets
+# normal spans. See `_SOURCE_HEADING_RE` / `_LABEL_LED_LINE_RE` /
+# `find_model_source_block_ranges`, mirrored in tutor/ui/app.js.
+# ---------------------------------------------------------------------------
+
+_OWNER_SOURCE_BLOCK_ANSWER = (
+    "So, while DNA is the largest molecule ... the longest molecule overall "
+    "is titin.\n\n"
+    "Sources:\n"
+    "[S1] DNA structure and replication mechanisms (describing DNA's size "
+    "in terms of base pairs).\n"
+    "[S2] Overview of DNA replication process.\n"
+    "[S3] Basic chemical structure of DNA (describing its components).\n"
+    "[S4] General description of DNA molecules.\n"
+    "[S5] References showing various descriptions of DNA length.\n"
+    "[S6] (Note: The source list provided was not directly related to the "
+    "question but serves as context for the answer.)\n\n"
+    "Short answer: DNA is large, but titin is the longest molecule by "
+    "sheer length of its amino acid sequence."
+)
+
+
+def test_find_model_source_block_ranges_covers_heading_and_label_lines():
+    ranges = find_model_source_block_ranges(_OWNER_SOURCE_BLOCK_ANSWER)
+    assert len(ranges) == 1
+    start, end = ranges[0]
+    block = _OWNER_SOURCE_BLOCK_ANSWER[start:end]
+    assert block.startswith("Sources:")
+    assert "[S6]" in block
+    assert "Short answer" not in block
+
+
+@pytest.mark.parametrize("heading", ["Sources:", "Source:", "References:", "Citations:",
+                                      "**Sources**", "## Sources"])
+def test_find_model_source_block_ranges_recognizes_heading_variants(heading):
+    text = heading + "\n[S1] a made-up description.\n[S2] another one.\n"
+    ranges = find_model_source_block_ranges(text)
+    assert len(ranges) == 1
+
+
+def test_find_model_source_block_ranges_ignores_bare_heading_with_no_label_lines():
+    text = "Sources:\nI could not find anything relevant."
+    assert find_model_source_block_ranges(text) == []
+
+
+def test_find_model_source_block_ranges_ignores_normal_sentence_mentioning_label():
+    text = "As shown in [S1], water boils at 100C. See [S2] for more."
+    assert find_model_source_block_ranges(text) == []
+
+
+def test_sentence_spans_excludes_model_source_block_lines():
+    spans = _sentence_spans(_OWNER_SOURCE_BLOCK_ANSWER)
+    units = [_OWNER_SOURCE_BLOCK_ANSWER[s:e] for s, e in spans]
+    assert not any(u.strip().startswith("Sources:") for u in units)
+    assert not any(u.strip().startswith("[S") for u in units)
+    assert any("Short answer" in u for u in units)
+    assert any("longest molecule overall is titin" in u for u in units)

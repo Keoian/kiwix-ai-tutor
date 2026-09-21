@@ -301,6 +301,70 @@ _INVENTED_LABEL_RE = re.compile(
 )
 
 
+# 2026-09-21 model-authored source-list block (owner-reported live bug): the
+# model sometimes writes its OWN fake "Sources:" list with invented passage
+# descriptions instead of relying on the real [S#] chips the app already
+# renders. This is the single source of truth for detecting such a block;
+# tutor/ui/app.js mirrors it (see the comment there) so the UI never renders
+# the heading or the label-led lines that follow it either. Kept
+# conservative: a heading line ("Sources:" / "Source:" / "References:" /
+# "Citations:", optional markdown emphasis/heading marks) must be
+# IMMEDIATELY followed by one or more consecutive lines that each START with
+# a "[S#]" citation label -- a normal sentence that merely starts with or
+# contains "[S1]" never matches this, and a bare heading with no label-led
+# lines after it is left alone.
+_SOURCE_HEADING_RE = re.compile(
+    r"^\s*(?:#{1,6}\s*)?\*{0,2}\s*(?:Sources?|References?|Citations?)\s*:?\s*\*{0,2}\s*$",
+    re.IGNORECASE,
+)
+
+_LABEL_LED_LINE_RE = re.compile(r"^\s*(?:[-*]|\d+[.)])?\s*\[\s*S\d+(?:\s*,\s*S\d+)*\s*\]")
+
+
+def _source_block_line_ranges(lines: list[str]) -> list[tuple[int, int]]:
+    """Line-index ranges ``[start, end)`` (end exclusive) of each detected
+    model-authored source-list block: a heading line plus every consecutive
+    label-led line that immediately follows it. A heading with no label-led
+    line right after it produces no range at all."""
+    ranges: list[tuple[int, int]] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        if _SOURCE_HEADING_RE.match(lines[i]):
+            j = i + 1
+            while j < n and _LABEL_LED_LINE_RE.match(lines[j]):
+                j += 1
+            if j > i + 1:
+                ranges.append((i, j))
+                i = j
+                continue
+        i += 1
+    return ranges
+
+
+def find_model_source_block_ranges(text: str) -> list[tuple[int, int]]:
+    """Character-offset ``(start, end)`` spans into ``text`` of every
+    model-authored source-list block detected (see ``_source_block_line_ranges``).
+    Used both to exclude the block from attribution sentence units
+    (``_sentence_spans``) and, mirrored in tutor/ui/app.js, to hide it from
+    the rendered chat bubble -- the host never edits the stored answer text
+    itself, only what a display layer builds from it."""
+    lines = text.split("\n")
+    line_starts: list[int] = []
+    pos = 0
+    for line in lines:
+        line_starts.append(pos)
+        pos += len(line) + 1
+
+    spans: list[tuple[int, int]] = []
+    for start_idx, end_idx in _source_block_line_ranges(lines):
+        block_start = line_starts[start_idx]
+        last_line_idx = end_idx - 1
+        block_end = line_starts[last_line_idx] + len(lines[last_line_idx])
+        spans.append((block_start, block_end))
+    return spans
+
+
 def _strip_label_noise(text: str) -> str:
     """Strip ``[S123]``-style citation labels and a leading list-numbering
     marker ("1. ", "2) ") before scanning for figures -- otherwise the
@@ -357,11 +421,26 @@ def _sentence_spans(text: str) -> list[tuple[int, int]]:
         line_starts.append(pos)
         pos += len(line) + 1
 
+    # 2026-09-21 model-authored source-list block: a heading line + the
+    # label-led lines under it never become sentence/attribution units at
+    # all (see find_model_source_block_ranges).
+    skip_line_ranges = _source_block_line_ranges(lines)
+
+    def _in_skip_range(idx: int) -> tuple[int, int] | None:
+        for r_start, r_end in skip_line_ranges:
+            if r_start <= idx < r_end:
+                return (r_start, r_end)
+        return None
+
     spans: list[tuple[int, int]] = []
     i = 0
     n = len(lines)
     while i < n:
         line = lines[i]
+        skip_range = _in_skip_range(i)
+        if skip_range is not None:
+            i = skip_range[1]
+            continue
         if _TABLE_ROW_RE.match(line) and i + 1 < n and _TABLE_SEP_RE.match(lines[i + 1]):
             # Header row + separator row: both non-claims, no span at all.
             i += 2
@@ -383,6 +462,8 @@ def _sentence_spans(text: str) -> list[tuple[int, int]]:
         j = i
         while j < n:
             nxt = lines[j]
+            if _in_skip_range(j) is not None:
+                break
             if _LIST_ITEM_LINE_RE.match(nxt):
                 break
             if _TABLE_ROW_RE.match(nxt) and j + 1 < n and _TABLE_SEP_RE.match(lines[j + 1]):
@@ -513,9 +594,35 @@ def attribute_sentences(answer: str, passages: list[dict]) -> AttributionResult:
         if _is_short_non_claim(sentence):
             continue
 
+        # 2026-09-21 real-list-item follow-up (owner-reported live bug B): a
+        # label RESOLVING to a passage in the packet is not the same as that
+        # passage actually SUPPORTING the claim -- e.g. a numbered-list item
+        # citing [S1] when S1's passage shares no content with the claim. A
+        # resolvable label only short-circuits to model_cited=True when at
+        # least one of its passages actually supports the sentence (same
+        # `is_supported` overlap rule `resolve_citations` uses); otherwise
+        # the sentence falls through to the same best-match/unbacked logic
+        # as an unlabeled sentence, so the UI can still show its ○ "not
+        # found" marker next to the model's own (unresolved-looking) chip.
         resolvable = [(lbl, by_label[lbl]) for lbl in _labels_in(sentence) if lbl in by_label]
-        if resolvable:
-            for _label, passage in resolvable:
+        # A "sentence" unit that is nothing but the label itself (e.g. a
+        # trailing "[S1]" split off as its own fragment by the punctuation
+        # splitter) carries no claim text of its own to check for support --
+        # trust it as a legitimate citation like before. A unit that DOES
+        # carry its own claim text (a real sentence or list item with an
+        # inline [S#]) only counts as model_cited when at least one of its
+        # labels' passages actually supports that claim.
+        has_own_claim_text = bool(tokenize(_LABEL_GROUP_RE.sub("", sentence)))
+        if not has_own_claim_text:
+            supported_resolvable = resolvable
+        else:
+            supported_resolvable = [
+                (lbl, passage)
+                for lbl, passage in resolvable
+                if is_supported(sentence, passage.get("text", ""))
+            ]
+        if supported_resolvable:
+            for _label, passage in supported_resolvable:
                 attributions.append(
                     Attribution(
                         sentence_span=(start, end),

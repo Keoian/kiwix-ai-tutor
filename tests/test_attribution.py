@@ -422,3 +422,56 @@ def test_other_invented_label_fragments_are_ignored_not_flagged_unbacked():
         ]
         covered = "".join(answer[s:e] for s, e in all_spans)
         assert invented not in covered, invented
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-21 real-numbered-list follow-up (owner-reported live bug B): a
+# numbered/bulleted list item that carries a real [S#] label whose passage
+# does NOT actually support the claim must still surface as unbacked (so the
+# UI's ○ marker renders next to the chip), not silently swallowed into
+# model_cited=True just because the label happens to resolve to *some*
+# passage in the packet.
+# ---------------------------------------------------------------------------
+
+
+def test_list_item_with_resolvable_but_unsupporting_label_is_unbacked():
+    answer = (
+        "The largest molecule is not definitively known, but some of the "
+        "largest include:\n"
+        "1. **Ribulose Bisphosphate Carboxylase/Oxygenase (RuBisCO)**: This "
+        "is one of the largest enzymes on Earth. [S1]\n"
+        "2. **Titin**: Known as the longest protein in the human body. [S2]\n"
+    )
+    # S1's passage is about something else entirely -- shares no content
+    # terms with the RuBisCO bullet, so it does not actually support it.
+    passages = [
+        _passage("S1", "p1", "Water boils at 100 degrees Celsius at sea level."),
+        _passage("S2", "p2", "Titin is the longest known protein, found in muscle sarcomeres."),
+    ]
+    result = attribute_sentences(answer, passages)
+
+    unbacked_texts = [answer[u.span[0] : u.span[1]] for u in result.unbacked_spans]
+    assert any("RuBisCO" in t for t in unbacked_texts)
+
+    # The Titin bullet DOES share content terms with its own passage, so it
+    # is genuinely model_cited=True, not unbacked.
+    cited_texts = [
+        answer[a.sentence_span[0] : a.sentence_span[1]]
+        for a in result.attributions
+        if a.model_cited
+    ]
+    assert any("Titin" in t for t in cited_texts)
+    assert not any("RuBisCO" in t for t in cited_texts)
+
+
+def test_list_item_with_resolvable_but_unsupporting_label_not_double_counted():
+    # The unsupported bullet must not also show up in `attributions` under
+    # a different (best-guess) passage AND in `unbacked_spans` -- exactly
+    # one of the two.
+    answer = "**Foo**: some claim about foo that matches nothing. [S1]\n"
+    passages = [_passage("S1", "p1", "Completely unrelated passage text here.")]
+    result = attribute_sentences(answer, passages)
+    attributed_spans = {a.sentence_span for a in result.attributions}
+    unbacked_spans_set = {u.span for u in result.unbacked_spans}
+    assert not (attributed_spans & unbacked_spans_set)
+    assert len(unbacked_spans_set) == 1

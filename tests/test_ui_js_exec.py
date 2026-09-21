@@ -488,3 +488,152 @@ def test_collapse_evidence_dump_shows_visible_note_and_toggle_reveals_content(ct
     note_hidden_after = call(ctx, "!!_tutorNode.children[0].hidden")
     assert note_hidden_after is False
     del found
+
+
+# ---------------------------------------------------------------------------
+# (f) 2026-09-21 model-authored fake "Sources:" block (owner-reported live
+# bug A) -- must never be rendered, and its label-led lines must never
+# become attribution markers or citation chips. Built end-to-end: the real
+# Python `attribute_sentences`/`resolve_citations` compute offsets against
+# the real owner-shaped answer, and the real JS renderer consumes them.
+# ---------------------------------------------------------------------------
+
+from tutor.app.citations import attribute_sentences, resolve_citations  # noqa: E402
+
+_OWNER_ANSWER_WITH_FAKE_SOURCES = (
+    "So, while DNA is the largest molecule ... the longest molecule overall "
+    "is titin.\n\n"
+    "Sources:\n"
+    "[S1] DNA structure and replication mechanisms (describing DNA's size "
+    "in terms of base pairs).\n"
+    "[S2] Overview of DNA replication process.\n"
+    "[S3] Basic chemical structure of DNA (describing its components).\n"
+    "[S4] General description of DNA molecules.\n"
+    "[S5] References showing various descriptions of DNA length.\n"
+    "[S6] (Note: The source list provided was not directly related to the "
+    "question but serves as context for the answer.)\n\n"
+    "Short answer: DNA is large, but titin is the longest molecule by "
+    "sheer length of its amino acid sequence."
+)
+
+
+def _passage(label, pid, text):
+    return {"label": label, "id": pid, "title": "T", "path": "P", "text": text}
+
+
+def test_fake_sources_block_never_rendered_end_to_end(ctx):
+    answer = _OWNER_ANSWER_WITH_FAKE_SOURCES
+    passages = [_passage(f"S{i}", f"p{i}", "unrelated passage text " * 3) for i in range(1, 7)]
+    result = attribute_sentences(answer, passages)
+    citations = resolve_citations(answer, passages)
+
+    attributions_payload = {
+        "attributions": [
+            {
+                "sentence_span": list(a.sentence_span),
+                "passage_id": a.passage_id,
+                "model_cited": a.model_cited,
+            }
+            for a in result.attributions
+        ],
+        "unbacked": [{"span": list(u.span), "reason": u.reason} for u in result.unbacked_spans],
+        "computed": [],
+    }
+    citations_payload = {
+        "citations": [
+            {"label": c.label, "passage_id": c.passage_id, "unresolved": c.unresolved}
+            for c in citations
+        ]
+    }
+
+    ctx.eval("var _cf = document.createElement('div');")
+    ctx.eval(
+        "module.exports.renderAnswerWithAttribution(_cf, "
+        f"{js_str(answer)}, {js_str(attributions_payload)}, {js_str(citations_payload)});"
+    )
+    rendered = call(ctx, "_cf.textContent")
+    assert "Sources:" not in rendered
+    assert "[S1]" not in rendered
+    assert "DNA structure and replication" not in rendered
+    assert "Short answer" in rendered
+    assert "longest molecule overall is titin" in rendered
+
+    found = call(ctx, "_walkCollect(_cf)")
+    # None of the model's invented per-source descriptions produced a
+    # citation chip -- the six fake "[S1]".."[S6]" labels never resolve to
+    # a real chip (only the two real content sentences may still get their
+    # own unbacked markers, unrelated to the fake source list).
+    assert found["chips"] == []
+
+
+def test_find_model_source_block_ranges_matches_python(ctx):
+    from tutor.app.citations import find_model_source_block_ranges
+
+    py_ranges = find_model_source_block_ranges(_OWNER_ANSWER_WITH_FAKE_SOURCES)
+    js_ranges = call(
+        ctx,
+        f"module.exports.findModelSourceBlockRanges({js_str(_OWNER_ANSWER_WITH_FAKE_SOURCES)})",
+    )
+    assert [tuple(r) for r in js_ranges] == py_ranges
+
+
+def test_ordinary_sentence_mentioning_label_still_renders(ctx):
+    text = "As shown in [S1], water boils at 100C."
+    ctx.eval("var _cg = document.createElement('div');")
+    ctx.eval(f"module.exports.renderTextWithCitations(_cg, {js_str(text)});")
+    rendered = call(ctx, "_cg.textContent")
+    assert "water boils at 100C" in rendered
+
+
+# ---------------------------------------------------------------------------
+# (g) 2026-09-21 owner-reported live bug B: numbered-list items with a real
+# [S#] label that does NOT actually support the claim must still surface a
+# visible ○ "not found" marker, not just a bare citation chip.
+# ---------------------------------------------------------------------------
+
+
+def test_list_item_with_unsupported_label_gets_unbacked_marker_end_to_end(ctx):
+    answer = (
+        "The largest molecule is not definitively known, but some of the "
+        "largest include:\n"
+        "1. **Ribulose Bisphosphate Carboxylase/Oxygenase (RuBisCO)**: This "
+        "is one of the largest enzymes on Earth. [S1]\n"
+        "2. **Titin**: Known as the longest protein in the human body. [S2]\n"
+    )
+    passages = [
+        _passage("S1", "p1", "Water boils at 100 degrees Celsius at sea level."),
+        _passage("S2", "p2", "Titin is the longest known protein, found in muscle sarcomeres."),
+    ]
+    result = attribute_sentences(answer, passages)
+    citations = resolve_citations(answer, passages)
+
+    attributions_payload = {
+        "attributions": [
+            {
+                "sentence_span": list(a.sentence_span),
+                "passage_id": a.passage_id,
+                "model_cited": a.model_cited,
+            }
+            for a in result.attributions
+        ],
+        "unbacked": [{"span": list(u.span), "reason": u.reason} for u in result.unbacked_spans],
+        "computed": [],
+    }
+    citations_payload = {
+        "citations": [
+            {"label": c.label, "passage_id": c.passage_id, "unresolved": c.unresolved}
+            for c in citations
+        ]
+    }
+
+    ctx.eval("var _ch = document.createElement('div');")
+    ctx.eval(
+        "module.exports.renderAnswerWithAttribution(_ch, "
+        f"{js_str(answer)}, {js_str(attributions_payload)}, {js_str(citations_payload)});"
+    )
+    found = call(ctx, "_walkCollect(_ch)")
+    assert "[S1]" in {c["text"] for c in found["chips"]}
+    assert "[S2]" in {c["text"] for c in found["chips"]}
+    # exactly one list item's claim went unsupported by its own cited
+    # passage -- it must carry the "unbacked" marker class.
+    assert any(m == "attribution-marker attribution-unbacked" for m in found["markers"])

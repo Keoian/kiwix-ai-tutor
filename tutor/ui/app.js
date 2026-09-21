@@ -193,6 +193,92 @@
     return text.replace(INVENTED_LABEL_RE, "");
   }
 
+  // 2026-09-21 model-authored source-list block (owner-reported live bug):
+  // the model sometimes writes its OWN fake "Sources:" list with invented
+  // passage descriptions instead of the real [S#] chips this file already
+  // renders. Mirrors tutor/app/citations.py's `_SOURCE_HEADING_RE` /
+  // `_LABEL_LED_LINE_RE` / `find_model_source_block_ranges` -- keep the two
+  // in sync. Conservative by construction: a heading line must be
+  // IMMEDIATELY followed by one or more consecutive lines that each START
+  // with a "[S#]" label; a normal sentence merely containing "[S1]" never
+  // matches, and a bare heading with nothing label-led after it is left
+  // alone.
+  const SOURCE_HEADING_RE = /^\s*(?:#{1,6}\s*)?\*{0,2}\s*(?:Sources?|References?|Citations?)\s*:?\s*\*{0,2}\s*$/i;
+  const LABEL_LED_LINE_RE = /^\s*(?:[-*]|\d+[.)])?\s*\[\s*S\d+(?:\s*,\s*S\d+)*\s*\]/;
+
+  // Character-offset [start, end) spans of every detected model-authored
+  // source-list block in `text` -- same block shape as
+  // find_model_source_block_ranges in citations.py.
+  function findModelSourceBlockRanges(text) {
+    if (!text) return [];
+    const lines = text.split("\n");
+    const starts = [];
+    let pos = 0;
+    for (let idx = 0; idx < lines.length; idx++) {
+      starts.push(pos);
+      pos += lines[idx].length + 1;
+    }
+    const ranges = [];
+    let i = 0;
+    const n = lines.length;
+    while (i < n) {
+      if (SOURCE_HEADING_RE.test(lines[i])) {
+        let j = i + 1;
+        while (j < n && LABEL_LED_LINE_RE.test(lines[j])) j++;
+        if (j > i + 1) {
+          ranges.push([starts[i], starts[j - 1] + lines[j - 1].length]);
+          i = j;
+          continue;
+        }
+      }
+      i++;
+    }
+    return ranges;
+  }
+
+  // Builds a DISPLAY-ONLY copy of `text` with every detected model-authored
+  // source-list block's lines removed, plus a `translate(oldPos)` function
+  // mapping an offset into the ORIGINAL text (e.g. an attribution marker's
+  // position, computed host-side against the untouched answer) to the
+  // matching offset in the returned display text. The host never edits the
+  // stored answer text -- this only changes what gets rendered.
+  function stripModelSourceBlocks(text) {
+    const ranges = findModelSourceBlockRanges(text);
+    if (ranges.length === 0) {
+      return { text: text, translate: function (p) { return p; } };
+    }
+    let newText = "";
+    const segments = [];
+    let cursor = 0;
+    ranges.forEach(function (r) {
+      if (r[0] > cursor) {
+        segments.push({ oldStart: cursor, oldEnd: r[0], newStart: newText.length });
+        newText += text.slice(cursor, r[0]);
+      }
+      cursor = r[1];
+    });
+    if (cursor < text.length) {
+      segments.push({ oldStart: cursor, oldEnd: text.length, newStart: newText.length });
+      newText += text.slice(cursor);
+    }
+    function translate(oldPos) {
+      let best = 0;
+      for (let k = 0; k < segments.length; k++) {
+        const seg = segments[k];
+        if (oldPos >= seg.oldStart && oldPos <= seg.oldEnd) {
+          return seg.newStart + (oldPos - seg.oldStart);
+        }
+        if (seg.oldStart <= oldPos) best = seg.newStart;
+      }
+      // oldPos fell inside a removed range (should not happen for a real
+      // attribution marker, since the host never attributes into a
+      // detected source block either) -- snap to the nearest kept segment
+      // rather than misplacing it.
+      return best;
+    }
+    return { text: newText, translate: translate };
+  }
+
   // Inline-only tokenizer: bold/italic/code plus a literal "<br>" token
   // (some model answers put a literal <br> inside a table cell) both
   // rendered as a real <br> element. No block-level splitting here --
@@ -354,6 +440,7 @@
   }
 
   function renderTextWithCitations(container, text) {
+    text = stripModelSourceBlocks(text).text;
     let lastIndex = 0;
     let match;
     CITATION_RE.lastIndex = 0;
@@ -799,9 +886,26 @@
   // the "attributions" event) so `text` is stable and matches the spans.
   function renderAnswerWithAttribution(container, text, attributionsEvent, citationsEvent) {
     container.textContent = "";
-    const markers = attributionMarkers(attributionsEvent, text).filter(function (m) {
-      return typeof m.pos === "number" && m.pos >= 0 && m.pos <= text.length;
-    });
+    // Hide any model-authored fake "Sources:" block (owner-reported live
+    // bug A) from the rendered bubble -- computed against the ORIGINAL raw
+    // text, then every downstream offset (markers, citation matches, block
+    // mapping) works against the returned display text instead.
+    const stripped = stripModelSourceBlocks(text);
+    const displayText = stripped.text;
+    const markers = attributionMarkers(attributionsEvent, text)
+      .map(function (m) {
+        return {
+          pos: stripped.translate(m.pos),
+          kind: m.kind,
+          passageId: m.passageId,
+          sentenceText: m.sentenceText,
+          computed: m.computed,
+        };
+      })
+      .filter(function (m) {
+        return typeof m.pos === "number" && m.pos >= 0 && m.pos <= displayText.length;
+      });
+    text = displayText;
     // Single source of truth for a label's resolution: the `citations`
     // event. Every render path (streaming, citations-only, full
     // attribution rebuild) looks the label up here so there is exactly
@@ -1665,6 +1769,8 @@
       renderCitationChip: renderCitationChip,
       renderUnresolvedLabel: renderUnresolvedLabel,
       collapseEvidenceDump: collapseEvidenceDump,
+      findModelSourceBlockRanges: findModelSourceBlockRanges,
+      stripModelSourceBlocks: stripModelSourceBlocks,
     };
   }
 })();
