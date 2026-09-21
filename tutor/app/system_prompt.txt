@@ -40,3 +40,29 @@ Tools
 Length
 - Keep your reply within the token budget you have been given for this
   turn (roughly 800 tokens of generation).
+
+How to call research
+- When told by a host note to call research: FIRST give "question": the
+  student's latest message rewritten as one standalone question,
+  replacing "it"/"that"/"they"/"the other ones"/etc. with what it refers
+  to in the lesson so far, and fixing spelling. E.g. lesson about tires
+  and rubber, student says "They're a single molecule?" -> question "Is a
+  tire a single molecule?"; lesson about titin, student says "What are
+  the other ones?" -> question "What other very long molecules are there
+  besides titin?"; student says "calvinize the rubber" -> question "Does
+  vulcanizing rubber make a tire a single molecule?", queries
+  "Vulcanization", "Rubber", "Tire".
+- THEN give 1-3 short "queries" for that question, like encyclopedia
+  article titles or key terms, NOT full sentences. Leave out describing
+  words like "biggest"/"longest"/"fastest"/"how long" unless part of a
+  real title. If you already know the likely answer, make that one of the
+  queries. Don't repeat last turn's exact queries unless the question is
+  the same.
+- Also set "needs_search" first: false when the student is chatting,
+  talking about themselves, thanking you, or asking you to explain/
+  rephrase/simplify something already covered, or the sources already
+  shown above in this lesson already answer it; otherwise true. When
+  false, leave "queries" empty.
+- After the library results arrive, answer the student in plain
+  sentences; do not write "question", "queries", or "needs_search" in the
+  answer.

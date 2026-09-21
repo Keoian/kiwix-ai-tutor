@@ -178,7 +178,7 @@ def test_off_reproduces_old_bytes_on_turn_one():
     assert result.status == "ok"
     assert llm.call_count == 1  # no forced round
     rendered = session.log.render()
-    assert "Host note" not in rendered[1]["content"]
+    assert "[Host:" not in rendered[1]["content"]
 
 
 def test_on_fires_forced_round_on_turn_one():
@@ -215,8 +215,8 @@ def test_on_fires_forced_round_on_turn_one():
     assert result.status == "ok"
     assert llm.tool_choice_calls[0] == {"type": "function", "function": {"name": "research"}}
     rendered = session.log.render()
-    assert "Host note" in rendered[1]["content"]
-    assert "encyclopedia article titles" in rendered[1]["content"]
+    assert "[Host:" in rendered[1]["content"]
+    assert "How to call research" in rendered[1]["content"]
     assert result.evidence["rewritten_queries"] == ["Titin", "Largest protein"]
     tool_messages = [m for m in rendered if m["role"] == "tool"]
     joined = "\n".join(m.get("content") or "" for m in tool_messages)
@@ -981,3 +981,23 @@ def test_forced_call_prefix_is_an_append_only_subset_of_the_answer_call():
     forced_messages = llm.calls[0]
     answer_messages = llm.calls[1]
     assert answer_messages[: len(forced_messages)] == forced_messages
+
+
+def test_per_turn_host_note_is_small_now_that_guidance_lives_in_system_prompt():
+    """Job 1 (docs/rewrite_on_weak_evidence.md): the worked examples and
+    the needs_search rule now live once in system_prompt.txt's "How to
+    call research" section (read once per lesson, cached); the per-turn
+    note re-read every turn must just trigger the behaviour, budgeted at
+    <= 60 tokens combined (model_writes_search + model_may_skip_search)."""
+    from tutor.app.agent_loop import (
+        _MODEL_MAY_SKIP_SEARCH_NOTE,
+        _MODEL_WRITES_SEARCH_HOST_NOTE,
+        _load_default_system_text,
+    )
+
+    combined = _MODEL_WRITES_SEARCH_HOST_NOTE + _MODEL_MAY_SKIP_SEARCH_NOTE
+    assert _count_tokens(combined) <= 60
+
+    system_text = _load_default_system_text()
+    assert "How to call research" in system_text
+    assert "needs_search" in system_text

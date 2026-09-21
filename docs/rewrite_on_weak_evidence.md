@@ -653,3 +653,32 @@ one may need either a stronger example set or a different mechanism
 (e.g. a lightweight classifier) to make `needs_search` reliable; the
 host-side mechanics (schema, skip path, evidence threading, UI) are
 solid regardless of how well the model uses them.
+
+## Job 1: system-prompt research guidance, shrunk per-turn note (2026-09-21)
+
+Moved the worked examples and the `needs_search` rule out of the
+per-turn host note (re-read, uncached, every turn) and into a new "How
+to call research" section of `tutor/app/system_prompt.txt` (read once
+per lesson via the prompt cache, commit 84f24a6). The per-turn note
+(`_MODEL_WRITES_SEARCH_HOST_NOTE` + `_MODEL_MAY_SKIP_SEARCH_NOTE` in
+`tutor/app/agent_loop.py`) now just triggers the behaviour for the
+current turn and points back at that section; combined it is well
+under the 60-token budget (see
+`tests/test_agent_loop_model_writes_search.py::test_per_turn_host_note_is_small_now_that_guidance_lives_in_system_prompt`).
+
+Before: ~360 tokens/turn (the full worked-example note, re-read every
+turn, uncached). After: the per-turn note is a two-sentence trigger
+(well under 60 tokens); the guidance itself is paid for once per lesson
+as part of the cached system prompt.
+
+OFF path (`app.model_writes_search=False`): unaffected -- the note
+constants are simply not appended to the user turn in that branch, same
+as before this change.
+
+Persistence check: `run_turn` calls `log.append_system(system_text)`
+guarded by `except ValueError: pass` -- `PromptLog.append_system` only
+accepts one system message per lesson and raises on a second call (see
+`tutor/app/prompt.py`). So a lesson already in progress keeps whatever
+system prompt text it stored on turn 1; only a *new* lesson picks up the
+updated `system_prompt.txt` with the "How to call research" section.
+No migration of existing stored lessons is needed or attempted.

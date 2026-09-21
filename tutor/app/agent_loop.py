@@ -257,26 +257,15 @@ _FOLLOWUP_HOST_NOTE = (
 # Loser" (a TV show) -- describing words and full sentences are exactly
 # what trip up the word-matcher. Tells the model to write short,
 # title-like queries instead of sentences/questions.
+# Kept short (target <= 60 tokens, see docs/rewrite_on_weak_evidence.md,
+# "Job 1: system-prompt research guidance") -- read EVERY turn (not
+# cached), so the full guidance and worked examples now live once in the
+# system prompt's "How to call research" section instead; this note only
+# has to trigger that behaviour for the current turn.
 _MODEL_WRITES_SEARCH_HOST_NOTE = (
-    " [Host note, for the research tool call ONLY (never repeat any of "
-    "this in your answer to the student): call research. FIRST give \"question\": the student's "
-    "latest message rewritten as one standalone question, replacing "
-    "\"it\"/\"that\"/\"they\"/\"the other ones\"/etc. with what it refers "
-    "to in the lesson so far, and fixing spelling. E.g. lesson about tires "
-    "and rubber, student says \"They're a single molecule?\" -> question "
-    "\"Is a tire a single molecule?\"; lesson about titin, student says "
-    "\"What are the other ones?\" -> question \"What other very long "
-    "molecules are there besides titin?\"; student says \"calvinize the "
-    "rubber\" -> question \"Does vulcanizing rubber make a tire a single "
-    "molecule?\", queries \"Vulcanization\", \"Rubber\", \"Tire\". THEN "
-    "give 1-3 short \"queries\" for that question, like encyclopedia "
-    "article titles or key terms, NOT full sentences. Leave out describing words "
-    "like \"biggest\"/\"longest\"/\"fastest\"/\"how long\" unless part of "
-    "a real title. If you already know the likely answer, make that one "
-    "of the queries. Don't repeat last turn's exact queries unless the "
-    "question is the same. After the library results arrive, answer the "
-    "student in plain sentences; do not write \"question\" or "
-    "\"queries\" in the answer.]"
+    " [Host: call research now for the student's latest message, "
+    "following \"How to call research\" above. This note is only for the "
+    "tool call; never repeat it in your answer.]"
 )
 
 # Additive host note (``app.model_may_skip_search``, default True -- see
@@ -285,12 +274,11 @@ _MODEL_WRITES_SEARCH_HOST_NOTE = (
 # whether a search is needed at all THIS turn, e.g. the student chatting
 # about themselves ("How fast am I?" after a Usain Bolt lesson) rather
 # than asking a new factual question no source in the lesson can answer.
+# Guidance itself now lives in the system prompt's "How to call research"
+# section (see note above _MODEL_WRITES_SEARCH_HOST_NOTE); this stays a
+# short reminder to include "needs_search" in the tool call this turn.
 _MODEL_MAY_SKIP_SEARCH_NOTE = (
-    " Also set \"needs_search\" first: false when the student is chatting, "
-    "talking about themselves, thanking you, or asking you to explain/"
-    "rephrase/simplify something already covered, or the sources already "
-    "shown above in this lesson already answer it; otherwise true. When "
-    "false, leave \"queries\" empty."
+    " Include \"needs_search\" in the call, per \"How to call research\"."
 )
 
 # Tool-result text for a skipped forced round (``needs_search`` false):
