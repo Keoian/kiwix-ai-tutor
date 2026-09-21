@@ -39,6 +39,9 @@ dev = [
     "ruff>=0.5",
     # WP-C3: required by fastapi.testclient.TestClient.
     "httpx>=0.27",
+    # CI hardening (2026-09-20): turns a hung test into a named FAILED test
+    # with a traceback instead of a 6h CI stall. See .github/workflows/ci.yml.
+    "pytest-timeout>=2.3",
 ]
 
 [tool.setuptools.packages.find]

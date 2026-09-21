@@ -12,10 +12,15 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -36,4 +41,6 @@ jobs:
         run: python -m ruff check .
 
       - name: Unit tests
-        run: python -m pytest -m "not integration"
+        run: >-
+          python -m pytest -m "not integration" -v -p no:cacheprovider
+          -o faulthandler_timeout=120 --timeout=180 --timeout-method=thread
