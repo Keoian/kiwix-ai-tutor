@@ -33,6 +33,7 @@ from tutor.app.citations import (
     collapse_invented_links,
     extract_labels,
     find_model_source_block_ranges,
+    is_supported,
     render_evidence,
     resolve_citations,
 )
@@ -593,3 +594,108 @@ def test_collapse_invented_links_in_full_sentence_context():
     assert "https://" not in collapsed
     assert "Cite:" not in collapsed
     assert "[S1]" in collapsed
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-21 specifics gate (owner-reported LIVE bug): the host marked a
+# fabricated person and fabricated temperatures as "found in the sources"
+# purely on loose word overlap ("cold", "temperature", "survived" etc. all
+# shared with a real passage). Fix: a sentence may only be marked
+# supported/backed when every SPECIFIC it states (a proper name, or a
+# number -- other than a unit-conversion output riding along in
+# parentheses right after its source number, e.g. the "-94°F" in
+# "-70°C (-94°F)") is actually present in the evidence text
+# (the passage plus every other passage in the same packet -- never the
+# tutor's own earlier text, which is not evidence at all).
+# ---------------------------------------------------------------------------
+
+_VITUS_SENTENCE_1 = (
+    "The most well-documented case is that of Vitus Andronicus, a Roman "
+    "soldier who survived a brutal winter in the frozen regions of the "
+    "Balkans, where he endured temperatures as low as -70°C "
+    "(-94°F✓ checked)."
+)
+_VITUS_SENTENCE_2 = (
+    "Some accounts cite a survival at -71.5°C (-96.7°F✓ "
+    "checked) in the Antarctic."
+)
+
+_COLD_PASSAGE_TEXT = (
+    "Hypothermia occurs when the human body loses heat faster than it can "
+    "produce it. Survival at extremely low body temperatures is rare and "
+    "poorly documented; most clinical case studies describe core body "
+    "temperature drops, not prolonged exposure to sub-zero air "
+    "temperatures. The coldest recorded natural air temperature on Earth "
+    "was measured in Antarctica."
+)
+
+
+def test_vitus_sentence_1_not_supported_by_cold_passage():
+    assert is_supported(_VITUS_SENTENCE_1, _COLD_PASSAGE_TEXT) is False
+
+
+def test_vitus_sentence_2_not_supported_by_cold_passage():
+    assert is_supported(_VITUS_SENTENCE_2, _COLD_PASSAGE_TEXT) is False
+
+
+def test_vitus_sentences_not_supported_end_to_end_via_resolve_citations():
+    passages = [_passage("S1")]
+    passages[0]["text"] = _COLD_PASSAGE_TEXT
+    text = _VITUS_SENTENCE_1[:-1] + " [S1]."
+    citations = resolve_citations(text, passages)
+    assert citations[0].supported is False
+
+
+def test_peregrine_falcon_backed_when_name_and_number_both_present():
+    sentence = "The peregrine falcon can reach about 390 km/h in a dive."
+    passage_text = (
+        "The peregrine falcon is the fastest bird, reaching speeds of "
+        "390 km/h in a hunting dive."
+    )
+    assert is_supported(sentence, passage_text) is True
+
+
+def test_peregrine_falcon_not_backed_when_number_mismatches():
+    sentence = "The peregrine falcon can reach about 390 km/h in a dive."
+    passage_text = (
+        "The peregrine falcon is the fastest bird, reaching speeds of "
+        "320 km/h in a hunting dive."
+    )
+    assert is_supported(sentence, passage_text) is False
+
+
+def test_sentence_with_no_specifics_keeps_todays_overlap_behavior():
+    # No numbers, no proper names (beyond the sentence-initial word) --
+    # the specifics gate has nothing to check, so plain overlap decides,
+    # same as before this change.
+    sentence = "Water boils at high altitude at a lower temperature."
+    passage_text = "At high altitude, water boils at a lower temperature."
+    assert is_supported(sentence, passage_text) is True
+
+
+def test_specific_name_found_only_via_second_passage_in_packet_still_counts():
+    # The gate's evidence set is "this turn's packet", not just the one
+    # passage a label happens to point at -- a name backed by a SIBLING
+    # passage in the same packet still counts.
+    passages = [
+        _passage("S1"),
+        _passage("S2"),
+    ]
+    passages[0]["text"] = "390 km/h is an extremely fast diving speed for a bird."
+    passages[1]["text"] = "The peregrine falcon is renowned for its hunting dives."
+    text = "The peregrine falcon can reach about 390 km/h in a dive [S1]."
+    citations = resolve_citations(text, passages)
+    assert citations[0].supported is True
+
+
+def test_earlier_tutor_text_is_never_used_as_evidence():
+    # A prior TUTOR turn stating the same fabrication must not itself count
+    # as evidence for a later turn -- is_supported/resolve_citations only
+    # ever see the CURRENT packet's passages, never prior answer text; this
+    # test pins that down by asserting the fabricated sentence stays
+    # unsupported even though it is, verbatim, the "earlier tutor text".
+    passages = [_passage("S1")]
+    passages[0]["text"] = _COLD_PASSAGE_TEXT
+    text = _VITUS_SENTENCE_1[:-1] + " [S1]."
+    citations = resolve_citations(text, passages)
+    assert citations[0].supported is False

@@ -113,24 +113,136 @@ def _sentence_for_label(text: str, label: str) -> str:
     return text
 
 
-def is_supported(sentence: str, passage_text: str) -> bool:
+# 2026-09-21 specifics gate (owner-reported LIVE bug): the tutor fabricated
+# a person ("Vitus Andronicus") and two temperatures, and the host marked
+# both sentences as "found in the sources" purely on loose word overlap
+# with a real cold/temperature passage ("cold", "survived", "temperatures"
+# etc). Loose overlap alone is too weak once a sentence carries its own
+# SPECIFIC claims -- a number, or a proper name -- since those are exactly
+# what a fabrication invents while still sharing plenty of generic
+# vocabulary with a real passage. Fix: such a sentence may only be marked
+# supported when every specific it carries is actually present in the
+# evidence text (see ``_specifics_supported``); a sentence with no
+# specifics at all keeps the plain overlap rule from before.
+_NUM_THEN_PAREN_RE = re.compile(r"[-−]?\d[\d,]*(?:\.\d+)?[^\s(),]*\s*\(([^()]*)\)")
+
+_MULTIWORD_NAME_RE = re.compile(r"\b[A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*)+\b")
+_SINGLE_CAP_WORD_RE = re.compile(r"\b[A-Z][A-Za-z'-]*\b")
+
+# Small, intentionally short stoplist (spec: "fine to skip [nationalities]
+# if hard") -- months, days, and the pronoun "I" are cheap and common
+# enough to be worth excluding explicitly.
+_NAME_STOPLIST = frozenset(
+    {
+        "I",
+        "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+        "January", "February", "March", "April", "May", "June", "July",
+        "August", "September", "October", "November", "December",
+    }
+)
+
+
+def _exempt_conversion_numbers(sentence: str) -> set[str]:
+    """Figures that appear inside parentheses immediately following another
+    number (+ optional unit letters), e.g. the "-94" in "-70°C
+    (-94°F✓ checked)" -- a unit-conversion OUTPUT riding along
+    with its source number does not need its own source; the ORIGINAL
+    number (the "-70" here) still does."""
+    exempt: set[str] = set()
+    for m in _NUM_THEN_PAREN_RE.finditer(sentence):
+        exempt |= set(_FIGURE_RE.findall(_normalize_minus(m.group(1))))
+    return exempt
+
+
+def _specific_numbers(sentence: str) -> set[str]:
+    return _figures(sentence) - _exempt_conversion_numbers(sentence)
+
+
+def _specific_names(sentence: str) -> list[str]:
+    """Capitalised multi-word names, and single capitalised words that are
+    not sentence-initial and not in ``_NAME_STOPLIST``."""
+    names: list[str] = []
+    covered: list[tuple[int, int]] = []
+    for m in _MULTIWORD_NAME_RE.finditer(sentence):
+        names.append(m.group(0))
+        covered.append(m.span())
+    first_word = next(re.finditer(r"\S+", sentence), None)
+    first_start = first_word.start() if first_word else -1
+    for m in _SINGLE_CAP_WORD_RE.finditer(sentence):
+        if m.start() == first_start:
+            continue
+        if any(m.start() >= s and m.end() <= e for s, e in covered):
+            continue
+        word = m.group(0)
+        if word in _NAME_STOPLIST:
+            continue
+        names.append(word)
+    return names
+
+
+def _name_found_in_evidence(name: str, evidence_text: str) -> bool:
+    """A multi-word name matches whole, case-insensitively; failing that, a
+    surname-only/one-token match counts as long as that token appears as a
+    whole word (spec: "allow a surname-only or one-token match")."""
+    if re.search(rf"\b{re.escape(name)}\b", evidence_text, re.IGNORECASE):
+        return True
+    for token in name.split():
+        if re.search(rf"\b{re.escape(token)}\b", evidence_text, re.IGNORECASE):
+            return True
+    return False
+
+
+def _specifics_supported(sentence: str, evidence_text: str) -> bool:
+    """True if every specific (number, proper name) that ``sentence``
+    states is present in ``evidence_text``. A sentence with no specifics at
+    all trivially passes -- see ``is_supported``."""
+    evidence_figures = _figures(evidence_text)
+    for number in _specific_numbers(sentence):
+        if number not in evidence_figures:
+            return False
+    for name in _specific_names(sentence):
+        if not _name_found_in_evidence(name, evidence_text):
+            return False
+    return True
+
+
+def is_supported(sentence: str, passage_text: str, all_passages_text: str = "") -> bool:
     """Mechanical, deterministic support check: does ``sentence`` share
     enough content terms with ``passage_text`` to plausibly be drawn from
-    it? Rule (documented, not tuned on live data): supported if the
+    it, AND (2026-09-21 specifics gate) does every SPECIFIC the sentence
+    states -- a number or a proper name -- actually appear somewhere in
+    this turn's evidence (``passage_text`` plus ``all_passages_text``, the
+    concatenation of every passage in the current packet -- never earlier
+    TUTOR text, which is not evidence)?
+
+    Overlap rule (documented, not tuned on live data): supported if the
     sentence and passage share at least ``_MIN_SHARED_TERMS`` content terms
     (numbers count as terms -- ``tokenize`` keeps digit runs) OR the shared
     terms are at least ``_MIN_SHARED_FRACTION`` of the sentence's own
     content terms. A sentence that merely quotes the passage back still
     counts as supported by this rule (see ``detect_evidence_dump`` for
-    catching wholesale copying)."""
+    catching wholesale copying).
+
+    Specifics gate: a sentence with no numbers and no proper names keeps
+    exactly today's overlap-only behavior. A sentence that DOES state a
+    number or a name is only supported when every one of those specifics
+    is found in the evidence text -- this is what stops a fabricated name
+    ("Vitus Andronicus") or a fabricated number riding on real-sounding
+    generic vocabulary ("cold", "survived", "temperatures") from being
+    marked as found in the sources."""
     sentence_terms = set(tokenize(sentence))
     if not sentence_terms:
         return False
     passage_terms = set(tokenize(passage_text))
     shared = sentence_terms & passage_terms
     if len(shared) >= _MIN_SHARED_TERMS:
-        return True
-    return (len(shared) / len(sentence_terms)) >= _MIN_SHARED_FRACTION
+        overlap_ok = True
+    else:
+        overlap_ok = (len(shared) / len(sentence_terms)) >= _MIN_SHARED_FRACTION
+    if not overlap_ok:
+        return False
+    evidence_text = passage_text + "\n" + all_passages_text
+    return _specifics_supported(sentence, evidence_text)
 
 
 def _dump_signal(text: str, packet_passages: list[dict]) -> tuple[bool, set[str]]:
@@ -210,6 +322,10 @@ def resolve_citations(text: str, packet_passages: list[dict]) -> list[Citation]:
     by_label = {
         p["label"]: p for p in packet_passages if p.get("label") != RESERVED_SEED_LABEL
     }
+    # Evidence set for the specifics gate (is_supported): every passage in
+    # this turn's packet, not just the one label happens to resolve to --
+    # a specific backed by a sibling passage still counts.
+    all_passages_text = "\n".join(p.get("text", "") for p in packet_passages)
     _, flagged_labels = _dump_signal(text, packet_passages)
     citations: list[Citation] = []
     for label in extract_labels(text):
@@ -224,7 +340,7 @@ def resolve_citations(text: str, packet_passages: list[dict]) -> list[Citation]:
         if "start" in passage and "end" in passage:
             span = (passage["start"], passage["end"])
         sentence = _sentence_for_label(text, label)
-        supported = is_supported(sentence, passage.get("text", ""))
+        supported = is_supported(sentence, passage.get("text", ""), all_passages_text)
         if label in flagged_labels:
             supported = False
         citations.append(
@@ -577,11 +693,12 @@ def _best_supporting_passage(sentence: str, passages: list[dict]) -> tuple[dict 
     broken by most shared content terms (reuses the tokenizer/overlap rule
     ``is_supported`` already uses -- not duplicated here)."""
     sentence_terms = set(tokenize(sentence))
+    all_passages_text = "\n".join(p.get("text", "") for p in passages)
     best: dict | None = None
     best_score = -1
     for passage in passages:
         text = passage.get("text", "")
-        if not is_supported(sentence, text):
+        if not is_supported(sentence, text, all_passages_text):
             continue
         shared = sentence_terms & set(tokenize(text))
         score = len(shared)
@@ -631,6 +748,7 @@ def attribute_sentences(answer: str, passages: list[dict]) -> AttributionResult:
     index the original string exactly.
     """
     by_label = {p["label"]: p for p in passages if p.get("label") != RESERVED_SEED_LABEL}
+    all_passages_text = "\n".join(p.get("text", "") for p in passages)
     attributions: list[Attribution] = []
     unbacked: list[UnbackedSpan] = []
 
@@ -673,7 +791,7 @@ def attribute_sentences(answer: str, passages: list[dict]) -> AttributionResult:
             supported_resolvable = [
                 (lbl, passage)
                 for lbl, passage in resolvable
-                if is_supported(sentence, passage.get("text", ""))
+                if is_supported(sentence, passage.get("text", ""), all_passages_text)
             ]
         if supported_resolvable:
             for _label, passage in supported_resolvable:
