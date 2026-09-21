@@ -174,8 +174,18 @@ def test_app_js_offers_a_toggle_to_show_pasted_sources():
 
 
 def test_app_js_shows_unsupported_sources_note():
+    # 2026-09-20 attribution-driven note follow-up: the old wording ("did
+    # not match this question") was shown even when the host DID back a
+    # sentence to a relevant passage, just under a mislabeled [S#] --
+    # actively wrong. The note now only fires when nothing was checked
+    # against the library at all, worded accordingly, and is driven by the
+    # `attributions` event via hasHostBackedContent rather than by
+    # citation_quality/unsupported_labels alone.
     text = _read(APP_JS)
-    assert "did not match this question" in text.lower()
+    assert "none of this answer was found in the sources the tutor looked up" in text.lower()
+    assert "the tutor did not find anything in the library for this question" in text.lower()
+    assert "hasHostBackedContent" in text
+    assert "passages_available" in text
 
 
 def test_app_js_still_never_uses_innerhtml_after_dump_handling():
@@ -215,11 +225,14 @@ def test_app_js_attribution_handling_uses_textcontent_only():
 
 
 def test_index_html_has_attribution_legend():
+    # 2026-09-20 wording follow-up: the host checks each sentence against
+    # the passages retrieved/retained FOR THIS TURN, not "the whole
+    # library" -- the legend must say what actually happened.
     text = _read(INDEX_HTML)
     lower = text.lower()
-    assert "source-backed" in lower
-    assert "not checked against the library" in lower
-    assert "not found in the library" in lower
+    assert "found in the sources the tutor looked up" in lower
+    assert "not found in the sources the tutor looked up" in lower
+    assert "not in the sources the tutor looked up" in lower
 
 
 def test_app_css_has_attribution_marker_styles():
@@ -276,3 +289,157 @@ def test_kiosk_ps1_mentions_kiosk_flag():
 def test_kiosk_sh_mentions_kiosk_flag():
     text = _read(KIOSK_SH)
     assert "--kiosk" in text
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-20 owner bug report follow-up: fixed-viewport layout, one chip
+# per citation (using the citations event's real passage_id, never a
+# duplicate/broken chip appended alongside it), safe minimal markdown, and
+# sentence-level marker highlighting. Fixture is a real SSE dump captured
+# from the running app (data/dump_ui_bug_sse.py), copied into
+# tests/fixtures/ -- this file never reads tests/../data/.
+# ---------------------------------------------------------------------------
+
+FIXTURE_SSE = REPO_ROOT / "tests" / "fixtures" / "ui_bug_sse_frames.txt"
+
+
+def test_ui_bug_sse_fixture_exists_and_shows_the_reported_shape():
+    text = _read(FIXTURE_SSE)
+    assert "event: citations" in text
+    assert "event: attributions" in text
+    # The captured turn reproduces the owner's report: two model [S#]
+    # labels the resolver marks unsupported by the old citation_quality
+    # rule, while the host's own attribution DID back two sentences to
+    # those same passages (model_cited: true) -- exactly the situation the
+    # new note logic (item 3/7) must not call "did not match".
+    assert '"unsupported_labels": ["S1", "S2"]' in text
+    assert '"model_cited": true' in text
+
+
+def test_app_js_rebuilds_from_raw_text_on_citations_and_attributions_no_append():
+    # bug #2 root cause: the "attributions" handler used to call
+    # renderCitations() a SECOND time after renderAnswerWithAttribution()
+    # already drew a chip for the same [S#] occurrence -- one chip built
+    # without a passage_id (broken -- "Source not found") and one correct.
+    # Both event handlers must now call the same rebuild-from-raw-text
+    # function and nothing else.
+    text = _read(APP_JS)
+    assert re.search(
+        r'eventName === "citations"[\s\S]*?renderAnswerWithAttribution\(',
+        text,
+    )
+    attributions_block = re.search(
+        r'else if \(eventName === "attributions"\) \{([\s\S]*?)\} else if',
+        text,
+    )
+    assert attributions_block is not None
+    assert "renderCitations(tutorNode" not in attributions_block.group(1)
+
+
+def test_app_js_citation_chip_uses_real_passage_id_not_bare_label():
+    # The rebuilt chip must look the passage_id up from the citations
+    # event's label -> passage_id map, never fall back to the bare label
+    # (that fallback is what produced the "Source not found" chip).
+    text = _read(APP_JS)
+    assert "passageIdByLabel" in text
+    assert re.search(r"renderCitationChip\(label, passageIdByLabel\[label\]\)", text)
+
+
+def test_app_js_has_safe_markdown_tokenizer():
+    text = _read(APP_JS)
+    assert "appendMarkdownText" in text
+    assert 'el("strong"' in text
+    assert 'el("em"' in text
+    assert 'el("code"' in text
+    assert "innerHTML" not in text
+
+
+def test_app_js_sentence_level_highlight_helpers_present():
+    text = _read(APP_JS)
+    assert "findBestSentenceSpan" in text
+    assert "sentenceText" in text
+
+
+def test_app_css_uses_fixed_viewport_shell():
+    text = _read(APP_CSS)
+    assert "100dvh" in text
+    assert "#chat {" in text
+    assert "overflow-y: auto" in text
+
+
+def test_index_html_status_panel_is_collapsible():
+    text = _read(INDEX_HTML)
+    assert re.search(r'<details id=["\']status-panel["\']', text)
+
+
+def test_node_markdown_and_chip_tokenizer_behaviour():
+    """Behavioural check of appendMarkdownText/renderAnswerWithAttribution
+    against the real captured SSE payload, run under Node if available on
+    this box; skipped (not failed) when Node is not installed, per the
+    task's "no JS test runner" fallback."""
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if not node:
+        import pytest
+
+        pytest.skip("node not installed on this box")
+
+    frames_text = _read(FIXTURE_SSE)
+    done_line = [
+        line
+        for line in frames_text.splitlines()
+        if line.startswith("data:") and '"status": "ok"' in line
+    ][0]
+    done_data = json.loads(done_line[len("data:"):].strip())
+    answer = done_data["answer"]
+
+    script = r"""
+    const fs = require('fs');
+    global.document = {
+      createElement(tag) {
+        return {
+          tagName: tag,
+          children: [],
+          textContent: '',
+          appendChild(child) { this.children.push(child); },
+          setAttribute() {},
+        };
+      },
+      createTextNode(text) {
+        return { textContent: text, children: [] };
+      },
+    };
+    const src = fs.readFileSync(process.argv[2], 'utf8');
+    // Pull out just the two pure functions under test without running the
+    // whole IIFE (which touches a real DOM this harness does not have).
+    const markdownMatch = src.match(/function appendMarkdownText[\s\S]*?\n  \}\n/);
+    const elMatch = src.match(/function el\(tag, opts\)[\s\S]*?\n  \}\n/);
+    const markdownReMatch = src.match(/const MARKDOWN_RE = [^\n]+\n/);
+    eval(markdownReMatch[0] + elMatch[0] + markdownMatch[0]);
+    const container = document.createElement('div');
+    appendMarkdownText(container, process.argv[3]);
+    const kinds = container.children.map((c) => c.tagName || 'text');
+    console.log(JSON.stringify(kinds));
+    """
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as f:
+        f.write(script)
+        script_path = f.name
+    try:
+        result = subprocess.run(
+            [node, script_path, str(APP_JS), answer],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    finally:
+        import os
+
+        os.unlink(script_path)
+    assert result.returncode == 0, result.stderr
+    kinds = json.loads(result.stdout.strip())
+    assert "strong" in kinds  # **Burj Khalifa** etc. render as real <strong> nodes
+    assert not any(k == "text" and "**" in k for k in kinds)

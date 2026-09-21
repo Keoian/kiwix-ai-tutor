@@ -37,6 +37,7 @@
 html, body {
   height: 100%;
   margin: 0;
+  overflow: hidden; /* the app shell owns scrolling internally; the page itself never scrolls */
 }
 
 body {
@@ -47,19 +48,30 @@ body {
   line-height: 1.5;
 }
 
+/* 2026-09-20 fixed-viewport shell (bug #1): the page used to grow taller
+   than the window, pushing the input and the legend off-screen. #app is
+   now pinned to exactly the viewport height (100dvh, with a 100vh
+   fallback for browsers without dvh support); the header keeps its
+   natural height and #main-area takes the rest via min-height: 0 + flex,
+   so its two children can each own their own internal scrollbar instead
+   of the whole page scrolling. */
 #app {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
 }
 
 #top-bar {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 1rem;
   padding: 0.75rem 1.25rem;
   background: var(--panel-bg);
   border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
 }
 
 #top-bar h1 {
@@ -78,11 +90,12 @@ body {
 }
 
 #main-area {
-  flex: 1;
+  flex: 1 1 auto;
   display: flex;
   gap: 1rem;
   padding: 1rem;
-  min-height: 0;
+  min-height: 0; /* required so the flex children below can shrink and scroll instead of overflowing the page */
+  overflow: hidden;
 }
 
 #chat-pane {
@@ -90,16 +103,28 @@ body {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   background: var(--panel-bg);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 1rem;
+  overflow: hidden;
 }
 
 #chat {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   padding-right: 0.5rem;
+}
+
+/* The action bar and composer (input row) are flex: 0 0 auto by default
+   (block-level elements are auto-sized already) inside #chat-pane's column
+   flow, so they always stay visible under the scrolling #chat panel --
+   never pushed off-screen. */
+#action-bar,
+#composer {
+  flex: 0 0 auto;
 }
 
 .msg {
@@ -190,8 +215,13 @@ button.attribution-marker {
   cursor: pointer;
 }
 
+/* bug #5: was a bare "*" that read like a bullet typo. Rendered as a small
+   raised (superscript-style) marker with a title/aria-label explaining what
+   it means, same as a footnote reference. */
 .attribution-backed {
   color: var(--accent);
+  vertical-align: super;
+  font-size: 0.65em;
 }
 
 .attribution-unbacked {
@@ -220,11 +250,17 @@ button.attribution-marker {
   list-style: none;
   padding: 0;
   margin: 0;
-  font-size: 0.85em;
+  font-size: 0.78em;
 }
 
+/* Compact: one line per marker (bug #1), truncated with an ellipsis rather
+   than wrapping to a second line, with the full text still available via
+   the browser's native title tooltip on overflow. */
 #attribution-legend li {
-  margin-bottom: 0.35rem;
+  margin-bottom: 0.2rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 #action-bar {
@@ -286,12 +322,30 @@ button.attribution-marker {
   border: 1px solid var(--danger);
 }
 
+/* The right column scrolls independently of the transcript: it is a flex
+   column with min-height: 0 so its own overflow-y: auto applies instead of
+   growing the page. */
 #side-pane {
   flex: 1;
   min-width: 280px;
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 0.75rem;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+#attribution-legend {
+  flex: 0 0 auto;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.5rem 0.75rem;
+}
+
+#source-viewer {
+  flex: 1 1 auto;
+  min-height: 120px;
 }
 
 #source-viewer,
@@ -307,6 +361,21 @@ button.attribution-marker {
 #status-panel h2 {
   margin-top: 0;
   font-size: 1.05rem;
+}
+
+/* Status is a <details> so it is collapsible/compact, giving the Source
+   panel above it the space (bug #1: "make Status collapsible/compact so
+   Source gets the space"). */
+#status-panel {
+  flex: 0 0 auto;
+  padding: 0.5rem 1rem;
+}
+
+#status-panel summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 1.05rem;
+  padding: 0.25rem 0;
 }
 
 .source-highlight {
@@ -329,8 +398,25 @@ button.attribution-marker {
   margin: 0 0 0.5rem 0;
 }
 
+/* Works from 1024x700 up, no horizontal scroll: below that, stack the
+   columns and let each pane size to content instead of forcing two
+   side-by-side columns into a too-narrow viewport. */
 @media (max-width: 900px) {
+  #app {
+    height: auto;
+    overflow: visible;
+  }
+
+  html, body {
+    overflow: auto;
+  }
+
   #main-area {
     flex-direction: column;
+    overflow: visible;
+  }
+
+  #chat-pane {
+    min-height: 60vh;
   }
 }

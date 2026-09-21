@@ -1,0 +1,195 @@
+event: tool
+data: {"name": "research", "ok": true, "phase": "result"}
+
+event: token
+data: {"text": "Based"}
+
+event: token
+data: {"text": " on"}
+
+event: token
+data: {"text": " the"}
+
+event: token
+data: {"text": " sources"}
+
+event: token
+data: {"text": " provided"}
+
+event: token
+data: {"text": ","}
+
+event: token
+data: {"text": " the"}
+
+event: token
+data: {"text": " current"}
+
+event: token
+data: {"text": " tallest"}
+
+event: token
+data: {"text": " building"}
+
+event: token
+data: {"text": " in"}
+
+event: token
+data: {"text": " the"}
+
+event: token
+data: {"text": " world"}
+
+event: token
+data: {"text": " is"}
+
+event: token
+data: {"text": " the"}
+
+event: token
+data: {"text": " **"}
+
+event: token
+data: {"text": "Bur"}
+
+event: token
+data: {"text": "j"}
+
+event: token
+data: {"text": " Khal"}
+
+event: token
+data: {"text": "ifa"}
+
+event: token
+data: {"text": "**"}
+
+event: token
+data: {"text": " in"}
+
+event: token
+data: {"text": " Dubai"}
+
+event: token
+data: {"text": ","}
+
+event: token
+data: {"text": " United"}
+
+event: token
+data: {"text": " Arab"}
+
+event: token
+data: {"text": " Emirates"}
+
+event: token
+data: {"text": "."}
+
+event: token
+data: {"text": " It"}
+
+event: token
+data: {"text": " stands"}
+
+event: token
+data: {"text": " at"}
+
+event: token
+data: {"text": " **"}
+
+event: token
+data: {"text": "828"}
+
+event: token
+data: {"text": " meters"}
+
+event: token
+data: {"text": " ("}
+
+event: token
+data: {"text": "2"}
+
+event: token
+data: {"text": ","}
+
+event: token
+data: {"text": "717"}
+
+event: token
+data: {"text": " feet"}
+
+event: token
+data: {"text": ")**"}
+
+event: token
+data: {"text": " tall"}
+
+event: token
+data: {"text": " and"}
+
+event: token
+data: {"text": " has"}
+
+event: token
+data: {"text": " **"}
+
+event: token
+data: {"text": "163"}
+
+event: token
+data: {"text": " floors"}
+
+event: token
+data: {"text": "**"}
+
+event: token
+data: {"text": "."}
+
+event: token
+data: {"text": " ["}
+
+event: token
+data: {"text": "S"}
+
+event: token
+data: {"text": "1"}
+
+event: token
+data: {"text": "]"}
+
+event: token
+data: {"text": " and"}
+
+event: token
+data: {"text": " ["}
+
+event: token
+data: {"text": "S"}
+
+event: token
+data: {"text": "2"}
+
+event: token
+data: {"text": "]"}
+
+event: token
+data: {"text": " confirm"}
+
+event: token
+data: {"text": " this"}
+
+event: token
+data: {"text": " information"}
+
+event: token
+data: {"text": "."}
+
+event: citations
+data: {"citations": [{"label": "S1", "passage_id": "b936e5f17c751abbe6751a5e67713aeb", "title": "General officer", "path": "General_officer", "span": null, "unresolved": false, "supported": false}, {"label": "S2", "passage_id": "98d8df86b4f8466ad2e068e39ca5e2c7", "title": "List of tallest buildings", "path": "List_of_tallest_buildings", "span": null, "unresolved": false, "supported": false}], "unsupported_labels": ["S1", "S2"]}
+
+event: attributions
+data: {"attributions": [{"sentence_span": [0, 128], "passage_id": "b252da86b37d6ee43e56ca8470d4a71e", "label": "S3", "score": 6.0, "model_cited": false}, {"sentence_span": [129, 198], "passage_id": "452e8620fc33ae5b309a321ae65497fe", "label": "S6", "score": 3.0, "model_cited": false}, {"sentence_span": [199, 238], "passage_id": "b936e5f17c751abbe6751a5e67713aeb", "label": "S1", "score": 1.0, "model_cited": true}, {"sentence_span": [199, 238], "passage_id": "98d8df86b4f8466ad2e068e39ca5e2c7", "label": "S2", "score": 1.0, "model_cited": true}], "unbacked": [], "computed": []}
+
+event: done
+data: {"status": "ok", "answer": "Based on the sources provided, the current tallest building in the world is the **Burj Khalifa** in Dubai, United Arab Emirates. It stands at **828 meters (2,717 feet)** tall and has **163 floors**. [S1] and [S2] confirm this information.", "route": "preretrieve", "research_calls": 1, "calc_calls": 0, "cached_tokens": 674, "tokens_used": 1086, "uncited": false, "citation_quality": "unsupported", "evidence_dump": false, "truncated": null}
+

@@ -148,13 +148,50 @@
   // nodes via textContent only, no raw markup assignment.
   const CITATION_RE = /\[(S\d+(?:\s*,\s*S\d+)*)\]/g;
 
+  // -----------------------------------------------------------------------
+  // 2026-09-20 safe minimal markdown (docs bug #4): **bold**, *italic*,
+  // `code`, line breaks/paragraphs, and simple "- "/"1. " list lines.
+  // Built with createElement/textContent DOM nodes only -- never raw markup
+  // -- and driven off the SAME raw string that attribution/citation
+  // offsets index into, so callers always hand this a raw slice and the
+  // offsets used elsewhere in this file (markers, citation spans) never
+  // have to account for markdown syntax being stripped: they are computed
+  // against the untouched raw text before any slice reaches here.
+  // -----------------------------------------------------------------------
+  const MARKDOWN_RE = /(\*\*([^*\n]+)\*\*)|(\*([^*\n]+)\*)|(`([^`\n]+)`)|(\n)/g;
+
+  function appendMarkdownText(container, text) {
+    if (!text) return;
+    let lastIndex = 0;
+    let match;
+    let currentLine = container;
+    MARKDOWN_RE.lastIndex = 0;
+    function plain(slice) {
+      if (slice) currentLine.appendChild(document.createTextNode(slice));
+    }
+    while ((match = MARKDOWN_RE.exec(text)) !== null) {
+      plain(text.slice(lastIndex, match.index));
+      if (match[1] !== undefined) {
+        currentLine.appendChild(el("strong", { text: match[2] }));
+      } else if (match[3] !== undefined) {
+        currentLine.appendChild(el("em", { text: match[4] }));
+      } else if (match[5] !== undefined) {
+        currentLine.appendChild(el("code", { text: match[6] }));
+      } else if (match[7] !== undefined) {
+        currentLine.appendChild(el("br"));
+      }
+      lastIndex = MARKDOWN_RE.lastIndex;
+    }
+    plain(text.slice(lastIndex));
+  }
+
   function renderTextWithCitations(container, text) {
     let lastIndex = 0;
     let match;
     CITATION_RE.lastIndex = 0;
     while ((match = CITATION_RE.exec(text)) !== null) {
       if (match.index > lastIndex) {
-        container.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+        appendMarkdownText(container, text.slice(lastIndex, match.index));
       }
       const labels = match[1].split(",").map(function (s) { return s.trim(); });
       labels.forEach(function (label) {
@@ -163,7 +200,7 @@
       lastIndex = CITATION_RE.lastIndex;
     }
     if (lastIndex < text.length) {
-      container.appendChild(document.createTextNode(text.slice(lastIndex)));
+      appendMarkdownText(container, text.slice(lastIndex));
     }
   }
 
@@ -207,13 +244,18 @@
     return String(Math.round(n * 10000) / 10000);
   }
 
-  function attributionMarkers(attributionsEvent) {
+  function attributionMarkers(attributionsEvent, text) {
     const markers = [];
     if (!attributionsEvent) return markers;
     (attributionsEvent.attributions || []).forEach(function (a) {
       if (a.model_cited) return; // the model's own [S#] chip already covers this
       const span = a.sentence_span || [];
-      markers.push({ pos: span[1], kind: "backed", passageId: a.passage_id });
+      markers.push({
+        pos: span[1],
+        kind: "backed",
+        passageId: a.passage_id,
+        sentenceText: typeof text === "string" ? text.slice(span[0], span[1]) : "",
+      });
     });
     (attributionsEvent.unbacked || []).forEach(function (u) {
       const span = u.span || [];
@@ -246,10 +288,15 @@
       const btn = el("button", {
         className: "attribution-marker attribution-backed",
         text: "●",
-        attrs: { type: "button", "aria-label": "source-backed", "data-passage-id": marker.passageId || "" },
+        attrs: {
+          type: "button",
+          "aria-label": "Found in the sources the tutor looked up",
+          title: "Found in the sources the tutor looked up",
+          "data-passage-id": marker.passageId || "",
+        },
       });
       btn.addEventListener("click", function () {
-        openSourceViewer(marker.passageId);
+        openSourceViewer(marker.passageId, marker.sentenceText);
       });
       return btn;
     }
@@ -257,14 +304,17 @@
       return el("span", {
         className: "attribution-marker attribution-unbacked-number",
         text: "⚠",
-        attrs: { "aria-label": "number not found in the library" },
+        attrs: {
+          "aria-label": "This number is not in the sources the tutor looked up — double-check it",
+          title: "This number is not in the sources the tutor looked up — double-check it",
+        },
       });
     }
     if (marker.kind === "computed-verified") {
       return el("span", {
         className: "attribution-marker attribution-computed-verified",
         text: "✓ checked",
-        attrs: { "aria-label": "computed -- checked by the calculator" },
+        attrs: { "aria-label": "Checked by the calculator", title: "Checked by the calculator" },
       });
     }
     if (marker.kind === "computed-mismatch") {
@@ -277,7 +327,10 @@
     return el("span", {
       className: "attribution-marker attribution-unbacked",
       text: "○",
-      attrs: { "aria-label": "the tutor's own words -- not checked against the library" },
+      attrs: {
+        "aria-label": "Not found in the sources the tutor looked up — this may be the tutor's own knowledge",
+        title: "Not found in the sources the tutor looked up — this may be the tutor's own knowledge",
+      },
     });
   }
 
@@ -303,12 +356,23 @@
   // the "attributions" event) so `text` is stable and matches the spans.
   function renderAnswerWithAttribution(container, text, attributionsEvent, citationsEvent) {
     container.textContent = "";
-    const markers = attributionMarkers(attributionsEvent).filter(function (m) {
+    const markers = attributionMarkers(attributionsEvent, text).filter(function (m) {
       return typeof m.pos === "number" && m.pos >= 0 && m.pos <= text.length;
     });
+    // Single source of truth for a label's resolution: the `citations`
+    // event. Every render path (streaming, citations-only, full
+    // attribution rebuild) looks the label up here so there is exactly
+    // one chip per label occurrence in the text, and a resolved chip
+    // always carries the real passage_id (never falls back to the bare
+    // label, which is what produced the "Source not found" duplicate).
     const unresolvedLabels = {};
+    const passageIdByLabel = {};
     ((citationsEvent && citationsEvent.citations) || []).forEach(function (c) {
-      if (c.unresolved) unresolvedLabels[c.label] = true;
+      if (c.unresolved) {
+        unresolvedLabels[c.label] = true;
+      } else {
+        passageIdByLabel[c.label] = c.passage_id;
+      }
     });
 
     const citationMatches = [];
@@ -327,7 +391,7 @@
 
     function emitTextUpTo(pos) {
       if (pos > cursor) {
-        container.appendChild(document.createTextNode(text.slice(cursor, pos)));
+        appendMarkdownText(container, text.slice(cursor, pos));
         cursor = pos;
       }
     }
@@ -347,7 +411,7 @@
         if (unresolvedLabels[label]) {
           container.appendChild(renderUnresolvedLabel(label));
         } else {
-          container.appendChild(renderCitationChip(label));
+          container.appendChild(renderCitationChip(label, passageIdByLabel[label]));
         }
       });
       cursor = citation.end;
@@ -385,15 +449,49 @@
     tutorNode.appendChild(contentWrap);
   }
 
-  function appendUnsupportedSourcesNote() {
+  // 2026-09-20 wording follow-up: two different situations, two different
+  // notes. `attributionsEvent.passages_available` (additive field, see
+  // compose.py) is 0 when research/retrieval returned nothing at all for
+  // this question -- the library genuinely had nothing to check against.
+  // When passages WERE available but none of them backed anything the
+  // model said, that is a different (narrower, more accurate) claim: only
+  // THIS answer went unchecked, not that the library is empty.
+  function appendUnsupportedSourcesNote(attributionsEvent) {
+    const noPassagesAtAll =
+      attributionsEvent && attributionsEvent.passages_available === 0;
     const wrapper = el("div", { className: "msg msg-note" });
     const note = el("span", {
       className: "unsupported-note",
-      text: "The tutor's sources did not match this question.",
+      text: noPassagesAtAll
+        ? "The tutor did not find anything in the library for this question."
+        : "None of this answer was found in the sources the tutor looked up.",
     });
     wrapper.appendChild(note);
     chat.appendChild(wrapper);
     chat.scrollTop = chat.scrollHeight;
+  }
+
+  // Is there at least one sentence the HOST verified against a passage or
+  // the calculator on this turn? This is a UI/UX question, separate from
+  // compose.py's `citation_quality` (a model-behaviour metric the soak/eval
+  // code depends on and which this file never redefines). A sentence with
+  // a model-written [S#] that also matches an evidence passage counts as
+  // model_cited=True in the attributions event; a host-attributed sentence
+  // with no model label counts too. Either way, if the host actually
+  // backed something, the "did not match" note is simply wrong and must
+  // not show, even when the model mislabeled which sentence gets the chip.
+  function hasHostBackedContent(attributionsEvent) {
+    if (!attributionsEvent) return false;
+    const backedByModel = (attributionsEvent.attributions || []).some(function (a) {
+      return a.model_cited;
+    });
+    const backedByHost = (attributionsEvent.attributions || []).some(function (a) {
+      return !a.model_cited && a.passage_id;
+    });
+    const verifiedComputed = (attributionsEvent.computed || []).some(function (c) {
+      return c.status === "verified";
+    });
+    return backedByModel || backedByHost || verifiedComputed;
   }
 
   // Bounded-generation follow-up (2026-09-20): the host may stop
@@ -413,24 +511,23 @@
     chat.scrollTop = chat.scrollHeight;
   }
 
-  function applyCitationQuality(tutorNode, doneData, citationsEvent) {
+  function applyCitationQuality(tutorNode, doneData, citationsEvent, attributionsEvent) {
     if (doneData && doneData.evidence_dump) {
       collapseEvidenceDump(tutorNode);
     }
-    // An unresolved label (matches no evidence passage) never counts as a
-    // real citation for the "every citation was unsupported" check below --
-    // it isn't a citation at all, just an invented label.
-    const citations = ((citationsEvent && citationsEvent.citations) || []).filter(
-      function (c) { return !c.unresolved; }
-    );
-    const unresolvedLabels = ((citationsEvent && citationsEvent.citations) || [])
-      .filter(function (c) { return c.unresolved; })
-      .map(function (c) { return c.label; });
-    const unsupportedLabels = ((citationsEvent && citationsEvent.unsupported_labels) || []).filter(
-      function (label) { return unresolvedLabels.indexOf(label) === -1; }
-    );
-    if (citations.length > 0 && unsupportedLabels.length === citations.length) {
-      appendUnsupportedSourcesNote();
+    // 2026-09-20 attribution-driven note (see docs/attribution_design.md):
+    // compose.py's `citation_quality` ("uncited"/"unsupported"/"ok") is a
+    // model-behaviour metric the soak/eval code depends on and is left
+    // untouched server-side. The UI note is a different question -- "did
+    // the HOST actually check anything against the library on this turn?"
+    // -- answered from the `attributions` event, not from citation_quality,
+    // because the model can staple a citation label onto the wrong
+    // sentence while the host still genuinely backs another sentence to
+    // the same (or another) passage. Only when nothing was backed at all,
+    // and nothing was verified by the calculator, do we tell the student
+    // this answer came from the model's own knowledge.
+    if (!hasHostBackedContent(attributionsEvent)) {
+      appendUnsupportedSourcesNote(attributionsEvent);
     }
     if (doneData && doneData.truncated) {
       appendTruncatedNote();
@@ -595,11 +692,14 @@
       }
     } else if (eventName === "citations") {
       lastCitationsEvent = data;
-      renderCitations(tutorNode, data.citations);
+      // Rebuild (not append) from the raw text: appending here alongside
+      // the inline chips already drawn during token streaming, or
+      // alongside the rebuild below on "attributions", is exactly what
+      // produced two chips for one [S1] occurrence.
+      renderAnswerWithAttribution(tutorNode, getTutorLine(), lastAttributionsEvent, data);
     } else if (eventName === "attributions") {
       lastAttributionsEvent = data;
       renderAnswerWithAttribution(tutorNode, getTutorLine(), data, lastCitationsEvent);
-      renderCitations(tutorNode, lastCitationsEvent && lastCitationsEvent.citations);
       (data.computed || []).forEach(function (c) {
         if (!c.span && c.status === "mismatch") {
           appendComputedGapNote(c.computed);
@@ -611,7 +711,7 @@
       appendError(data.message || "An error occurred.");
     } else if (eventName === "done") {
       lastTurnMeta = data;
-      applyCitationQuality(tutorNode, data, lastCitationsEvent);
+      applyCitationQuality(tutorNode, data, lastCitationsEvent, lastAttributionsEvent);
       refreshStatus();
     }
   }
@@ -653,7 +753,7 @@
   // Source viewer
   // ---------------------------------------------------------------------
 
-  async function openSourceViewer(passageId) {
+  async function openSourceViewer(passageId, answerSentence) {
     sourceViewerBody.textContent = "";
     sourceViewerBody.appendChild(el("p", { text: "Loading..." }));
     try {
@@ -664,14 +764,49 @@
         return;
       }
       const body = await resp.json();
-      renderSourceView(body);
+      renderSourceView(body, answerSentence);
     } catch (err) {
       sourceViewerBody.textContent = "";
       sourceViewerBody.appendChild(el("p", { text: "Could not load source." }));
     }
   }
 
-  function renderSourceView(body) {
+  // 2026-09-20 sentence-level highlight (bug #5): the server highlight
+  // covers the whole passage the retriever matched; clicking a per-sentence
+  // ● marker should narrow that down to the sentence sharing the most
+  // terms with the clicked answer sentence, computed here from text the
+  // server already sent (no new endpoint). Falls back to the server's
+  // whole-passage highlight whenever there's no answer sentence to compare
+  // against, no passage text to search, or no sentence scores above zero.
+  function wordsOf(s) {
+    return (String(s || "").toLowerCase().match(/[a-z0-9]+/g)) || [];
+  }
+
+  function findBestSentenceSpan(text, searchStart, searchEnd, answerSentence) {
+    if (!text || !answerSentence) return null;
+    const region = text.slice(searchStart, searchEnd);
+    const sentenceRe = /[^.!?]+[.!?]*/g;
+    const answerWords = new Set(wordsOf(answerSentence));
+    if (!answerWords.size) return null;
+    let m;
+    let best = null;
+    let bestScore = 0;
+    while ((m = sentenceRe.exec(region)) !== null) {
+      if (!m[0].trim()) continue;
+      const words = wordsOf(m[0]);
+      let score = 0;
+      words.forEach(function (w) {
+        if (answerWords.has(w)) score += 1;
+      });
+      if (score > bestScore) {
+        bestScore = score;
+        best = { start: searchStart + m.index, end: searchStart + m.index + m[0].length };
+      }
+    }
+    return bestScore > 0 ? best : null;
+  }
+
+  function renderSourceView(body, answerSentence) {
     sourceViewerBody.textContent = "";
 
     const heading = el("h3", { text: body.title || "" });
@@ -681,19 +816,31 @@
       sourceViewerBody.appendChild(el("p", { className: "source-path", text: body.heading_path.join(" > ") }));
     }
 
-    const passage = el("p");
-    const start = body.highlight ? body.highlight.start : 0;
-    const end = body.highlight ? body.highlight.end : 0;
+    const fullText = body.text || "";
+    const wholeStart = body.highlight ? body.highlight.start : 0;
+    const wholeEnd = body.highlight ? body.highlight.end : fullText.length;
+    const sentenceSpan = findBestSentenceSpan(fullText, wholeStart, wholeEnd, answerSentence);
+    const start = sentenceSpan ? sentenceSpan.start : wholeStart;
+    const end = sentenceSpan ? sentenceSpan.end : wholeEnd;
 
-    passage.appendChild(document.createTextNode(body.context_before || ""));
+    const passage = el("p");
+    const contextBefore = fullText
+      ? fullText.slice(Math.max(0, start - 200), start)
+      : body.context_before || "";
+    const contextAfter = fullText
+      ? fullText.slice(end, end + 200)
+      : body.context_after || "";
+    const highlightText = fullText ? fullText.slice(start, end) : "";
+
+    passage.appendChild(document.createTextNode(contextBefore));
 
     const highlightSpan = el("span", {
       className: "source-highlight",
-      text: (body.text || "").slice(start, end),
+      text: highlightText,
     });
     passage.appendChild(highlightSpan);
 
-    passage.appendChild(document.createTextNode(body.context_after || ""));
+    passage.appendChild(document.createTextNode(contextAfter));
     sourceViewerBody.appendChild(passage);
   }
 
