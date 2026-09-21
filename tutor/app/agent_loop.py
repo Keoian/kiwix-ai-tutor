@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -101,6 +102,25 @@ class TurnResult:
     hit). Citations and attributions still run on the (possibly trimmed)
     ``answer_text``; the host never fabricates content to fill in what
     was cut."""
+    timings: dict = field(
+        default_factory=lambda: {
+            "forced_call": 0.0,
+            "searches": 0.0,
+            "second_round": 0.0,
+            "answer_prefill": 0.0,
+            "answer_generation": 0.0,
+        }
+    )
+    """Wall-clock seconds spent per turn stage (see docs/
+    rewrite_on_weak_evidence.md, "Model may skip the search" /
+    per-stage timing addendum): ``forced_call`` (the model deciding what
+    to search, first round), ``searches`` (running the research engine
+    against the model's queries), ``second_round`` (the whole weak-
+    evidence extra round, call + searches; 0.0 when it never fires),
+    ``answer_prefill`` (answer request sent -> first token), and
+    ``answer_generation`` (first token -> stream done). Always present
+    and non-negative; a slow prompt-read on constrained hardware shows
+    up here as a large ``answer_prefill``."""
     evidence: dict | None = None
     """Additive (see docs/rewrite_on_weak_evidence.md): ``None`` for
     non-factual routes (action/greeting-shaped turns never pre-retrieve).
@@ -711,6 +731,8 @@ def _run_forced_rewrite_round(
     restate_question_instruction: bool = False,
     clip_model_queries: bool = False,
     require_question_for_restate: bool = False,
+    second_round: bool = False,
+    timing: dict | None = None,
 ):
     """Run one forced ``research`` tool-call round (see
     ``_forced_research_tool_call``), append the resulting assistant
@@ -731,8 +753,22 @@ def _run_forced_rewrite_round(
     unless the model's forced call also supplied a usable ``question``.
     """
     research_calls_delta = 0
+    emit(
+        {
+            "kind": "status",
+            "stage": "planning",
+            "detail": (
+                "Trying a different search..."
+                if second_round
+                else "Working out what to look up..."
+            ),
+        }
+    )
     wire_messages = _to_wire_messages(log.render()) if use_log else messages
+    _t0 = time.monotonic()
     forced = _forced_research_tool_call(llm, wire_messages, cancel=cancel)
+    if timing is not None:
+        timing["forced_call"] = timing.get("forced_call", 0.0) + (time.monotonic() - _t0)
     model_question: str | None = None
     if forced is not None:
         model_question = _clip_model_written_question(forced[3])
@@ -782,14 +818,23 @@ def _run_forced_rewrite_round(
         else:
             messages.append({"role": "tool", "tool_call_id": synth_id, "content": tool_text})
         emit({"kind": "tool_result", "name": "research", "ok": False})
+        emit(
+            {
+                "kind": "status",
+                "stage": "not_found",
+                "detail": (
+                    "Nothing in the library on this. Answering from what I know..."
+                ),
+            }
+        )
         return level_after, [], research_calls_delta
 
     tool_call_id, rewritten_queries, arguments_json, _model_question_raw = forced
     emit(
         {
             "kind": "status",
-            "stage": "tool",
-            "detail": f"Searching again: {', '.join(rewritten_queries)}",
+            "stage": "searching",
+            "detail": f"Searching the library for: {', '.join(rewritten_queries)}",
         }
     )
     if use_log:
@@ -817,6 +862,7 @@ def _run_forced_rewrite_round(
             }
         )
 
+    _t_search0 = time.monotonic()
     many_fn = getattr(research_engine, "research_many", None)
     if many_fn is not None:
         batch_results = many_fn(
@@ -834,6 +880,8 @@ def _run_forced_rewrite_round(
             }
             for q in rewritten_queries
         ]
+    if timing is not None:
+        timing["searches"] = timing.get("searches", 0.0) + (time.monotonic() - _t_search0)
 
     passage_lists = []
     for item in batch_results:
@@ -882,6 +930,13 @@ def _run_forced_rewrite_round(
     _retain_passages(session, {"passages": merged_passages})
     searched_for_line = f"Searched for: {', '.join(rewritten_queries)}"
     if level_after == "strong":
+        emit(
+            {
+                "kind": "status",
+                "stage": "reading",
+                "detail": f"Found {len(merged_passages)} passages. Reading them...",
+            }
+        )
         if use_log and reuse_prior_passages:
             # Route the forced round's own tool-result text through the
             # same pointer-substitution/held-id bookkeeping as
@@ -949,6 +1004,13 @@ def run_turn(
     model_writes_search: bool = True,
 ) -> TurnResult:
     research_calls = 0
+    timings = {
+        "forced_call": 0.0,
+        "searches": 0.0,
+        "second_round": 0.0,
+        "answer_prefill": 0.0,
+        "answer_generation": 0.0,
+    }
     calc_calls = 0
     followup_research_used = False
     events: list = []
@@ -1066,6 +1128,7 @@ def run_turn(
                 restate_question_instruction=restate_question_instruction,
                 clip_model_queries=do_model_writes_search,
                 require_question_for_restate=not has_prior_turns,
+                timing=timings,
             )
             research_calls += delta
             # _run_forced_rewrite_round always leaves the log in a valid,
@@ -1109,6 +1172,8 @@ def run_turn(
             # mechanism, capped at one extra round even after a follow-up
             # round already ran (append-only, cache-safe: this is just
             # another tool round appended after whatever came before).
+            _t_second0 = time.monotonic()
+            second_round_timing: dict = {}
             level_after, rewritten_queries, delta = _run_forced_rewrite_round(
                 llm=llm,
                 log=log,
@@ -1122,10 +1187,25 @@ def run_turn(
                 corrected_terms=corrected_terms,
                 emit=emit,
                 reuse_prior_passages=reuse_prior_passages,
+                second_round=True,
+                timing=second_round_timing,
             )
+            timings["second_round"] = time.monotonic() - _t_second0
             research_calls += delta
         # else: followup_ran and not do_rewrite -- the follow-up round's
         # own strong result already fully handled this turn's evidence.
+
+        if level_after in ("weak", "empty"):
+            emit(
+                {
+                    "kind": "status",
+                    "stage": "not_found",
+                    "detail": (
+                        "Nothing in the library on this. "
+                        "Answering from what I know..."
+                    ),
+                }
+            )
 
         evidence_summary = {
             "level_before": level_before,
@@ -1143,6 +1223,7 @@ def run_turn(
                 research_calls=research_calls,
                 calc_calls=calc_calls,
                 events=events,
+                timings=timings,
             )
 
         if use_log:
@@ -1175,6 +1256,8 @@ def run_turn(
         stream_cancel = _UnionCancel(cancel, guard_cancel)
 
         emit({"kind": "status", "stage": "thinking", "detail": "Writing an answer..."})
+        _t_request_sent = time.monotonic()
+        _first_token_time: float | None = None
         for evt in llm.stream_chat(
             messages,
             tools=TOOLS,
@@ -1183,6 +1266,9 @@ def run_turn(
             max_tokens=budget.generation,
         ):
             if evt.kind == "token":
+                if _first_token_time is None:
+                    _first_token_time = time.monotonic()
+                    timings["answer_prefill"] += _first_token_time - _t_request_sent
                 answer_text_parts.append(evt.text or "")
                 emit(evt)
                 if truncated is None:
@@ -1204,6 +1290,9 @@ def run_turn(
                 if finish_reason == "length" and truncated is None:
                     truncated = "max_tokens"
 
+        if _first_token_time is not None:
+            timings["answer_generation"] += time.monotonic() - _first_token_time
+
         if errored:
             return TurnResult(
                 status="error",
@@ -1212,6 +1301,7 @@ def run_turn(
                 research_calls=research_calls,
                 calc_calls=calc_calls,
                 events=events,
+                timings=timings,
             )
 
         # A "cancelled" finish_reason from the guard's own union event
@@ -1230,6 +1320,7 @@ def run_turn(
                 research_calls=research_calls,
                 calc_calls=calc_calls,
                 events=events,
+                timings=timings,
             )
 
         if not tool_calls:
@@ -1252,6 +1343,7 @@ def run_turn(
                 uncited=uncited,
                 truncated=truncated,
                 evidence=evidence_summary,
+                timings=timings,
             )
 
         # Record the assistant's tool-call turn, then dispatch each call.
@@ -1402,6 +1494,7 @@ def run_turn(
                 research_calls=research_calls,
                 calc_calls=calc_calls,
                 events=events,
+                timings=timings,
             )
 
         if followup_research_used and route == "preretrieve":

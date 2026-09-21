@@ -462,6 +462,7 @@ def _make_turn_runner(
                     "evidence_dump": evidence_dump,
                     "truncated": result.truncated,
                     "evidence": result.evidence,
+                    "timings": result.timings,
                 },
             )
         elif result.status == "cancelled":
