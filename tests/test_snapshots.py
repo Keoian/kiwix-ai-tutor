@@ -127,7 +127,7 @@ def test_retries_through_a_transient_disk_io_error(tmp_path: Path, monkeypatch):
         return real_connect(*args, **kwargs)
 
     monkeypatch.setattr(sqlite3, "connect", _connect)
-    monkeypatch.setattr("tutor.retrieval.snapshots.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("tutor.retrieval._sqlite_retry.time.sleep", lambda _seconds: None)
 
     db_path = tmp_path / "snapshots.sqlite3"
     with SnapshotStore(db_path) as store:

@@ -21,6 +21,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from tutor.retrieval._sqlite_retry import execute_with_retry as _execute_with_retry
+
 
 class ProfileError(Exception):
     """Raised for invalid profile field values."""
@@ -55,8 +57,12 @@ class ProfileStore:
         self._lock = threading.Lock()
         self.connection = sqlite3.connect(str(Path(db_path)), check_same_thread=False)
         with self._lock:
-            self.connection.execute("PRAGMA journal_mode=WAL")
-            self.connection.execute(
+            try:
+                _execute_with_retry(self.connection, "PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError:
+                _execute_with_retry(self.connection, "PRAGMA journal_mode=DELETE")
+            _execute_with_retry(
+                self.connection,
                 """
                 CREATE TABLE IF NOT EXISTS profiles (
                     id TEXT PRIMARY KEY,
@@ -66,7 +72,7 @@ class ProfileStore:
                     reading_level TEXT NOT NULL,
                     preferences TEXT
                 )
-                """
+                """,
             )
             self.connection.commit()
 

@@ -11,34 +11,14 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from tutor.retrieval._sqlite_retry import execute_with_retry as _execute_with_retry
+
 _HEADING_PATH_SEP = "\x1f"
-
-# Observed on ubuntu-latest GitHub Actions runners: sqlite3 raises
-# "disk I/O error" from an ordinary CREATE TABLE / PRAGMA on a brand-new,
-# empty database file for no reproducible code-level reason -- consistent
-# with a transient burst-credit throttle on the runner's ephemeral disk
-# rather than anything wrong with the statement itself. A short retry
-# clears it without masking a real, persistent failure (which keeps
-# raising after the retries are exhausted).
-_TRANSIENT_IO_RETRIES = 3
-_TRANSIENT_IO_RETRY_DELAY_S = 0.5
-
-
-def _execute_with_retry(connection: sqlite3.Connection, sql: str) -> None:
-    for attempt in range(_TRANSIENT_IO_RETRIES):
-        try:
-            connection.execute(sql)
-            return
-        except sqlite3.OperationalError as exc:
-            if "disk i/o error" not in str(exc).lower() or attempt == _TRANSIENT_IO_RETRIES - 1:
-                raise
-            time.sleep(_TRANSIENT_IO_RETRY_DELAY_S)
 
 
 @dataclass(frozen=True)

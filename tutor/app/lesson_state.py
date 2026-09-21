@@ -26,6 +26,7 @@ from pathlib import Path
 
 from tutor.app.prompt import PromptLog
 from tutor.app.session import Session
+from tutor.retrieval._sqlite_retry import execute_with_retry as _execute_with_retry
 
 
 @dataclass(frozen=True)
@@ -109,8 +110,12 @@ class LessonStore:
         self._lock = threading.Lock()
         self.connection = sqlite3.connect(str(Path(db_path)), check_same_thread=False)
         with self._lock:
-            self.connection.execute("PRAGMA journal_mode=WAL")
-            self.connection.execute(
+            try:
+                _execute_with_retry(self.connection, "PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError:
+                _execute_with_retry(self.connection, "PRAGMA journal_mode=DELETE")
+            _execute_with_retry(
+                self.connection,
                 """
                 CREATE TABLE IF NOT EXISTS lessons (
                     id TEXT PRIMARY KEY,
@@ -119,9 +124,10 @@ class LessonStore:
                     ended INTEGER NOT NULL DEFAULT 0,
                     prompt_log_json TEXT
                 )
-                """
+                """,
             )
-            self.connection.execute(
+            _execute_with_retry(
+                self.connection,
                 """
                 CREATE TABLE IF NOT EXISTS turns (
                     id TEXT PRIMARY KEY,
@@ -140,7 +146,7 @@ class LessonStore:
                     truncated TEXT,
                     seq INTEGER NOT NULL
                 )
-                """
+                """,
             )
             # Older databases created before host-side attribution (2026-09-20)
             # lack this column; add it if missing rather than forcing a

@@ -74,7 +74,7 @@ class _FakeSessions:
         return {}
 
 
-def _make_app(tmp_path: Path, engine=None):
+def _make_app(tmp_path: Path, engine=None, *, request=None):
     store = SnapshotStore(tmp_path / "snaps.sqlite3")
     deps = AppDeps(
         turn_runner=lambda *a, **k: None,
@@ -84,6 +84,8 @@ def _make_app(tmp_path: Path, engine=None):
         subjects=["general"],
         research_engine=engine,
     )
+    if request is not None:
+        request.addfinalizer(deps.close)
     app = create_app(deps)
     return app, deps
 
@@ -93,10 +95,10 @@ def article_text():
     return _long_article()
 
 
-def test_context_endpoint_returns_expanded_text(tmp_path, article_text):
+def test_context_endpoint_returns_expanded_text(tmp_path, article_text, request):
     text, start, end = article_text
     engine = _FakeResearchEngine(article_text=text)
-    app, deps = _make_app(tmp_path, engine=engine)
+    app, deps = _make_app(tmp_path, engine=engine, request=request)
     with TestClient(app) as c:
         deps.snapshot_store.put(
             _Passage("p1", start=start, end=end, text=text[start:end]),
@@ -114,19 +116,19 @@ def test_context_endpoint_returns_expanded_text(tmp_path, article_text):
     deps.close()
 
 
-def test_context_endpoint_unknown_passage_is_404(tmp_path):
+def test_context_endpoint_unknown_passage_is_404(tmp_path, request):
     engine = _FakeResearchEngine(article_text="x")
-    app, deps = _make_app(tmp_path, engine=engine)
+    app, deps = _make_app(tmp_path, engine=engine, request=request)
     with TestClient(app) as c:
         resp = c.get("/api/source/does-not-exist/context")
         assert resp.status_code == 404
     deps.close()
 
 
-def test_context_endpoint_archive_unavailable_is_clean_503(tmp_path, article_text):
+def test_context_endpoint_archive_unavailable_is_clean_503(tmp_path, article_text, request):
     text, start, end = article_text
     engine = _FakeResearchEngine(fail=True)
-    app, deps = _make_app(tmp_path, engine=engine)
+    app, deps = _make_app(tmp_path, engine=engine, request=request)
     with TestClient(app) as c:
         deps.snapshot_store.put(
             _Passage("p1", start=start, end=end, text=text[start:end]),
@@ -139,10 +141,10 @@ def test_context_endpoint_archive_unavailable_is_clean_503(tmp_path, article_tex
     deps.close()
 
 
-def test_context_endpoint_pages_with_before_after_params(tmp_path, article_text):
+def test_context_endpoint_pages_with_before_after_params(tmp_path, article_text, request):
     text, start, end = article_text
     engine = _FakeResearchEngine(article_text=text)
-    app, deps = _make_app(tmp_path, engine=engine)
+    app, deps = _make_app(tmp_path, engine=engine, request=request)
     with TestClient(app) as c:
         deps.snapshot_store.put(
             _Passage("p1", start=start, end=end, text=text[start:end]),
@@ -154,13 +156,13 @@ def test_context_endpoint_pages_with_before_after_params(tmp_path, article_text)
     deps.close()
 
 
-def test_context_endpoint_accepts_no_path_or_archive_parameter(tmp_path, article_text):
+def test_context_endpoint_accepts_no_path_or_archive_parameter(tmp_path, article_text, request):
     """The passage's archive/path come only from the stored snapshot -- a
     caller cannot smuggle a different path/archive_id in via query params
     to read an arbitrary entry (no path-traversal surface)."""
     text, start, end = article_text
     engine = _FakeResearchEngine(article_text=text)
-    app, deps = _make_app(tmp_path, engine=engine)
+    app, deps = _make_app(tmp_path, engine=engine, request=request)
     with TestClient(app) as c:
         deps.snapshot_store.put(
             _Passage("p1", start=start, end=end, text=text[start:end]),
@@ -177,9 +179,9 @@ def test_context_endpoint_accepts_no_path_or_archive_parameter(tmp_path, article
     deps.close()
 
 
-def test_context_endpoint_404_when_research_engine_not_configured(tmp_path, article_text):
+def test_context_endpoint_404_when_research_engine_not_configured(tmp_path, article_text, request):
     text, start, end = article_text
-    app, deps = _make_app(tmp_path, engine=None)
+    app, deps = _make_app(tmp_path, engine=None, request=request)
     with TestClient(app) as c:
         deps.snapshot_store.put(
             _Passage("p1", start=start, end=end, text=text[start:end]),
