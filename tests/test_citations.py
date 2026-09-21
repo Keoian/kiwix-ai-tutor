@@ -381,9 +381,28 @@ def test_detect_evidence_dump_true_for_label_stacking_on_one_sentence():
     passages = [_passage(f"S{i}", passage_id=f"p{i}") for i in range(1, 5)]
     for i, p in enumerate(passages, start=1):
         p["text"] = f"Topic {i} passage text here."
-    text = "This is supported by everything [S1][S2][S3][S4]."
+    filler = " ".join(
+        f"Extra background detail number {i} about the subject." for i in range(1, 12)
+    )
+    text = (
+        filler
+        + " This is supported by everything [S1][S2][S3][S4]."
+    )
     citations = resolve_citations(text, passages)
     assert detect_evidence_dump(text, citations, passages) is True
+
+
+def test_detect_evidence_dump_false_for_stacked_labels_on_a_short_answer():
+    """2026-09-21 dump-collapse bug: a short, correct answer like
+    "Yes, DNA is a molecule." should never be treated as an evidence dump
+    just because its trailing citation carries several stacked labels --
+    a genuine dump is a long, evasive answer, not a short direct one."""
+    passages = [_passage(f"S{i}", passage_id=f"p{i}") for i in range(1, 5)]
+    for i, p in enumerate(passages, start=1):
+        p["text"] = f"Topic {i} passage text here."
+    text = "Yes, DNA is a molecule. [S1][S2][S3][S4]"
+    citations = resolve_citations(text, passages)
+    assert detect_evidence_dump(text, citations, passages) is False
 
 
 # ---------------------------------------------------------------------------

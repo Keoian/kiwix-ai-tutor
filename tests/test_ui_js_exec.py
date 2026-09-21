@@ -387,3 +387,37 @@ def test_has_host_backed_content_matches_fixture(ctx):
         )
         is False
     )
+
+
+def test_collapse_evidence_dump_shows_visible_note_and_toggle_reveals_content(ctx):
+    """2026-09-21 dump-collapse bug: a tutor bubble collapsed by
+    collapseEvidenceDump must never end up with zero visible explanation --
+    a short muted note stays visible above the toggle, and the toggle still
+    reveals the original (hidden, not deleted) content."""
+    ctx.eval(
+        """
+        var _tutorNode = document.createElement("div");
+        var _answerText = document.createTextNode("Yes, DNA is a molecule. [S1][S2][S3][S4]");
+        _tutorNode.appendChild(_answerText);
+        module.exports.collapseEvidenceDump(_tutorNode);
+        """
+    )
+    found = call(ctx, "_walkCollect(_tutorNode)")
+    # the original answer text is still in the tree (never deleted), just hidden
+    full_text = call(ctx, "_tutorNode.textContent")
+    assert "DNA is a molecule" in full_text
+    # a visible (non-hidden) note explaining the collapse is present
+    note_text = call(ctx, "_tutorNode.children[0].textContent")
+    note_hidden = call(ctx, "!!_tutorNode.children[0].hidden")
+    assert note_hidden is False
+    assert "repeated its sources" in note_text
+    # the dump content itself starts hidden
+    content_wrap_hidden = call(ctx, "_tutorNode.children[2].hidden")
+    assert content_wrap_hidden is True
+    # clicking the toggle reveals it and the note remains
+    ctx.eval('_tutorNode.children[1].dispatchEvent({type: "click"});')
+    content_wrap_hidden_after = call(ctx, "_tutorNode.children[2].hidden")
+    assert content_wrap_hidden_after is False
+    note_hidden_after = call(ctx, "!!_tutorNode.children[0].hidden")
+    assert note_hidden_after is False
+    del found

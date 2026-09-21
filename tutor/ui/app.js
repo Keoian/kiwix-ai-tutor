@@ -828,6 +828,10 @@
     existingChildren.forEach(function (child) {
       contentWrap.appendChild(child);
     });
+    const note = el("div", {
+      className: "dump-note",
+      text: "The tutor mostly repeated its sources here instead of answering.",
+    });
     const toggle = el("button", {
       className: "dump-toggle",
       text: "Show the tutor's pasted sources",
@@ -839,6 +843,7 @@
         ? "Show the tutor's pasted sources"
         : "Hide the tutor's pasted sources";
     });
+    tutorNode.appendChild(note);
     tutorNode.appendChild(toggle);
     tutorNode.appendChild(contentWrap);
   }
@@ -1628,6 +1633,7 @@
       renderAnswerWithAttribution: renderAnswerWithAttribution,
       renderCitationChip: renderCitationChip,
       renderUnresolvedLabel: renderUnresolvedLabel,
+      collapseEvidenceDump: collapseEvidenceDump,
     };
   }
 })();

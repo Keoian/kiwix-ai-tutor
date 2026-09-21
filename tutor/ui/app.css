@@ -271,6 +271,13 @@ body {
 
 /* 2026-09-20 evidence-dump follow-up: collapsed "pasted sources" toggle
    and the plain unsupported-sources note. */
+.dump-note {
+  display: block;
+  font-style: italic;
+  opacity: 0.85;
+  margin-top: 0.4rem;
+}
+
 .dump-toggle {
   display: block;
   margin-top: 0.5rem;

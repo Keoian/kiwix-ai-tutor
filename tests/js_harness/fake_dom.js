@@ -41,9 +41,17 @@ function makeNode(tagName) {
     },
   });
   node.appendChild = function (child) {
+    if (child.parentNode && child.parentNode.children) {
+      const oldIdx = child.parentNode.children.indexOf(child);
+      if (oldIdx >= 0) child.parentNode.children.splice(oldIdx, 1);
+    }
     node.children.push(child);
+    child.parentNode = node;
     return child;
   };
+  Object.defineProperty(node, "childNodes", {
+    get: function () { return node.children; },
+  });
   node.removeChild = function (child) {
     const idx = node.children.indexOf(child);
     if (idx >= 0) node.children.splice(idx, 1);

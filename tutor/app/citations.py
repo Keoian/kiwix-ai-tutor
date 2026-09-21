@@ -58,6 +58,13 @@ _DUMP_CONTAINMENT_FRACTION = 0.80
 _MIN_DUMPED_BULLETS = 3
 _MIN_STACKED_LABELS = 4
 
+# 2026-09-21 dump-collapse bug fix: label-stacking only counts as a dump
+# signal when the whole answer is long enough to plausibly be a "here's
+# everything" evasion. A short, correct answer like "Yes, DNA is a
+# molecule. [S1][S2][S3][S4]" carries several stacked labels but is not a
+# dump -- a genuine dump is long. Word count of the whole answer text.
+_MIN_DUMP_ANSWER_WORDS = 60
+
 # Reserved label for the synthetic seed exchange (tutor.app.seed_exchange):
 # real evidence numbering always starts at S1 (Session.allocate_label), so
 # "S0" never names a real passage. The resolver refuses it unconditionally
@@ -136,6 +143,11 @@ def _dump_signal(text: str, packet_passages: list[dict]) -> tuple[bool, set[str]
        ``_MIN_STACKED_LABELS`` (4) or more distinct ``[S#]`` labels -- the
        hallmark of a "here's everything" trailer sentence like
        "...[S1][S2]...[S11]". Every label on such a sentence is flagged.
+       Only counted when the whole answer is at least
+       ``_MIN_DUMP_ANSWER_WORDS`` words long -- a short, correct answer can
+       legitimately cite several sources on its one sentence without being
+       a dump (2026-09-21 fix: "Yes, DNA is a molecule. [S1][S2][S3][S4]"
+       was wrongly flagged and its whole bubble hidden by the UI).
     2. Wholesale copying: at least ``_MIN_DUMPED_BULLETS`` (3) distinct
        cited sentences/bullets each have ``_DUMP_CONTAINMENT_FRACTION``
        (80%) or more of their own content terms contained in the text of
@@ -159,9 +171,11 @@ def _dump_signal(text: str, packet_passages: list[dict]) -> tuple[bool, set[str]
             per_sentence_labels[sentence] = labels_here
 
     stacked_labels: set[str] = set()
-    for labels_here in per_sentence_labels.values():
-        if len(labels_here) >= _MIN_STACKED_LABELS:
-            stacked_labels |= labels_here
+    is_long_answer = len(text.split()) >= _MIN_DUMP_ANSWER_WORDS
+    if is_long_answer:
+        for labels_here in per_sentence_labels.values():
+            if len(labels_here) >= _MIN_STACKED_LABELS:
+                stacked_labels |= labels_here
 
     copied_labels: set[str] = set()
     for sentence, labels_here in per_sentence_labels.items():
