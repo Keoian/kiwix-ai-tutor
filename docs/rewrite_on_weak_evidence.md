@@ -317,3 +317,76 @@ combination (to directly reproduce the original bug's wrong-answer
 outcome end-to-end); the cascade into a second (weak-evidence) round
 after a weak follow-up-rewrite merge; behaviour with `rewrite_on_followup`
 default (ON) against a longer, multi-topic lesson.
+
+### Follow-up rewrite latency profile (`data/followup_latency_profile.py`)
+
+The single-run smoke above measured **+10.74 s** on turn 3 (ON vs OFF),
+well above the ~1-2 s expected for one ~20-token forced tool call on a
+cached prompt plus a ~1 s search. To find where the time actually goes,
+`data/followup_latency_profile.py` extends the smoke script: it
+monkeypatches `LlamaClient.stream_chat` (class-level, since `AppDeps`
+doesn't expose the `llm` instance) and `research_engine.research` to
+record, per LLM call, `prompt_tokens`/`cached_tokens`/`prompt_ms` and
+`completion_tokens`/`predicted_ms` from llama-server's `usage`/`timings`,
+plus wall time per retrieval call. Run against the same dev llama-server
+on :8080, 3 reps ON and 3 reps OFF, same 3-turn lesson, checkpointed to
+`data/followup_latency_profile_20260921_075137.json`.
+
+**Turn 3 wall time, 3 reps each (seconds):**
+
+| | rep0 | rep1 | rep2 | median |
+|---|---|---|---|---|
+| ON | 8.02 | 7.08 | 10.66 | **8.02** |
+| OFF | 3.52 | 6.56 | 51.81\* | **6.56** |
+
+\*OFF rep2 hit `max_tokens=2000` (a 2000-token runaway completion,
+`finish_reason` capped) -- a sampling-variance outlier unrelated to the
+forced-rewrite feature; included for transparency but excluded from the
+breakdown below.
+
+**Median added wall time, ON - OFF: ~1.45 s** -- in the expected 1-2 s
+range, not the +10.74 s the single earlier smoke run showed. Per-rep
+added time was highly variable (+4.50 s, +0.52 s, -41.16 s) because
+answer length (`completion_tokens`, unconstrained, temperature > 0)
+swings by 2-3x run to run regardless of the setting; the original single
+ON/OFF sample simply landed on an unlucky pair.
+
+**Breakdown of the forced round's own fixed cost (turn 3, reps 0-1,
+median), measured not inferred:**
+
+| Component | Measured | Suspicion status |
+|---|---|---|
+| Forced tool-call round (`_run_forced_rewrite_round`) wall | 1.31 s | confirmed real, small |
+| \| prompt cache hit ratio on that round | 2919-3155 / 3045-3901 cached (~95-96% of that call's own 126-token prompt) | (a) prompt cache breakage: **refuted** -- forced round reuses the cached prefix, does not reprefill |
+| \| its `completion_tokens` | 29-33 (capped by `max_tokens=96`) | (b) unbounded generation: **refuted** -- already capped, generates far under the cap |
+| Extra `research()` call (2nd query) wall | 0.0-0.8 s | (d) 2nd search is slow: **refuted** -- comparable to or cheaper than the single OFF search (0.45-0.7 s) |
+| Extra prompt prefill on the final answer call from merged evidence (`prompt_n` 746 ON vs 425 OFF tokens; `prompt_ms` 2168 ON vs 1481 OFF median) | **+0.69 s** | real, previously unmeasured cost: the forced round's extra evidence enlarges the final answer's own prompt, and a larger fraction of it is new (uncached) text |
+| Answer length (`completion_tokens`) ON vs OFF, same rep | 186/84, 146/215, 286/2000 | (c) ON answers are simply longer: **refuted as a systematic effect** -- not consistently longer than OFF; sampling variance dominates and swamps any (a)/(b)/(d) signal in raw single-sample wall time |
+
+Sum of the two confirmed fixed-cost components: 1.31 s (tool round) +
+0.69 s (extra prefill) ≈ **2.0 s**, consistent with the 1-2 s expectation
+once answer-length noise is averaged out via medians.
+
+**Hypothesis (e), a second weak-evidence round firing**: **confirmed** as
+a real, intermittent, larger cost. Turn 2 of ON rep2 fired 4 LLM calls
+instead of the usual 2 (forced tool-call round -> its own weak-evidence
+fallback text round -> a normal auto tool-call round -> the final
+answer), adding roughly 1.2 + 1.6 + 1.3 s ≈ **+4.1 s** beyond the normal
+single-round turn in that one rep. This did not occur in the profiled
+turn-3 reps, but is the largest single per-turn cost this profile
+surfaced when it does fire, and is a more plausible partial explanation
+for occasional large outliers (like the original +10.74 s sample) than
+cache breakage or an unbounded forced call.
+
+**Recommended fix**: no cache or `max_tokens` bug to fix on the forced
+round itself (a, b already correctly bounded/cached). Two real,
+worth-fixing costs: (1) the extra ~0.7 s prefill from merged evidence on
+the final answer -- consider capping/truncating the forced round's
+contribution to the merged evidence context size closer to what a
+single-query search would have contributed, rather than concatenating
+both; (2) the intermittent second (weak-evidence) round after a weak
+forced-rewrite merge (~+4 s when it fires) -- consider skipping that
+second round specifically when it was already reached via the forced
+follow-up round (i.e., treat the forced round's own weak result as
+terminal rather than triggering a further escalation), since the forced
+round was itself already the escalation.
