@@ -300,6 +300,7 @@ def _make_turn_runner(
     budget,
     lessons: Any = None,
     last_eviction: dict | None = None,
+    rewrite_on_weak_evidence: bool = True,
 ):
     from tutor.app.agent_loop import run_turn
 
@@ -362,6 +363,7 @@ def _make_turn_runner(
                 budget=budget,
                 emit=adapter,
                 cancel=cancel,
+                rewrite_on_weak_evidence=rewrite_on_weak_evidence,
             )
         except Exception:  # noqa: BLE001 - never leak a traceback to the student
             emit("error", {"message": _STUDENT_SAFE_ERROR})
@@ -430,6 +432,7 @@ def _make_turn_runner(
                     # backed anything the model said" -- two different notes.
                     # Does not change citation_quality or any soak/eval metric.
                     "passages_available": len(known_passages),
+                    "evidence": result.evidence,
                 }
                 emit("attributions", attributions_payload)
             emit(
@@ -446,6 +449,7 @@ def _make_turn_runner(
                     "citation_quality": citation_quality,
                     "evidence_dump": evidence_dump,
                     "truncated": result.truncated,
+                    "evidence": result.evidence,
                 },
             )
         elif result.status == "cancelled":
@@ -676,6 +680,7 @@ def build_deps(cfg: Any, *, llm: Any = None, research_engine: Any = None) -> App
         budget=budget,
         lessons=lessons,
         last_eviction=last_eviction,
+        rewrite_on_weak_evidence=getattr(cfg.app, "rewrite_on_weak_evidence", True),
     )
     status_provider = _make_status_provider(
         llm=llm,

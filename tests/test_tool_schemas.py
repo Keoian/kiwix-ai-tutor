@@ -23,10 +23,16 @@ def test_research_tool_shape():
     params = fn["parameters"]
     assert params["type"] == "object"
     assert params["additionalProperties"] is False
-    assert params["required"] == ["query"]
+    # Additive (docs/rewrite_on_weak_evidence.md): neither "query" nor
+    # "queries" is schema-required on its own -- validate_tool_call
+    # enforces "at least one of the two" instead, so the older single
+    # ``query`` form keeps working unchanged.
+    assert params["required"] == []
     assert params["properties"]["query"]["type"] == "string"
     assert params["properties"]["keywords"]["type"] == "array"
     assert params["properties"]["keywords"]["items"]["type"] == "string"
+    assert params["properties"]["queries"]["type"] == "array"
+    assert params["properties"]["queries"]["items"]["type"] == "string"
 
 
 def test_calc_tool_shape():

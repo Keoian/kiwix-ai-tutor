@@ -37,6 +37,7 @@ from pathlib import Path
 from tutor.app.citations import extract_labels, render_evidence
 from tutor.app.prompt import PromptOverflow
 from tutor.app.repetition_guard import find_repetition_loop
+from tutor.retrieval.assessment import assess_evidence
 from tutor.tools.schemas import TOOLS, validate_tool_call
 
 RESEARCH_CAP = 2
@@ -99,6 +100,15 @@ class TurnResult:
     hit). Citations and attributions still run on the (possibly trimmed)
     ``answer_text``; the host never fabricates content to fill in what
     was cut."""
+    evidence: dict | None = None
+    """Additive (see docs/rewrite_on_weak_evidence.md): ``None`` for
+    non-factual routes (action/greeting-shaped turns never pre-retrieve).
+    For a factual (``preretrieve*``) route, always a dict with
+    ``level_before``/``level_after`` (the pre- and post-rewrite
+    ``assess_evidence`` levels -- identical when no rewrite ran),
+    ``rewritten_queries`` (the host-executed query list, ``[]`` when no
+    rewrite ran), and ``corrected_terms`` (the merged research response's
+    spelling/compound corrections dict)."""
 
 
 def _passage_to_dict(passage) -> dict:
@@ -166,6 +176,173 @@ def _trim_and_append_evidence(log, passages: list[dict], budget) -> None:
             remaining = remaining[:-1]
 
 
+# The bracketed note the host appends to the student's own message text
+# (append-only: written once, as part of the single user message that
+# gets logged, never edited afterwards) when a forced rewrite round is
+# about to run. Kept short since it eats into the same turn's
+# ``budget.newest`` allowance. See docs/rewrite_on_weak_evidence.md.
+_REWRITE_HOST_NOTE = (
+    " [Host note: the library search for this question came back weak. "
+    "Call research with 1-3 short rewritten queries: fix spelling, "
+    "split or join fused words, use the topic's standard name, and "
+    "resolve any \"it\"/\"that\" from the lesson so far.]"
+)
+
+# Small cap on the forced rewrite call's own output -- it only needs to
+# emit one tool call, never prose.
+_FORCED_REWRITE_MAX_TOKENS = 96
+
+# Cap on the number of passages kept after merging all rewritten queries'
+# results, matching the normal single-query evidence packet size so the
+# rewritten evidence is no more expensive than an ordinary research call.
+_MERGE_CAP = 8
+
+
+def _merge_dedupe_passages(passage_lists: list[list[dict]], cap: int) -> list[dict]:
+    """Merge several passage lists (one per rewritten query), keeping the
+    best (lowest) rank seen for each passage id across all lists, then
+    returning them best-rank-first, capped to ``cap``."""
+    best_rank: dict[str, int] = {}
+    by_id: dict[str, dict] = {}
+    for passages in passage_lists:
+        for rank, passage in enumerate(passages):
+            pid = passage.get("id")
+            if pid is None:
+                continue
+            if pid not in best_rank or rank < best_rank[pid]:
+                best_rank[pid] = rank
+                by_id[pid] = passage
+    ordered = sorted(by_id.values(), key=lambda p: best_rank[p["id"]])
+    return ordered[:cap]
+
+
+@dataclass
+class _MergedResult:
+    """Minimal ``.passages`` holder so ``assess_evidence`` (which only
+    ever reads ``result.passages``) can be re-run against the merged,
+    de-duplicated evidence from all of a forced rewrite's queries."""
+
+    passages: list[dict]
+
+
+def _not_found_tool_text(*, searched_for: list[str], level_after: str) -> str:
+    """The instruction text appended as the forced rewrite's tool result
+    when the merged, re-assessed evidence is still weak/empty. Tells the
+    model plainly to say it could not find this in the library, suggest a
+    better way to ask (or a related topic actually in the evidence, if
+    any), and -- only if it offers anything from memory -- to keep it
+    brief, clearly label it as from memory and unchecked, and give no
+    specific numbers/dates/names."""
+    return (
+        "No good match was found in the library for this question, even "
+        f"after rewriting the search ({level_after} evidence). Tell the "
+        "student plainly that you could not find this in the library. "
+        "Suggest a better way to ask, or point to a related topic that IS "
+        "covered by any sources given earlier in this lesson, if one "
+        "exists. Only if you choose to add anything from your own general "
+        "knowledge: keep it brief, clearly say it is from memory and "
+        "unchecked, and do not give any specific numbers, dates, or names."
+    )
+
+
+def _forced_research_tool_call(llm, messages: list[dict], *, cancel):
+    """Force the model to answer this turn's next completion with exactly
+    one ``research`` tool call, primarily via the OpenAI-compatible
+    ``tool_choice`` request field; if the server rejects that field
+    (a non-2xx/error StreamEvent), fall back to a JSON-schema/grammar
+    constrained plain-text completion asking for the same shape and
+    synthesize an equivalent tool-call.
+
+    Returns ``(tool_call_id, queries, arguments_json)`` or ``None`` if
+    the model produced nothing usable (both paths failed, or the forced
+    call returned no queries) -- callers treat ``None`` the same as
+    "still weak" and skip straight to the not-found outcome.
+    """
+    forced_tool_choice = {"type": "function", "function": {"name": "research"}}
+    text_parts: list[str] = []
+    tool_call = None
+    errored = False
+    for evt in llm.stream_chat(
+        messages,
+        tools=TOOLS,
+        tool_choice=forced_tool_choice,
+        cancel=cancel,
+        max_tokens=_FORCED_REWRITE_MAX_TOKENS,
+    ):
+        if evt.kind == "tool_call":
+            tool_call = evt
+        elif evt.kind == "token":
+            text_parts.append(evt.text or "")
+        elif evt.kind == "error":
+            errored = True
+            break
+
+    if tool_call is not None:
+        validation = validate_tool_call("research", tool_call.arguments_json or "{}")
+        if validation.ok:
+            queries = validation.arguments.get("queries") or (
+                [validation.arguments["query"]] if validation.arguments.get("query") else []
+            )
+            if queries:
+                return tool_call.id, queries, tool_call.arguments_json
+
+    if not errored:
+        # The server accepted tool_choice but the model still did not
+        # produce a usable call (e.g. it emitted only prose despite the
+        # forced choice) -- no fallback request will do better here, so
+        # give up on the rewrite for this turn.
+        return None
+
+    # Fallback path: tool_choice was rejected outright by the server.
+    # Ask for a small constrained JSON object instead, via the OpenAI
+    # -compatible ``response_format`` (json_schema) field, and synthesize
+    # a tool call locally from the parsed result.
+    schema_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "research_queries",
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["queries"],
+                "properties": {
+                    "queries": {
+                        "type": "array",
+                        "items": {"type": "string", "maxLength": 80},
+                        "minItems": 1,
+                        "maxItems": 3,
+                    }
+                },
+            },
+        },
+    }
+    fallback_text_parts: list[str] = []
+    for evt in llm.stream_chat(
+        messages,
+        cancel=cancel,
+        max_tokens=_FORCED_REWRITE_MAX_TOKENS,
+        response_format=schema_format,
+    ):
+        if evt.kind == "token":
+            fallback_text_parts.append(evt.text or "")
+        elif evt.kind == "error":
+            return None
+
+    raw = "".join(fallback_text_parts).strip()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    queries = parsed.get("queries") if isinstance(parsed, dict) else None
+    if not queries or not isinstance(queries, list):
+        return None
+    queries = [q for q in queries if isinstance(q, str) and q.strip()][:3]
+    if not queries:
+        return None
+    arguments_json = json.dumps({"queries": queries})
+    return "forced-rewrite-fallback", queries, arguments_json
+
+
 def run_turn(
     session,
     user_input,
@@ -178,6 +355,7 @@ def run_turn(
     cancel: threading.Event | None = None,
     system_text_override: str | None = None,
     temperature: float | None = None,
+    rewrite_on_weak_evidence: bool = True,
 ) -> TurnResult:
     research_calls = 0
     calc_calls = 0
@@ -204,6 +382,7 @@ def run_turn(
     else:
         messages: list[dict] = [{"role": "system", "content": system_text}]
 
+    evidence_summary: dict | None = None
     if user_input.kind == "action":
         route = "action"
         if use_log:
@@ -212,30 +391,182 @@ def run_turn(
             messages.append({"role": "user", "content": f"[action:{user_input.action}]"})
     else:
         route = "preretrieve"
-        if use_log:
-            log.append_user(user_input.text)
-        else:
-            messages.append({"role": "user", "content": user_input.text})
         emit({"kind": "status", "stage": "searching", "detail": "Looking in the library..."})
         response = research_engine.research(
             user_input.text, topic_hint=getattr(session, "subject_hint", None)
         )
         research_calls += 1
         packet = _packet_from_response(response)
-        _retain_passages(session, packet)
-        emit(
-            {
-                "kind": "status",
-                "stage": "reading",
-                "detail": f"Reading {len(packet.get('passages') or [])} sources...",
-            }
-        )
+        assessment = getattr(response, "assessment", None)
+        level_before = assessment.level if assessment is not None else "strong"
+        corrected_terms = dict(getattr(response, "corrected_terms", None) or {})
+        do_rewrite = rewrite_on_weak_evidence and level_before in ("weak", "empty")
+
+        user_text = user_input.text + _REWRITE_HOST_NOTE if do_rewrite else user_input.text
         if use_log:
-            _trim_and_append_evidence(log, packet["passages"], budget)
+            log.append_user(user_text)
         else:
-            evidence_text = render_evidence(packet)
-            messages.append({"role": "tool", "content": f"[research results]\n{evidence_text}"})
-        emit({"kind": "tool_result", "name": "research"})
+            messages.append({"role": "user", "content": user_text})
+
+        level_after = level_before
+        rewritten_queries: list[str] = []
+
+        if not do_rewrite:
+            _retain_passages(session, packet)
+            emit(
+                {
+                    "kind": "status",
+                    "stage": "reading",
+                    "detail": f"Reading {len(packet.get('passages') or [])} sources...",
+                }
+            )
+            if use_log:
+                _trim_and_append_evidence(log, packet["passages"], budget)
+            else:
+                evidence_text = render_evidence(packet)
+                messages.append(
+                    {"role": "tool", "content": f"[research results]\n{evidence_text}"}
+                )
+            emit({"kind": "tool_result", "name": "research"})
+        else:
+            # Forced rewrite round: the weak/empty evidence found above is
+            # deliberately never appended to the log (spec: don't feed the
+            # model off-topic evidence) -- only the student message (with
+            # the host note) has been appended so far.
+            wire_messages = _to_wire_messages(log.render()) if use_log else messages
+            forced = _forced_research_tool_call(llm, wire_messages, cancel=cancel)
+
+            if forced is None:
+                rewritten_queries = []
+                merged_response = _MergedResult([])
+                new_assessment = assess_evidence(user_input.text, merged_response)
+                level_after = new_assessment.level
+                # No forced call succeeded at all -- still tell the model
+                # (via a synthetic tool round) that the search came back
+                # empty, so downstream behaviour (not-found instruction)
+                # is uniform regardless of which fallback path failed.
+                synth_id = "forced-rewrite-none"
+                if use_log:
+                    log.append_assistant_tool_calls(
+                        [
+                            {
+                                "id": synth_id,
+                                "type": "function",
+                                "function": {
+                                    "name": "research",
+                                    "arguments": json.dumps({"queries": []}),
+                                },
+                            }
+                        ]
+                    )
+                else:
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": synth_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": "research",
+                                        "arguments": json.dumps({"queries": []}),
+                                    },
+                                }
+                            ],
+                        }
+                    )
+                tool_text = _not_found_tool_text(
+                    searched_for=[], level_after=level_after
+                )
+                if use_log:
+                    log.append_tool_result(tool_call_id=synth_id, content=tool_text)
+                else:
+                    messages.append(
+                        {"role": "tool", "tool_call_id": synth_id, "content": tool_text}
+                    )
+                emit({"kind": "tool_result", "name": "research", "ok": False})
+            else:
+                tool_call_id, rewritten_queries, arguments_json = forced
+                emit(
+                    {
+                        "kind": "status",
+                        "stage": "tool",
+                        "detail": f"Searching again: {', '.join(rewritten_queries)}",
+                    }
+                )
+                if use_log:
+                    log.append_assistant_tool_calls(
+                        [
+                            {
+                                "id": tool_call_id,
+                                "type": "function",
+                                "function": {"name": "research", "arguments": arguments_json},
+                            }
+                        ]
+                    )
+                else:
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": tool_call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": "research",
+                                        "arguments": arguments_json,
+                                    },
+                                }
+                            ],
+                        }
+                    )
+
+                passage_lists = []
+                for query in rewritten_queries:
+                    sub_response = research_engine.research(
+                        query, topic_hint=getattr(session, "subject_hint", None)
+                    )
+                    research_calls += 1
+                    sub_packet = _packet_from_response(sub_response)
+                    passage_lists.append(sub_packet["passages"])
+                    sub_corrected = getattr(sub_response, "corrected_terms", None) or {}
+                    corrected_terms.update(dict(sub_corrected))
+
+                merged_passages = _merge_dedupe_passages(passage_lists, _MERGE_CAP)
+                merged_response = _MergedResult(merged_passages)
+                new_assessment = assess_evidence(
+                    f"{user_input.text} {' '.join(rewritten_queries)}", merged_response
+                )
+                level_after = new_assessment.level
+
+                _retain_passages(session, {"passages": merged_passages})
+                searched_for_line = f"Searched for: {', '.join(rewritten_queries)}"
+                if level_after == "strong":
+                    evidence_text = render_evidence({"passages": merged_passages})
+                    tool_text = f"{searched_for_line}\n{evidence_text}"
+                else:
+                    tool_text = (
+                        f"{searched_for_line}\n"
+                        + _not_found_tool_text(
+                            searched_for=rewritten_queries, level_after=level_after
+                        )
+                    )
+                if use_log:
+                    log.append_tool_result(tool_call_id=tool_call_id, content=tool_text)
+                else:
+                    messages.append(
+                        {"role": "tool", "tool_call_id": tool_call_id, "content": tool_text}
+                    )
+                emit({"kind": "tool_result", "name": "research", "ok": level_after == "strong"})
+
+        evidence_summary = {
+            "level_before": level_before,
+            "level_after": level_after,
+            "rewritten_queries": rewritten_queries,
+            "corrected_terms": corrected_terms,
+        }
 
     while True:
         if cancel is not None and cancel.is_set():
@@ -354,6 +685,7 @@ def run_turn(
                 events=events,
                 uncited=uncited,
                 truncated=truncated,
+                evidence=evidence_summary,
             )
 
         # Record the assistant's tool-call turn, then dispatch each call.

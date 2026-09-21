@@ -104,6 +104,14 @@ class AppConfig:
     token budget; reusing this number avoids inventing a second one. See
     docs/citation_experiment.md, "Seed exchange A/B (2026-09-20)", for the
     unbounded-generation defect this closes."""
+    rewrite_on_weak_evidence: bool = True
+    """When the deterministic pre-search for a factual turn is assessed
+    ``weak``/``empty`` (``tutor.retrieval.assessment.assess_evidence``),
+    force one model-written query-rewrite tool call before answering
+    (see docs/rewrite_on_weak_evidence.md) rather than trusting the model
+    to volunteer a search on its own. ``False`` reproduces today's
+    behaviour byte-for-byte (see
+    tests/test_agent_loop_rewrite.py::test_setting_off_is_byte_identical)."""
 
 
 @dataclass(frozen=True)
@@ -281,6 +289,10 @@ def load_config(path: Path) -> Config:
         value = app_table.get(key, default)
         return _require_type(value, int, "app", key)
 
+    def _app_bool(key: str, default: bool) -> bool:
+        value = app_table.get(key, default)
+        return _require_type(value, bool, "app", key)
+
     def _app_path(key: str, default: str) -> Path:
         value = app_table.get(key, default)
         value = _require_type(value, str, "app", key)
@@ -296,6 +308,7 @@ def load_config(path: Path) -> Config:
         registry_path=_app_path("registry_path", "config/archives.dev.toml"),
         prompt_variant=_app_str("prompt_variant", "current"),
         answer_max_tokens=_app_int("answer_max_tokens", 2000),
+        rewrite_on_weak_evidence=_app_bool("rewrite_on_weak_evidence", True),
     )
 
     # [embedding] is optional, like [app]; when present every key is

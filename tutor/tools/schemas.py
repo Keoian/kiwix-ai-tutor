@@ -23,7 +23,7 @@ RESEARCH_TOOL: dict = {
         "parameters": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["query"],
+            "required": [],
             "properties": {
                 "query": {
                     "type": "string",
@@ -36,6 +36,18 @@ RESEARCH_TOOL: dict = {
                         "short strings, each at most 40 characters."
                     ),
                     "items": {"type": "string", "maxLength": 40},
+                    "maxItems": 3,
+                },
+                "queries": {
+                    "type": "array",
+                    "description": (
+                        "1-3 short library search queries to try instead of a "
+                        "single 'query': fix spelling, split/join fused words, "
+                        "use the standard name of the topic, and resolve "
+                        "'it'/'that' from the lesson so far."
+                    ),
+                    "items": {"type": "string", "maxLength": 80},
+                    "minItems": 1,
                     "maxItems": 3,
                 },
             },
@@ -125,9 +137,41 @@ def validate_tool_call(name: str, arguments_json: str) -> ValidationResult:
         )
 
     if name == "research":
-        error = _validate_string_field(arguments["query"], "query")
-        if error:
-            return ValidationResult(ok=False, arguments=None, error=error)
+        if "query" not in arguments and "queries" not in arguments:
+            return ValidationResult(
+                ok=False, arguments=None, error="one of 'query' or 'queries' is required"
+            )
+        if "query" in arguments:
+            error = _validate_string_field(arguments["query"], "query")
+            if error:
+                return ValidationResult(ok=False, arguments=None, error=error)
+        if "queries" in arguments:
+            queries = arguments["queries"]
+            if not isinstance(queries, list) or not all(
+                isinstance(item, str) for item in queries
+            ):
+                return ValidationResult(
+                    ok=False, arguments=None, error="'queries' must be an array of strings"
+                )
+            if not (1 <= len(queries) <= 3):
+                return ValidationResult(
+                    ok=False, arguments=None, error="'queries' must have 1 to 3 items"
+                )
+            cleaned = []
+            for item in queries:
+                stripped = item.strip()
+                if not stripped:
+                    return ValidationResult(
+                        ok=False, arguments=None, error="'queries' items must not be empty"
+                    )
+                if len(stripped) > 80:
+                    return ValidationResult(
+                        ok=False,
+                        arguments=None,
+                        error="'queries' items must be at most 80 characters",
+                    )
+                cleaned.append(stripped)
+            arguments = {**arguments, "queries": cleaned}
         if "keywords" in arguments:
             keywords = arguments["keywords"]
             if not isinstance(keywords, list) or not all(
