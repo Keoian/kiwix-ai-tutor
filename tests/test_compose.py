@@ -179,6 +179,64 @@ def test_turn_runner_maps_token_tool_citations_done_events(tmp_path):
     assert done_data["truncated"] is None
 
 
+class _CountingFakeLlm(_FakeLlm):
+    """Records every stream_chat() call so a test can assert zero calls."""
+
+    def __init__(self, events):
+        super().__init__(events)
+        self.call_count = 0
+
+    def stream_chat(self, messages, **kwargs):
+        self.call_count += 1
+        yield from super().stream_chat(messages, **kwargs)
+
+
+class _CountingFakeResearchEngine(_FakeResearchEngine):
+    def __init__(self):
+        self.call_count = 0
+
+    def research(self, query, *, topic_hint=None, keywords=None):
+        self.call_count += 1
+        return super().research(query, topic_hint=topic_hint, keywords=keywords)
+
+
+def test_turn_runner_host_topic_gate_decline_never_calls_llm_or_research(tmp_path):
+    """docs/rewrite_on_weak_evidence.md, "Host topic gate": a decline is
+    decided entirely in host code, streamed as the fixed reply with no
+    citations/attribution markers, and never touches the LLM or the
+    research engine."""
+    cfg = _cfg_with_unreachable_llm_and_missing_archives(tmp_path)
+    fake_llm = _CountingFakeLlm([])
+    fake_research = _CountingFakeResearchEngine()
+    deps = build_deps(cfg, llm=fake_llm, research_engine=fake_research)
+
+    session_id = deps.sessions.create()
+    frames = []
+
+    def emit(event_name, data):
+        frames.append((event_name, data))
+
+    cancel = threading.Event()
+    deps.turn_runner(
+        session_id,
+        _Input(kind="text", text="What's the longest human penis?"),
+        emit,
+        cancel,
+    )
+
+    names = [name for name, _ in frames]
+    assert fake_llm.call_count == 0
+    assert fake_research.call_count == 0
+    assert "attributions" not in names
+    assert names[-1] == "done"
+    done_data = frames[-1][1]
+    assert done_data["status"] == "ok"
+    assert done_data["route"] == "declined"
+    from tutor.app.topic_gate import DECLINE_REPLY
+
+    assert done_data["answer"] == DECLINE_REPLY
+
+
 def test_turn_runner_reports_repetition_truncation_on_done_event(tmp_path):
     cfg = _cfg_with_unreachable_llm_and_missing_archives(tmp_path)
     sentence = "Water boils at exactly one hundred degrees Celsius. "

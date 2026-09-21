@@ -965,3 +965,92 @@ def test_a_real_user_cancel_mid_repetition_is_still_reported_as_cancelled():
         model_writes_search=False,)
 
     assert result.status == "cancelled"
+
+
+# ---------------------------------------------------------------------------
+# Host topic gate (docs/rewrite_on_weak_evidence.md, "Host topic gate")
+# ---------------------------------------------------------------------------
+
+
+def test_host_topic_gate_decline_makes_zero_llm_and_research_calls():
+    llm = FakeLlmClient([])
+    research = FakeResearchEngine()
+    calc = FakeCalc()
+    events: list = []
+
+    result = run_turn(
+        _mk_session(),
+        _UserInput(kind="text", text="What's the longest human penis?"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=_budget(),
+        emit=events.append,
+        host_topic_gate=True,
+    )
+
+    assert result.status == "ok"
+    assert result.route == "declined"
+    from tutor.app.topic_gate import DECLINE_REPLY
+
+    assert result.answer_text == DECLINE_REPLY
+    assert result.research_calls == 0
+    assert llm.call_count == 0
+    assert research.call_count == 0
+    assert result.evidence == {
+        "level_before": "skipped",
+        "level_after": "skipped",
+        "rewritten_queries": [],
+        "corrected_terms": {},
+    }
+
+
+def test_host_topic_gate_off_reproduces_old_behaviour():
+    """``host_topic_gate=False`` must never short-circuit -- even a
+    message that would otherwise decline goes through the normal
+    pre-retrieve flow, matching today's behaviour exactly."""
+    llm = FakeLlmClient([_final_answer_script("Some answer [S1]")])
+    research = FakeResearchEngine()
+    calc = FakeCalc()
+
+    result = run_turn(
+        _mk_session(),
+        _UserInput(kind="text", text="What's the longest human penis?"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=_budget(),
+        emit=lambda e: None,
+        host_topic_gate=False,
+        model_writes_search=False,
+    )
+
+    assert result.route != "declined"
+    assert research.call_count >= 1
+
+
+def test_host_topic_gate_chat_makes_no_research_call_and_no_second_round():
+    llm = FakeLlmClient([_final_answer_script("You're welcome!")])
+    research = FakeResearchEngine()
+    calc = FakeCalc()
+
+    result = run_turn(
+        _mk_session(),
+        _UserInput(kind="text", text="lol ok thanks"),
+        llm=llm,
+        research_engine=research,
+        calc=calc,
+        budget=_budget(),
+        emit=lambda e: None,
+        host_topic_gate=True,
+    )
+
+    assert result.status == "ok"
+    assert research.call_count == 0
+    assert llm.call_count == 1
+    assert result.evidence == {
+        "level_before": "skipped",
+        "level_after": "skipped",
+        "rewritten_queries": [],
+        "corrected_terms": {},
+    }

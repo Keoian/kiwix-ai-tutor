@@ -217,6 +217,15 @@ class AppConfig:
     today's bytes exactly (system prompt unchanged, evidence-tail
     wording and status string unchanged, regardless of evidence
     level)."""
+    host_topic_gate: bool = True
+    """Owner decision (see docs/rewrite_on_weak_evidence.md, "Host topic
+    gate"): before any pre-search or LLM call, ``tutor.app.topic_gate.
+    classify_message`` decides "decline"/"chat"/"normal" in host code --
+    a small local model cannot reliably be talked out of answering a
+    jailbreak-wrapped sexual-content request, so the decline can never
+    depend on the model choosing to decline. **Default is True** --
+    ``False`` reproduces today's behaviour exactly (no gate, every
+    message goes through the normal pre-search/model flow)."""
     child_safe_body_topics: bool = True
     """Owner decision (see docs/rewrite_on_weak_evidence.md, "Questions
     about bodies, sex and growing up"): the students are the owner's own
@@ -437,6 +446,7 @@ def load_config(path: Path) -> Config:
         model_may_skip_search=_app_bool("model_may_skip_search", True),
         no_specifics_without_source=_app_bool("no_specifics_without_source", True),
         child_safe_body_topics=_app_bool("child_safe_body_topics", True),
+        host_topic_gate=_app_bool("host_topic_gate", True),
     )
 
     # [embedding] is optional, like [app]; when present every key is

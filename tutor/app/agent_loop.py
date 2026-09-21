@@ -30,20 +30,34 @@ tests/test_agent_loop.py for the authoritative list under test):
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from tutor.app.citations import _CITATION_REMINDER, extract_labels, render_evidence
+from tutor.app.llm_client import StreamEvent
 from tutor.app.prompt import PromptOverflow, render_evidence_with_reuse
 from tutor.app.repetition_guard import find_repetition_loop
+from tutor.app.topic_gate import DECLINE_REPLY, classify_reason
 from tutor.retrieval.assessment import assess_evidence
 from tutor.retrieval.hybrid.lexical import singularize, tokenize
 from tutor.tools.schemas import TOOLS, validate_tool_call
 
 RESEARCH_CAP = 2
 CALC_CAP = 4
+
+_logger = logging.getLogger(__name__)
+
+
+def _gate_verdict(text: str) -> str:
+    return classify_reason(text)[0]
+
+
+def _gate_reason(text: str) -> str:
+    return classify_reason(text)[1]
+
 
 _STUDENT_SAFE_ERROR = (
     "Sorry, I ran into a problem answering that. Please try asking again."
@@ -1385,6 +1399,7 @@ def run_turn(
     model_may_skip_search: bool = True,
     no_specifics_without_source: bool = True,
     child_safe_body_topics: bool = True,
+    host_topic_gate: bool = True,
 ) -> TurnResult:
     research_calls = 0
     timings = {
@@ -1431,6 +1446,90 @@ def run_turn(
             log.append_user(f"[action:{user_input.action}]")
         else:
             messages.append({"role": "user", "content": f"[action:{user_input.action}]"})
+    elif host_topic_gate and _gate_verdict(user_input.text) == "decline":
+        # Host topic gate (docs/rewrite_on_weak_evidence.md, "Host topic
+        # gate"): decided entirely in host code, before any pre-search or
+        # LLM call -- see tutor.app.topic_gate.classify_message for why.
+        _logger.info(
+            "host_topic_gate decline reason=%s", _gate_reason(user_input.text)
+        )
+        route = "declined"
+        if use_log:
+            log.append_user(user_input.text)
+            log.append_assistant(DECLINE_REPLY, cited_labels=[])
+        else:
+            messages.append({"role": "user", "content": user_input.text})
+            messages.append({"role": "assistant", "content": DECLINE_REPLY})
+        emit({"kind": "status", "stage": "declined", "detail": "…"})
+        emit(StreamEvent(kind="token", text=DECLINE_REPLY))
+        emit(StreamEvent(kind="done", finish_reason="stop", usage={}))
+        return TurnResult(
+            status="ok",
+            answer_text=DECLINE_REPLY,
+            route=route,
+            research_calls=0,
+            calc_calls=0,
+            events=events,
+            timings=timings,
+            evidence={
+                "level_before": "skipped",
+                "level_after": "skipped",
+                "rewritten_queries": [],
+                "corrected_terms": {},
+            },
+        )
+    elif host_topic_gate and _gate_verdict(user_input.text) == "chat":
+        # "chat" (docs/rewrite_on_weak_evidence.md, "Host topic gate"):
+        # no real content terms at all -- take the existing no-search
+        # ("skipped") path without ever calling the model to decide it,
+        # and without running the raw pre-search either.
+        route = "preretrieve"
+        if use_log:
+            log.append_user(user_input.text)
+        else:
+            messages.append({"role": "user", "content": user_input.text})
+        _tool_call_id = "host-chat-skip"
+        _arguments_json = json.dumps({"needs_search": False, "queries": []})
+        if use_log:
+            log.append_assistant_tool_calls(
+                [
+                    {
+                        "id": _tool_call_id,
+                        "type": "function",
+                        "function": {"name": "research", "arguments": _arguments_json},
+                    }
+                ]
+            )
+            log.append_tool_result(tool_call_id=_tool_call_id, content=_NO_SEARCH_TOOL_TEXT)
+        else:
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": _tool_call_id,
+                            "type": "function",
+                            "function": {"name": "research", "arguments": _arguments_json},
+                        }
+                    ],
+                }
+            )
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": _tool_call_id,
+                    "content": _NO_SEARCH_TOOL_TEXT,
+                }
+            )
+        emit({"kind": "tool_result", "name": "research", "ok": True})
+        emit({"kind": "status", "stage": "no_search", "detail": "No need to look this up..."})
+        evidence_summary = {
+            "level_before": "skipped",
+            "level_after": "skipped",
+            "rewritten_queries": [],
+            "corrected_terms": {},
+        }
     else:
         route = "preretrieve"
         has_prior_turns = _has_prior_turns(

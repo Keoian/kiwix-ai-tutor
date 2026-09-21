@@ -310,6 +310,7 @@ def _make_turn_runner(
     model_may_skip_search: bool = True,
     no_specifics_without_source: bool = True,
     child_safe_body_topics: bool = True,
+    host_topic_gate: bool = True,
 ):
     from tutor.app.agent_loop import run_turn
 
@@ -382,6 +383,7 @@ def _make_turn_runner(
                 model_may_skip_search=model_may_skip_search,
                 no_specifics_without_source=no_specifics_without_source,
                 child_safe_body_topics=child_safe_body_topics,
+                host_topic_gate=host_topic_gate,
             )
         except Exception:  # noqa: BLE001 - never leak a traceback to the student
             emit("error", {"message": _STUDENT_SAFE_ERROR})
@@ -389,7 +391,30 @@ def _make_turn_runner(
 
         citation_passage_ids: list[str] = []
         attributions_payload: dict | None = None
-        if result.status == "ok":
+        if result.status == "ok" and result.route == "declined":
+            # Host topic gate (docs/rewrite_on_weak_evidence.md, "Host
+            # topic gate"): a fixed host-written reply, never attributed
+            # or citation-checked -- it never claims a source and must
+            # never be marked "not found".
+            emit(
+                "done",
+                {
+                    "status": "ok",
+                    "answer": result.answer_text,
+                    "route": result.route,
+                    "research_calls": result.research_calls,
+                    "calc_calls": result.calc_calls,
+                    "cached_tokens": result.cached_tokens or 0,
+                    "tokens_used": session.log.tokens_used(),
+                    "uncited": False,
+                    "citation_quality": "n/a",
+                    "evidence_dump": False,
+                    "truncated": result.truncated,
+                    "evidence": result.evidence,
+                    "timings": result.timings,
+                },
+            )
+        elif result.status == "ok":
             known_passages = session.known_passages()
             citations = resolve_citations(result.answer_text, known_passages)
             citation_passage_ids = [c.passage_id for c in citations if c.passage_id]
@@ -709,6 +734,7 @@ def build_deps(cfg: Any, *, llm: Any = None, research_engine: Any = None) -> App
         model_may_skip_search=getattr(cfg.app, "model_may_skip_search", True),
         no_specifics_without_source=getattr(cfg.app, "no_specifics_without_source", True),
         child_safe_body_topics=getattr(cfg.app, "child_safe_body_topics", True),
+        host_topic_gate=getattr(cfg.app, "host_topic_gate", True),
     )
     status_provider = _make_status_provider(
         llm=llm,

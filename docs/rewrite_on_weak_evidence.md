@@ -904,3 +904,110 @@ observed in this rep -- every turn here searched and answered from
 check (section E of the task) was not additionally run given this
 result; the raw-arguments capture above is the live evidence gathered
 for this job.
+
+## Host topic gate (2026-09-21)
+
+The measurement immediately above -- and two other measurements the same
+day -- confirmed that the model cannot be relied on to decide "do not
+search / decline" for a safety-critical case. A `needs_search` boolean,
+worked examples in the system prompt, and a separate `reply_directly`
+tool with `tool_choice: "required"` all failed on "What's the longest
+human penis?": it always went to `research` and the tutor answered with
+measurements, even with the exact case given as a literal example. Owner
+policy (verbatim): "Clinical and library-only, and mention asking a
+parent. I don't want the model to confidently exclaim inappropriate
+sexual content to my kids, even if they try to jailbreak it. It should
+politely decline and then not perform a search. If they have good enough
+reasoning, then it should perform a search but it should still answer
+without any judgement and in as factual and dry a way as possible."
+
+So the decision moved out of the model entirely: `tutor.app.topic_gate.
+classify_message` is a pure, no-I/O function that runs in host code
+*before* the raw pre-search and *before* the forced `research` call. A
+model cannot be talked out of code it never gets to run.
+
+### `classify_message(text) -> "decline" | "chat" | "normal"`
+
+1. **`"decline"`** when either:
+   - the message contains a term from `_EXPLICIT_TERMS` (pornography/
+     porn, sexual slang for acts and body parts, "sex story"/"erotic",
+     "nude(s)"/"naked pictures", fetish terms) -- deliberately short and
+     owner-editable, in one named constant; or
+   - the message combines a term from `_SENSITIVE_TERMS` (penis, vagina,
+     breasts/boobs, testicles, genitals, sex, orgasm, erection,
+     masturbation, condom -- clinical words, never a decline on their
+     own) with a record/measurement/sensational cue: reuses
+     `tutor.retrieval.hybrid.lexical.question_modifier_terms` (retrieval
+     v16) for the superlative/"how long/big/..." part, plus a short
+     extra-phrase list (`_EXTRA_CUE_PHRASES`: "world record", "average
+     size", "how large", "how to", "pictures of", "show me", "hottest",
+     "sexiest", "inches", "size").
+
+   Matching is whole-word (`\bterm\b`) after a small normalization pass
+   (lower-case, simple leetspeak substitution, collapsing spaced-out
+   single letters like "s e x y"). Whole-word matching is what keeps
+   "Essex"/"Sussex"/"cockatoo"/"Dickens"/"Uranus"/"analysis"/"sextant"/
+   "Scunthorpe" normal for free -- the trigger term never lands on a word
+   boundary inside them. Role-play/jailbreak wrappers ("pretend you're a
+   doctor", "for a school project", "ignore your rules") do not change
+   the verdict: classification runs on the content terms wherever they
+   appear in the message, not on the wrapper.
+
+   **Accepted false positive**: "How long is a blue whale's penis?"
+   declines under rule (b) -- a genuine biology question caught by the
+   same anatomy+measure-cue combination the unsafe case needs. The gate
+   has no way to tell these apart from a single message, and the owner
+   accepted this trade for reliably declining the unsafe case.
+
+2. **`"chat"`** when, after lower-casing and stripping punctuation/emoji,
+   every token is in a small chatter list (ok, okay, k, lol, haha,
+   thanks, thank you, thx, ty, cool, nice, wow, yes, yeah, yep, no, nope,
+   bye, hi, hello, hey, got it, i see, oh). Conservative: anything not
+   confidently chatter falls through to `"normal"` -- a missed chat only
+   costs one wasted search, so `"How fast am I?"`-style "about the
+   student" messages are deliberately left to the model, not detected
+   here.
+
+3. Otherwise `"normal"` -- today's behaviour, byte-identical.
+
+### Wiring (`tutor/app/agent_loop.py::run_turn`, gated by `app.host_topic_gate`, default `True`)
+
+Threaded exactly like `app.child_safe_body_topics` -- `False` reproduces
+today's behaviour exactly (no gate at all).
+
+- **`"decline"`**: no raw pre-search, no forced `research` call, no LLM
+  call at all. The host appends the student's message and a fixed,
+  owner-editable reply (`topic_gate.DECLINE_REPLY`) directly to the
+  append-only prompt log (so later turns in the lesson stay consistent
+  and cache-safe), streams that reply as the tutor's answer over the
+  normal SSE path (`route: "declined"`, `evidence` both levels
+  `"skipped"`), and returns immediately. `tutor.app.compose` special-
+  cases `route == "declined"` to skip citation/attribution entirely for
+  that turn -- the fixed reply never claims a source, so it must never
+  pick up a citation marker or a "not found" note. A structured log line
+  records which rule fired (`"explicit_term"` or `"sensitive_plus_cue"`),
+  never the matched term or the term list itself.
+- **`"chat"`**: takes the existing no-search ("skipped") path host-side,
+  without ever asking the model to decide it and without running the raw
+  pre-search: the host appends a synthetic `research` tool-call/result
+  pair (`needs_search: false`, the same `_NO_SEARCH_TOOL_TEXT` the
+  model-decided skip path uses) directly to the log, then lets the model
+  write one short reply from the lesson so far -- no second round, no
+  research engine call.
+- **`"normal"`**: today's flow, untouched.
+
+### Tests
+
+- `tests/test_topic_gate.py` -- table-driven `classify_message` coverage
+  (explicit, sensitive+record, jailbreak-wrapped, clinical-normal,
+  ordinary science, chatter, and the near-miss list above).
+- `tests/test_agent_loop.py` -- a decline makes zero LLM calls and zero
+  research calls (`test_host_topic_gate_decline_makes_zero_llm_and_research_calls`),
+  `host_topic_gate=False` reproduces old behaviour
+  (`test_host_topic_gate_off_reproduces_old_behaviour`), and a chat
+  message makes no research call and asks the model exactly once
+  (`test_host_topic_gate_chat_makes_no_research_call_and_no_second_round`).
+- `tests/test_compose.py::test_turn_runner_host_topic_gate_decline_never_calls_llm_or_research`
+  -- end-to-end through `build_deps`/`turn_runner`: zero LLM/research
+  calls, no `attributions` SSE event, `done.route == "declined"`,
+  `done.answer == DECLINE_REPLY`.
