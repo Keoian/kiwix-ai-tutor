@@ -30,6 +30,7 @@ import pytest
 from tutor.app.citations import (
     Citation,
     _sentence_spans,
+    collapse_invented_links,
     extract_labels,
     find_model_source_block_ranges,
     render_evidence,
@@ -536,3 +537,59 @@ def test_sentence_spans_excludes_model_source_block_lines():
     assert not any(u.strip().startswith("[S") for u in units)
     assert any("Short answer" in u for u in units)
     assert any("longest molecule overall is titin" in u for u in units)
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-21 markdown-link fake citation (owner-reported LIVE bug, seen after
+# 8f26f82 + f0f8755 hid the plain "[Cite: [Q&A]]" / fake "Sources:" forms):
+# the model now ends an answer with a fake citation in MARKDOWN-LINK shape
+# pointing at the live internet -- this is an OFFLINE tool, the URL is
+# invented. Verbatim examples the owner saw live:
+#   [Cite: [S1]](https://en.wikipedia.org/wiki/Titin)
+#   [Cite: [S1]](https://en.wikipedia.org/wiki/Rubber)
+#   [Cite: [S1]](https://en.wikipedia.org/wiki/Vulcanization)
+# `collapse_invented_links` is the single source of truth for turning any
+# invented-label token immediately followed by a parenthesised http(s) URL
+# into either the bare real [S#] label(s) it wraps (if any) or "" (if it
+# wraps no real label) -- mirrored in tutor/ui/app.js as
+# `collapseInventedLinks`.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("[Cite: [S1]](https://en.wikipedia.org/wiki/Titin)", "[S1]"),
+        ("[Cite: [S1]](https://en.wikipedia.org/wiki/Rubber)", "[S1]"),
+        ("[Cite: [S1]](https://en.wikipedia.org/wiki/Vulcanization)", "[S1]"),
+        ("[Source](https://en.wikipedia.org/wiki/Rubber)", ""),
+        ("[Source: foo](https://example.com/x)", ""),
+        ("[S1](https://example.com/x)", "[S1]"),
+    ],
+)
+def test_collapse_invented_links_examples(raw, expected):
+    assert collapse_invented_links(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "[H2O]",
+        "[1, 2, 3]",
+        "Water boils at 100 degrees Celsius. [S1]",
+        "f(x) is defined for all reals (see above).",
+    ],
+)
+def test_collapse_invented_links_leaves_must_not_break_cases_alone(text):
+    assert collapse_invented_links(text) == text
+
+
+def test_collapse_invented_links_in_full_sentence_context():
+    sentence = (
+        "Titin is the largest known protein. "
+        "[Cite: [S1]](https://en.wikipedia.org/wiki/Titin)"
+    )
+    collapsed = collapse_invented_links(sentence)
+    assert "https://" not in collapsed
+    assert "Cite:" not in collapsed
+    assert "[S1]" in collapsed

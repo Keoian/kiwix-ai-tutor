@@ -425,6 +425,52 @@ def test_other_invented_label_fragments_are_ignored_not_flagged_unbacked():
 
 
 # ---------------------------------------------------------------------------
+# 2026-09-21 markdown-link fake citation (owner-reported LIVE bug, seen after
+# 8f26f82 + f0f8755 hid the plain "[Cite: [Q&A]]" / fake "Sources:" forms):
+# the model now ends an answer with a fake citation in MARKDOWN-LINK shape,
+# e.g. "[Cite: [S1]](https://en.wikipedia.org/wiki/Titin)" -- this is an
+# OFFLINE tool, the URL is invented. The old `_INVENTED_LABEL_RE` only
+# matches the "[Cite: [S1]]" part and leaves "(https://...)" behind, so the
+# line reads as if it carries real (garbage) claim text and gets its own
+# spurious "unbacked" marker. The line carries a REAL "[S1]" citation
+# though (nested inside the wrapper) -- it must still be attributed to S1,
+# just without the "Cite:" wrapper or URL noise counting as claim text.
+# ---------------------------------------------------------------------------
+
+
+def test_markdown_link_wrapped_real_label_is_still_attributed_not_unbacked():
+    answer = (
+        "Titin is the largest known protein. "
+        "[Cite: [S1]](https://en.wikipedia.org/wiki/Titin)"
+    )
+    passage = _passage("S1", "p1", "Titin is the largest known protein.")
+    result = attribute_sentences(answer, [passage])
+
+    # The wrapper+URL line must resolve as a real S1 citation, not land in
+    # unbacked_spans (which is what the raw "(https://...)" leftover text
+    # used to trigger before this fix).
+    assert any(a.model_cited and a.label == "S1" for a in result.attributions)
+    for u in result.unbacked_spans:
+        assert "https://en.wikipedia.org" not in answer[u.span[0] : u.span[1]]
+
+
+def test_markdown_link_wrapped_invented_label_with_no_real_citation_is_ignored():
+    # "[Source](url)" carries no real [S#] label at all -- pure invented
+    # noise, must not be flagged unbacked either.
+    answer = (
+        "Rubber is made through a process called vulcanization. "
+        "[Source](https://en.wikipedia.org/wiki/Rubber)"
+    )
+    result = attribute_sentences(answer, [])
+    all_spans = [a.sentence_span for a in result.attributions] + [
+        u.span for u in result.unbacked_spans
+    ]
+    covered = "".join(answer[s:e] for s, e in all_spans)
+    assert "https://en.wikipedia.org/wiki/Rubber" not in covered
+    assert "[Source]" not in covered
+
+
+# ---------------------------------------------------------------------------
 # 2026-09-21 real-numbered-list follow-up (owner-reported live bug B): a
 # numbered/bulleted list item that carries a real [S#] label whose passage
 # does NOT actually support the claim must still surface as unbacked (so the

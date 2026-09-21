@@ -301,6 +301,41 @@ _INVENTED_LABEL_RE = re.compile(
 )
 
 
+# 2026-09-21 markdown-link fake citation (owner-reported LIVE bug, after
+# 8f26f82 + f0f8755 hid the plain "[Cite: [Q&A]]" / fake "Sources:" forms):
+# the model now ends answers with a fake citation in MARKDOWN-LINK shape
+# pointing at the live internet -- this is an OFFLINE tool, the URL is
+# invented -- e.g. "[Cite: [S1]](https://en.wikipedia.org/wiki/Titin)".
+# `_INVENTED_LABEL_RE` alone matches only the "[Cite: [S1]]" part and
+# leaves "(https://...)" behind as apparent claim text. `_BRACKET_TOKEN_RE`
+# matches ANY top-level bracketed token (one level of nesting allowed, same
+# as "[Cite: [S1]]" above) so this catches the general shape -- "[Cite:
+# ...](url)", "[Source](url)", "[S1](url)" -- without a broad "any
+# bracket" rule: a URL suffix is required, so ordinary bracketed text like
+# "[H2O]", "[1, 2, 3]", a trailing "[S1]" with no URL, or "f(x)"/"(see
+# above)" parentheses after ordinary brackets are never touched. This is
+# the single source of truth for the pattern; tutor/ui/app.js mirrors it
+# (see `INVENTED_LINK_RE` there) -- keep the two in sync.
+_BRACKET_TOKEN_RE = r"\[(?:[^\[\]]|\[[^\[\]]*\])*\]"
+_INVENTED_LINK_RE = re.compile(_BRACKET_TOKEN_RE + r"\s*\(\s*https?://[^\s()]*\s*\)")
+
+
+def collapse_invented_links(text: str) -> str:
+    """Collapses every "invented-label-shaped bracket token immediately
+    followed by a parenthesised http(s) URL" (see ``_INVENTED_LINK_RE``) in
+    ``text`` into just the real ``[S#]`` label(s) it wraps, if any -- e.g.
+    "[Cite: [S1]](https://...)" -> "[S1]" -- or into "" if it wraps no real
+    label at all -- e.g. "[Source](https://...)" -> "". Display/analysis
+    helper only: never mutates the stored answer text itself. Mirrored in
+    tutor/ui/app.js as ``collapseInventedLinks``."""
+
+    def _replace(match: re.Match[str]) -> str:
+        labels = list(dict.fromkeys(_LABEL_RE.findall(match.group(0))))
+        return "[" + ", ".join(labels) + "]" if labels else ""
+
+    return _INVENTED_LINK_RE.sub(_replace, text)
+
+
 # 2026-09-21 model-authored source-list block (owner-reported live bug): the
 # model sometimes writes its OWN fake "Sources:" list with invented passage
 # descriptions instead of relying on the real [S#] chips the app already
@@ -516,6 +551,16 @@ def _is_short_non_claim(sentence: str) -> bool:
     # even when it does not parse as _BRACKET_ONLY_RE (nested brackets).
     if _INVENTED_LABEL_RE.sub("", s).strip() == "":
         return True
+    # A fragment that is nothing but a "[Cite: ...](url)"/"[Source](url)"
+    # style invented-link token (see collapse_invented_links) wrapping NO
+    # real [S#] label -- e.g. a bogus trailing
+    # "[Source](https://en.wikipedia.org/wiki/Rubber)" line -- carries no
+    # claim either. One that DOES wrap a real label (e.g. "[Cite:
+    # [S1]](url)") collapses to just "[S1]" here, which is left alone --
+    # `_labels_in`/the resolvable-citation path below handles it as a real
+    # citation, same as a bare trailing "[S1]".
+    if collapse_invented_links(s).strip() == "":
+        return True
     return False
 
 
@@ -612,7 +657,16 @@ def attribute_sentences(answer: str, passages: list[dict]) -> AttributionResult:
         # carry its own claim text (a real sentence or list item with an
         # inline [S#]) only counts as model_cited when at least one of its
         # labels' passages actually supports that claim.
-        has_own_claim_text = bool(tokenize(_LABEL_GROUP_RE.sub("", sentence)))
+        # 2026-09-21 markdown-link fake citation follow-up: collapse any
+        # "[Cite: [S1]](url)"/"[Source](url)" invented-link wrapper down to
+        # its bare real label(s) (or "") FIRST, so the URL/wrapper text
+        # (e.g. "en wikipedia org wiki Titin") is never mistaken for the
+        # sentence's own claim text -- otherwise a line that is really just
+        # a citation gets treated as an unsupported claim and flagged
+        # unbacked (see collapse_invented_links).
+        has_own_claim_text = bool(
+            tokenize(_LABEL_GROUP_RE.sub("", collapse_invented_links(sentence)))
+        )
         if not has_own_claim_text:
             supported_resolvable = resolvable
         else:

@@ -162,7 +162,13 @@
   // markdown rule) so that a lone "*" used as multiplication in math like
   // "3 * 4 * 5" is never mistaken for italic -- "* 4 *" has a space right
   // after/before the asterisks and must stay plain text.
-  const MARKDOWN_RE = /(\*\*([^*\n]+)\*\*)|(\*(\S(?:[^*\n]*\S)?)\*)|(`([^`\n]+)`)|(<br\s*\/?>)|(\n)/gi;
+  // This is an OFFLINE tool: a markdown LINK "[text](http...)" the model
+  // writes is never clickable or shown as a URL -- group 7/8 below renders
+  // only its plain link text (see the `match[7]` branch further down).
+  // Real, non-URL bracketed text ("[H2O]", "[S1]") never matches this
+  // alternative since it requires the "(http...)" suffix.
+  const MARKDOWN_RE =
+    /(\*\*([^*\n]+)\*\*)|(\*(\S(?:[^*\n]*\S)?)\*)|(`([^`\n]+)`)|(\[([^[\]]*)\]\(\s*https?:\/\/[^\s()]*\s*\))|(<br\s*\/?>)|(\n)/gi;
 
   // Invented, non-[S#] "citation-shaped" tokens the model sometimes tacks
   // on that are NOT real evidence labels (owner-reported live bug: a
@@ -191,6 +197,112 @@
     if (!text) return text;
     INVENTED_LABEL_RE.lastIndex = 0;
     return text.replace(INVENTED_LABEL_RE, "");
+  }
+
+  // 2026-09-21 markdown-link fake citation (owner-reported LIVE bug, seen
+  // after 8f26f82 + f0f8755 hid the plain "[Cite: [Q&A]]" / fake
+  // "Sources:" forms): the model now ends answers with a fake citation in
+  // MARKDOWN-LINK shape pointing at the live internet -- this is an
+  // OFFLINE tool, the URL is invented -- e.g. "[Cite: [S1]](http(s)://
+  // en.wikipedia.org/wiki/Titin)". Plain `INVENTED_LABEL_RE` only matches
+  // the "[Cite: [S1]]" part, leaving "(http(s)://...)" behind as apparent
+  // text, AND running `CITATION_RE` (which matches "[S1]" on its own)
+  // BEFORE this would ever run splits the real "[S1]" out from inside the
+  // wrapper first, leaving stray "[Cite: " and "](url)" fragments as
+  // literal text -- the actual owner-reported bug. So this collapse runs
+  // on the WHOLE raw text up front, before CITATION_RE ever sees it.
+  // `_BRACKET_TOKEN_SRC` matches any top-level bracketed token (one level
+  // of nesting, same shape as "[Cite: [S1]]"); a "(http...)" suffix is
+  // REQUIRED, so ordinary bracketed text ("[H2O]", "[1, 2, 3]", a bare
+  // trailing "[S1]" with no URL) is never touched. Mirrors
+  // tutor/app/citations.py's `_INVENTED_LINK_RE`/`collapse_invented_links`
+  // -- keep the two in sync.
+  const _BRACKET_TOKEN_SRC = "\\[(?:[^\\[\\]]|\\[[^\\[\\]]*\\])*\\]";
+  const INVENTED_LINK_RE = new RegExp(
+    _BRACKET_TOKEN_SRC + "\\s*\\(\\s*https?:\\/\\/[^\\s()]*\\s*\\)",
+    "g"
+  );
+  const _REAL_LABEL_RE = /S\d+/g;
+
+  // Collapses every invented-link token in `text` into the bare real
+  // "[S#]" label(s) it wraps (if any), or "" if it wraps no real label.
+  // Pure string function, no offset bookkeeping -- see
+  // `collapseInventedLinksWithTranslate` for the offset-preserving form
+  // used wherever attribution marker positions must still line up.
+  function collapseInventedLinks(text) {
+    if (!text) return text;
+    INVENTED_LINK_RE.lastIndex = 0;
+    return text.replace(INVENTED_LINK_RE, function (whole) {
+      _REAL_LABEL_RE.lastIndex = 0;
+      const labels = [];
+      let m;
+      while ((m = _REAL_LABEL_RE.exec(whole)) !== null) {
+        if (labels.indexOf(m[0]) === -1) labels.push(m[0]);
+      }
+      return labels.length ? "[" + labels.join(", ") + "]" : "";
+    });
+  }
+
+  // Same collapse as `collapseInventedLinks`, but also returns a
+  // `translate(oldPos)` mapping an offset into the ORIGINAL `text` to the
+  // matching offset in the returned (possibly shorter) display text --
+  // same contract as `stripModelSourceBlocks` below, so the two can be
+  // composed for attribution marker placement.
+  function collapseInventedLinksWithTranslate(text) {
+    if (!text) return { text: text, translate: function (p) { return p; } };
+    INVENTED_LINK_RE.lastIndex = 0;
+    let newText = "";
+    const segments = [];
+    let cursor = 0;
+    let m;
+    while ((m = INVENTED_LINK_RE.exec(text)) !== null) {
+      if (m.index > cursor) {
+        segments.push({ oldStart: cursor, oldEnd: m.index, newStart: newText.length, kept: true });
+        newText += text.slice(cursor, m.index);
+      }
+      _REAL_LABEL_RE.lastIndex = 0;
+      const labels = [];
+      let lm;
+      while ((lm = _REAL_LABEL_RE.exec(m[0])) !== null) {
+        if (labels.indexOf(lm[0]) === -1) labels.push(lm[0]);
+      }
+      const replacement = labels.length ? "[" + labels.join(", ") + "]" : "";
+      segments.push({
+        oldStart: m.index,
+        oldEnd: INVENTED_LINK_RE.lastIndex,
+        newStart: newText.length,
+        newEnd: newText.length + replacement.length,
+        kept: false,
+      });
+      newText += replacement;
+      cursor = INVENTED_LINK_RE.lastIndex;
+    }
+    if (cursor < text.length) {
+      segments.push({ oldStart: cursor, oldEnd: text.length, newStart: newText.length, kept: true });
+      newText += text.slice(cursor);
+    }
+    function translate(oldPos) {
+      let best = 0;
+      for (let k = 0; k < segments.length; k++) {
+        const seg = segments[k];
+        if (seg.kept) {
+          if (oldPos >= seg.oldStart && oldPos <= seg.oldEnd) {
+            return seg.newStart + (oldPos - seg.oldStart);
+          }
+          best = seg.newStart + Math.min(Math.max(oldPos - seg.oldStart, 0), seg.oldEnd - seg.oldStart);
+        } else {
+          if (oldPos >= seg.oldStart && oldPos <= seg.oldEnd) {
+            // A marker offset that fell inside a collapsed token (should
+            // not happen for a real sentence-boundary marker) snaps to
+            // just after the replacement rather than misplacing it.
+            return seg.newEnd;
+          }
+          best = seg.newEnd;
+        }
+      }
+      return best;
+    }
+    return { text: newText, translate: translate };
   }
 
   // 2026-09-21 model-authored source-list block (owner-reported live bug):
@@ -302,7 +414,10 @@
         container.appendChild(el("em", { text: match[4] }));
       } else if (match[5] !== undefined) {
         container.appendChild(el("code", { text: match[6] }));
-      } else if (match[7] !== undefined || match[8] !== undefined) {
+      } else if (match[7] !== undefined) {
+        // Markdown link: plain link text only, no anchor, no URL shown.
+        plain(match[8]);
+      } else if (match[9] !== undefined || match[10] !== undefined) {
         container.appendChild(el("br"));
       }
       lastIndex = MARKDOWN_RE.lastIndex;
@@ -441,6 +556,12 @@
 
   function renderTextWithCitations(container, text) {
     text = stripModelSourceBlocks(text).text;
+    // Collapse any "[Cite: [S1]](url)"/"[Source](url)" fake-citation
+    // markdown link BEFORE CITATION_RE ever scans the text -- otherwise
+    // CITATION_RE grabs the real "[S1]" out from inside the wrapper first,
+    // leaving stray "[Cite: " / "](url)" fragments as literal text (the
+    // owner-reported bug).
+    text = collapseInventedLinks(text);
     let lastIndex = 0;
     let match;
     CITATION_RE.lastIndex = 0;
@@ -891,11 +1012,17 @@
     // text, then every downstream offset (markers, citation matches, block
     // mapping) works against the returned display text instead.
     const stripped = stripModelSourceBlocks(text);
-    const displayText = stripped.text;
+    // Then collapse any "[Cite: [S1]](url)"/"[Source](url)" fake-citation
+    // markdown link (owner-reported live bug) -- composed with the
+    // source-block stripping above so a marker's offset (computed against
+    // the ORIGINAL raw text) still lands in the right place after both
+    // transforms.
+    const collapsed = collapseInventedLinksWithTranslate(stripped.text);
+    const displayText = collapsed.text;
     const markers = attributionMarkers(attributionsEvent, text)
       .map(function (m) {
         return {
-          pos: stripped.translate(m.pos),
+          pos: collapsed.translate(stripped.translate(m.pos)),
           kind: m.kind,
           passageId: m.passageId,
           sentenceText: m.sentenceText,
@@ -1771,6 +1898,8 @@
       collapseEvidenceDump: collapseEvidenceDump,
       findModelSourceBlockRanges: findModelSourceBlockRanges,
       stripModelSourceBlocks: stripModelSourceBlocks,
+      collapseInventedLinks: collapseInventedLinks,
+      collapseInventedLinksWithTranslate: collapseInventedLinksWithTranslate,
     };
   }
 })();

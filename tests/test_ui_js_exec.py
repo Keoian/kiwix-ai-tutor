@@ -215,14 +215,85 @@ def test_invented_citation_labels_are_stripped_from_rendered_text(ctx, text, str
     [
         "The formula for water is [H2O].",
         "The winning numbers were [1, 2, 3].",
-        "See the [full report](https://example.com/report) for details.",
         "The array is [S1, S2] indexed from zero.",  # real [S#] group, not invented
+        "f(x) is defined for all reals (see above).",
     ],
 )
 def test_ordinary_bracketed_text_is_never_stripped(ctx, text):
     tokens = call(ctx, f"_inlineTokens({js_str(text)})")
     reconstructed = _reconstruct(tokens)
     assert reconstructed == text
+
+
+# ---------------------------------------------------------------------------
+# (b3) markdown-link fake citation (owner-reported LIVE bug, seen after
+# 8f26f82 + f0f8755 hid the plain "[Cite: [Q&A]]" / fake "Sources:" forms):
+# the model now ends answers with a fake citation in MARKDOWN-LINK shape
+# pointing at the live internet -- this is an OFFLINE tool, the URL is
+# invented. Verbatim owner-reported examples:
+#   [Cite: [S1]](https://en.wikipedia.org/wiki/Titin)
+#   [Cite: [S1]](https://en.wikipedia.org/wiki/Rubber)
+#   [Cite: [S1]](https://en.wikipedia.org/wiki/Vulcanization)
+# Also: this is an offline UI, so ANY other markdown link the model writes
+# must render as plain link text only, never a clickable URL.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("[Cite: [S1]](https://en.wikipedia.org/wiki/Titin)", "[S1]"),
+        ("[Cite: [S1]](https://en.wikipedia.org/wiki/Rubber)", "[S1]"),
+        ("[Cite: [S1]](https://en.wikipedia.org/wiki/Vulcanization)", "[S1]"),
+        ("[Source](https://en.wikipedia.org/wiki/Rubber)", ""),
+        ("[Source: foo](https://example.com/x)", ""),
+        ("[S1](https://example.com/x)", "[S1]"),
+    ],
+)
+def test_collapse_invented_links_examples(ctx, raw, expected):
+    collapsed = call(ctx, f"module.exports.collapseInventedLinks({js_str(raw)})")
+    assert collapsed == expected
+
+
+def test_ordinary_markdown_link_renders_as_plain_text_no_url_no_anchor(ctx):
+    text = "See the [full report](https://example.com/report) for details."
+    tokens = call(ctx, f"_inlineTokens({js_str(text)})")
+    reconstructed = _reconstruct(tokens)
+    assert "https://example.com/report" not in reconstructed
+    assert "full report" in reconstructed
+    assert not any(t["tag"] == "A" for t in tokens)
+
+
+def test_markdown_link_fake_citation_examples_hidden_and_real_label_kept(ctx):
+    for url in (
+        "https://en.wikipedia.org/wiki/Titin",
+        "https://en.wikipedia.org/wiki/Rubber",
+        "https://en.wikipedia.org/wiki/Vulcanization",
+    ):
+        answer = (
+            "This is a real claim about the topic. [Cite: [S1]](" + url + ")"
+        )
+        ctx.eval("var _cite_c = document.createElement('div');")
+        ctx.eval(
+            f"module.exports.renderTextWithCitations(_cite_c, {js_str(answer)});"
+        )
+        reconstructed = call(ctx, "_cite_c.textContent")
+        assert "Cite:" not in reconstructed
+        assert url not in reconstructed
+        found = call(ctx, "_walkCollect(_cite_c)")
+        assert any("S1" in c["text"] for c in found["chips"]) or any(
+            "S1" in lbl for lbl in found["plainCitationLabels"]
+        )
+
+
+def test_markdown_link_fake_citation_with_no_real_label_is_hidden_entirely(ctx):
+    answer = "Rubber is vulcanized with sulfur. [Source](https://en.wikipedia.org/wiki/Rubber)"
+    ctx.eval("var _cite_c2 = document.createElement('div');")
+    ctx.eval(f"module.exports.renderTextWithCitations(_cite_c2, {js_str(answer)});")
+    reconstructed = call(ctx, "_cite_c2.textContent")
+    assert "https://en.wikipedia.org" not in reconstructed
+    assert "[Source]" not in reconstructed
+    assert "Source" not in reconstructed
 
 
 def test_sentence_made_only_of_invented_label_renders_no_orphan_marker(ctx):
