@@ -81,12 +81,15 @@ class AppConfig:
     port: int
     data_dir: Path
     registry_path: Path
-    prompt_variant: str = "current"
-    """Selects a prompt-assembly variant by name (default: ``"current"``,
-    today's shipped behaviour, byte-identical prompt). See
-    ``eval.system_prompt_variants.VARIANTS`` and
-    ``tutor.app.seed_exchange.SEED_EXCHANGE_VARIANT`` for the only other
-    registered value so far."""
+    prompt_variant: str = "seed_exchange_s0"
+    """Selects a prompt-assembly variant by name. Adopted 2026-09-20
+    (docs/citation_experiment.md, "Seed exchange A/B"): the seed-exchange
+    variant (``tutor.app.seed_exchange.SEED_EXCHANGE_VARIANT``) is the
+    default -- the adoption rule was met on pooled n=54
+    (cited-and-supported 0.09->0.35, evidence_dump tied at 0.04, paired
+    W19/L5/T30). ``"current"`` (today's byte-identical, unseeded prompt)
+    is still selectable, e.g. to keep old eval rows comparable. See
+    ``eval.system_prompt_variants.VARIANTS`` for the registered values."""
     answer_max_tokens: int = 2000
     """Output token cap passed as ``max_tokens`` on every generation call
     (app agent loop and eval harnesses), including tool-call rounds.
@@ -288,7 +291,7 @@ def load_config(path: Path) -> Config:
         port=_app_int("port", 8420),
         data_dir=_app_path("data_dir", "data"),
         registry_path=_app_path("registry_path", "config/archives.dev.toml"),
-        prompt_variant=_app_str("prompt_variant", "current"),
+        prompt_variant=_app_str("prompt_variant", "seed_exchange_s0"),
         answer_max_tokens=_app_int("answer_max_tokens", 2000),
     )
 

@@ -321,7 +321,10 @@ def test_session_store_create_for_lesson_seeds_when_enabled(tmp_path):
     assert len(session.log.render()) == len(build_seed_entries())
 
 
-def test_build_deps_reads_prompt_variant_off_by_default(tmp_path, monkeypatch):
+def test_build_deps_reads_prompt_variant_current_disables_seed(tmp_path, monkeypatch):
+    """``prompt_variant = "current"`` (still selectable) must run WITHOUT
+    the seed, so old rows stay comparable -- only the default changed
+    (2026-09-20 adoption), not what "current" means."""
     from tutor.app import compose as compose_mod
 
     class _FakeAppCfg:
@@ -355,4 +358,45 @@ def test_build_deps_reads_prompt_variant_off_by_default(tmp_path, monkeypatch):
 
     deps = compose_mod.build_deps(_FakeCfg(), llm=_FakeLLM(), research_engine=_FakeResearchEngine())
     assert deps.sessions._seed_exchange is False
+    deps.lessons.close()
+
+
+def test_build_deps_reads_prompt_variant_default_enables_seed(tmp_path, monkeypatch):
+    """Adopted 2026-09-20: ``seed_exchange_s0`` is now the default prompt
+    variant, so a config that never sets ``prompt_variant`` at all (using
+    ``AppConfig``'s own default) must seed new sessions."""
+    from tutor.app import compose as compose_mod
+    from tutor.settings import AppConfig
+
+    class _FakeServerCfg:
+        base_url = "http://127.0.0.1:1"
+        ctx_size = 4096
+
+    class _FakeRuntimeCfg:
+        model_path = tmp_path / "model.gguf"
+
+    app_cfg = AppConfig(
+        host="127.0.0.1",
+        port=0,
+        data_dir=tmp_path / "data",
+        registry_path=tmp_path / "archives.toml",
+    )
+
+    class _FakeCfg:
+        app = app_cfg
+        server = _FakeServerCfg()
+        runtime = _FakeRuntimeCfg()
+        embedding = None
+
+    (tmp_path / "archives.toml").write_text("", encoding="utf-8")
+
+    class _FakeLLM:
+        def count_tokens(self, text):
+            return len(text.split())
+
+    class _FakeResearchEngine:
+        pass
+
+    deps = compose_mod.build_deps(_FakeCfg(), llm=_FakeLLM(), research_engine=_FakeResearchEngine())
+    assert deps.sessions._seed_exchange is True
     deps.lessons.close()

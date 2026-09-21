@@ -451,3 +451,10 @@ against earlier baselines measured pre-e89f419.
 **Adoption rule:** pooled gate (>= 0.15 improvement, no evidence_dump_rate increase) is **MET** on
 n=54 (+0.259, dump tied). Per-run direction is **not fully consistent** (run 2 shows a small
 regression on supported_citation_rate, 0.22 -> 0.17). Default is **not changed** per instructions.
+
+**Adopted 2026-09-20:** `seed_exchange_s0` is now the default prompt variant
+(`tutor/settings.py` `AppConfig.prompt_variant`), on the pooled n=54 gate above:
+cited-and-supported 0.09 -> 0.35 (+0.259, gate is >= 0.15), evidence_dump_rate tied at 0.04, paired
+per-question 19 wins / 5 losses / 30 ties. `current` (no seed) stays selectable via
+`[app] prompt_variant = "current"` in config, and `eval.run_turn_eval --variants
+current,seed_exchange_s0` still runs `current` WITHOUT the seed so old rows stay comparable.

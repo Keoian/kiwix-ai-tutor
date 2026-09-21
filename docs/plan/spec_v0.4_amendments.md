@@ -203,9 +203,12 @@ improving by ≥ 0.15 without raising `evidence_dump_rate`.
 **Proposed addition (§7.1 or new §7.5):** "The label `S0` is reserved and never
 resolvable to a real evidence passage. An implementation may seed a new lesson's prompt
 history with a fixed synthetic example exchange using `[S0]`, to demonstrate correct
-per-sentence citation placement; if present, it is off by default pending measurement
-and part of the append-only prefix, never re-rendered or altered within a lesson."
+per-sentence citation placement; it is part of the append-only prefix, never re-rendered
+or altered within a lesson. Adopted 2026-09-20 as the default (`current`, unseeded,
+stays selectable): pooled n=54 measurement met the adoption gate --
+cited-and-supported 0.09 -> 0.35 (+0.259), evidence_dump_rate tied at 0.04, paired
+19 wins / 5 losses / 30 ties (docs/citation_experiment.md, "Seed exchange A/B")."
 
-**Why pending:** explicitly unmeasured — this amendment records the reserved-label
-mechanism as shipped, not the variant's effectiveness, which is a separate open
-measurement task.
+**Why adopted:** measured against the 18-question tuning set (3 runs, pooled n=54) and
+met the task brief's gate (>= 0.15 `supported_citation_rate` improvement, no
+`evidence_dump_rate` increase); see docs/citation_experiment.md for the full numbers.
