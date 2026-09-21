@@ -81,9 +81,13 @@ def test_app_table_defaults_when_missing(tmp_path):
     # on open questions, flattened "Tell me about X" answers in some
     # rewordings), so the default is False -- the flag stays selectable.
     assert cfg.app.concise_followup_note is False
-    # docs/followup_answer_shape.md, "Iteration 3": not yet adopted --
-    # both default to False.
-    assert cfg.app.restate_question_last is False
+    # docs/followup_answer_shape.md, "Iteration 3 / Measured", "Decision
+    # (orchestrator)": R1 (restate_question_last) adopted by default --
+    # fewer spurious "Yes," on open turns, higher backed_sentence_rate
+    # and citation rate, shorter/faster answers. R2 (restate_question_
+    # instruction) undid the "Yes," gain and cut citations, so it stays
+    # off by default.
+    assert cfg.app.restate_question_last is True
     assert cfg.app.restate_question_instruction is False
 
 

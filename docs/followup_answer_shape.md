@@ -403,3 +403,21 @@ iteration: DNA/Volcano yes/no confirmation turns and DNA turn 5 replay
 the full previous essay almost verbatim in every arm tried so far,
 including the current default -- restating the question did not change
 that; only the model's disposition to re-emit its own prior answer did.
+
+### Decision (orchestrator)
+
+Superseding the decision above with a larger live sample: the
+orchestrator's own aggregate over 20 follow-up turns per arm (baseline
+vs R1 vs R2) shows R1 (`app.restate_question_last`) clearly ahead of
+baseline -- spurious "Yes," on open turns 9/10 -> 1/10,
+`backed_sentence_rate` 0.84 -> 0.89, answers carrying an `[S#]`
+citation 0.60 -> 0.80, mean answer tokens 494 -> 342, mean wall time
+18.2s -> 14.3s, with zero not-found phrases in either arm. R2
+(`app.restate_question_instruction`) undid the "Yes," gain (back to
+8/10) and cut the citation rate to 0.30, so it is not adopted. R1 does
+**not** fix near-verbatim replay when the student re-asks the same
+question (Jaccard ~1.0 in every arm, baseline included) -- that stays
+an open problem for a future iteration. Given the larger sample now
+clears the bar the smaller one didn't, `app.restate_question_last`
+defaults to `True` as of this change; `app.restate_question_instruction`
+stays `False`.

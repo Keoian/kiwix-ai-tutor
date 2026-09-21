@@ -567,8 +567,9 @@ def test_concise_followup_note_true_opts_into_stronger_wording():
 
 
 def test_restate_question_last_off_reproduces_plain_bytes():
-    """``restate_question_last`` defaults to False and reproduces the
-    exact same tool-result bytes as before this setting existed."""
+    """``restate_question_last=False`` reproduces the exact same
+    tool-result bytes as before this setting existed (the default is
+    now True per docs/followup_answer_shape.md "Decision (orchestrator)")."""
     session, budget = _mk_session()
     llm = FakeLlmClient(
         [
@@ -590,6 +591,7 @@ def test_restate_question_last_off_reproduces_plain_bytes():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        restate_question_last=False,
     )
     run_turn(
         session,
@@ -599,6 +601,7 @@ def test_restate_question_last_off_reproduces_plain_bytes():
         calc=calc,
         budget=budget,
         emit=lambda e: None,
+        restate_question_last=False,
     )
 
     rendered = session.log.render()

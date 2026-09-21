@@ -559,7 +559,8 @@ _FOLLOWUP_CONCISE_NOTE = (
 # the resolved standalone question as the LAST thing appended to the
 # forced-rewrite round's evidence tool result, using the model's own
 # rewritten query from that same round. Gated by
-# ``app.restate_question_last`` (default False).
+# ``app.restate_question_last`` (default True; adopted, see
+# docs/followup_answer_shape.md "Decision (orchestrator)").
 _RESTATE_QUESTION_R2_INSTRUCTION = (
     "If it is a yes/no question start with Yes or No; otherwise just "
     "answer it. Add what is new; do not repeat your earlier answer."
@@ -786,7 +787,7 @@ def run_turn(
     rewrite_on_followup: bool = True,
     reuse_prior_passages: bool = True,
     concise_followup_note: bool = False,
-    restate_question_last: bool = False,
+    restate_question_last: bool = True,
     restate_question_instruction: bool = False,
 ) -> TurnResult:
     research_calls = 0

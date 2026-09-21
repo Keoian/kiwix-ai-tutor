@@ -304,7 +304,7 @@ def _make_turn_runner(
     rewrite_on_followup: bool = True,
     reuse_prior_passages: bool = True,
     concise_followup_note: bool = False,
-    restate_question_last: bool = False,
+    restate_question_last: bool = True,
     restate_question_instruction: bool = False,
 ):
     from tutor.app.agent_loop import run_turn
@@ -694,7 +694,7 @@ def build_deps(cfg: Any, *, llm: Any = None, research_engine: Any = None) -> App
         rewrite_on_followup=getattr(cfg.app, "rewrite_on_followup", True),
         reuse_prior_passages=getattr(cfg.app, "reuse_prior_passages", True),
         concise_followup_note=getattr(cfg.app, "concise_followup_note", False),
-        restate_question_last=getattr(cfg.app, "restate_question_last", False),
+        restate_question_last=getattr(cfg.app, "restate_question_last", True),
         restate_question_instruction=getattr(cfg.app, "restate_question_instruction", False),
     )
     status_provider = _make_status_provider(

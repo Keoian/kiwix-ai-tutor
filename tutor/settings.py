@@ -137,7 +137,7 @@ class AppConfig:
     resolution always sees the full passage text regardless of this
     setting -- only what is pasted into the prompt log is shortened.
     ``False`` reproduces today's behaviour byte-for-byte."""
-    restate_question_last: bool = False
+    restate_question_last: bool = True
     """On a follow-up turn's forced-rewrite round, append a one-line
     restatement of the resolved standalone question (the model's own
     rewritten query from that round) as the LAST thing in the evidence
@@ -373,7 +373,7 @@ def load_config(path: Path) -> Config:
         rewrite_on_followup=_app_bool("rewrite_on_followup", True),
         reuse_prior_passages=_app_bool("reuse_prior_passages", True),
         concise_followup_note=_app_bool("concise_followup_note", False),
-        restate_question_last=_app_bool("restate_question_last", False),
+        restate_question_last=_app_bool("restate_question_last", True),
         restate_question_instruction=_app_bool("restate_question_instruction", False),
     )
 
