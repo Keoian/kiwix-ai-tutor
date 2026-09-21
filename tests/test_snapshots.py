@@ -59,6 +59,49 @@ def test_snapshot_store_uses_wal_mode(tmp_path: Path):
         assert mode.lower() == "wal"
 
 
+def test_falls_back_to_delete_journal_when_wal_pragma_fails(
+    tmp_path: Path, monkeypatch
+):
+    """WAL needs a memory-mapped -shm file; on some ephemeral/CI filesystems
+    that mmap raises ``sqlite3.OperationalError: disk I/O error`` even though
+    ordinary reads/writes work fine (observed on ubuntu-latest GitHub
+    Actions runners). The store must not propagate that failure -- it should
+    fall back to the classic rollback journal and still be usable.
+    """
+    import sqlite3
+
+    class _FlakyConnection(sqlite3.Connection):
+        def execute(self, sql, *args, **kwargs):
+            if sql.strip().upper() == "PRAGMA JOURNAL_MODE=WAL":
+                raise sqlite3.OperationalError("disk I/O error")
+            return super().execute(sql, *args, **kwargs)
+
+    real_connect = sqlite3.connect
+
+    def _connect(*args, **kwargs):
+        kwargs["factory"] = _FlakyConnection
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", _connect)
+
+    db_path = tmp_path / "snapshots.sqlite3"
+    with SnapshotStore(db_path) as store:
+        mode = store.connection.execute("PRAGMA journal_mode").fetchone()[0]
+        assert mode.lower() == "delete"
+        passage = _FakePassage(
+            passage_id="p1",
+            archive_id="a1",
+            path="A/x",
+            title="T",
+            heading_path=("H",),
+            start=0,
+            end=3,
+            text="abc",
+        )
+        store.put(passage, fingerprint_digest=FINGERPRINT)
+        assert store.get("p1").text == "abc"
+
+
 def test_put_then_get_round_trips(tmp_path: Path):
     db_path = tmp_path / "snapshots.sqlite3"
     passage = _make_passage()

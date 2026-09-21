@@ -48,7 +48,15 @@ class SnapshotStore:
         self._lock = threading.Lock()
         self.connection = sqlite3.connect(str(Path(db_path)), check_same_thread=False)
         with self._lock:
-            self.connection.execute("PRAGMA journal_mode=WAL")
+            # WAL needs a memory-mapped -shm file; on some ephemeral/CI
+            # filesystems (e.g. certain tmpfs configurations) that mmap can
+            # fail with "disk I/O error" even though plain reads/writes are
+            # fine. Fall back to the classic rollback journal there rather
+            # than let every subsequent write on this connection fail.
+            try:
+                self.connection.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError:
+                self.connection.execute("PRAGMA journal_mode=DELETE")
             self.connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS snapshots (
