@@ -521,3 +521,66 @@ def test_list_item_with_resolvable_but_unsupporting_label_not_double_counted():
     unbacked_spans_set = {u.span for u in result.unbacked_spans}
     assert not (attributed_spans & unbacked_spans_set)
     assert len(unbacked_spans_set) == 1
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-21 fenced-code-block attribution bug (owner-reported live bug): the
+# model wrote a ```cpp fenced Arduino sketch and `attribute_sentences` split
+# its lines into "sentences", flagging `delay(1000);` as an unbacked_number
+# claim. A fenced code block must contribute NO attribution/unbacked spans
+# at all -- covered end to end here via `attribute_sentences` (the
+# span-level behaviour of `_sentence_spans` itself is covered in
+# tests/test_citations.py).
+# ---------------------------------------------------------------------------
+
+
+def test_code_block_between_prose_produces_no_attribution_or_unbacked_spans():
+    answer = (
+        "Here is a sketch that blinks an LED.\n"
+        "```cpp\n"
+        "void loop() {\n"
+        "  digitalWrite(LED, HIGH);\n"
+        "  delay(1000);\n"
+        "}\n"
+        "```\n"
+        "That is the whole program."
+    )
+    passage = _passage("S1", "p1", "An LED sketch blinks a light on and off repeatedly.")
+    result = attribute_sentences(answer, [passage])
+
+    covered_texts = [answer[a.sentence_span[0] : a.sentence_span[1]] for a in result.attributions]
+    covered_texts += [answer[u.span[0] : u.span[1]] for u in result.unbacked_spans]
+    assert not any("delay" in t for t in covered_texts)
+    assert not any("digitalWrite" in t for t in covered_texts)
+    assert not any("```" in t for t in covered_texts)
+    # No spurious unbacked_number for the code's "1000".
+    assert all(u.reason != "unbacked_number" for u in result.unbacked_spans)
+
+
+def test_code_block_at_end_of_answer_produces_no_trailing_spans():
+    answer = "Here is a sketch.\n```cpp\nvoid loop() {\n  delay(1000);\n}\n```"
+    result = attribute_sentences(answer, [])
+    covered_texts = [answer[u.span[0] : u.span[1]] for u in result.unbacked_spans]
+    covered_texts += [answer[a.sentence_span[0] : a.sentence_span[1]] for a in result.attributions]
+    assert not any("delay" in t for t in covered_texts)
+    assert all(u.reason != "unbacked_number" for u in result.unbacked_spans)
+
+
+def test_unclosed_code_fence_in_answer_produces_no_spans_for_code_content():
+    answer = "Here is a sketch.\n```cpp\nvoid loop() {\n  delay(1000);\n}\n"
+    result = attribute_sentences(answer, [])
+    covered_texts = [answer[u.span[0] : u.span[1]] for u in result.unbacked_spans]
+    covered_texts += [answer[a.sentence_span[0] : a.sentence_span[1]] for a in result.attributions]
+    assert not any("delay" in t for t in covered_texts)
+
+
+def test_number_inside_code_block_never_flagged_unbacked_number():
+    # The owner-reported live bug precisely: `delay(1000);` inside a fenced
+    # code block, with no passage backing "1000" anywhere -- must NOT
+    # produce an unbacked_number flag, since the code block produces no
+    # attribution unit at all.
+    answer = "```cpp\ndelay(1000);\n```"
+    passage = _passage("S1", "p1", "Completely unrelated passage text about something else.")
+    result = attribute_sentences(answer, [passage])
+    assert result.attributions == []
+    assert result.unbacked_spans == []

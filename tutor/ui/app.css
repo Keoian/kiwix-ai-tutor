@@ -242,6 +242,25 @@ body {
   font-weight: 700;
 }
 
+/* 2026-09-21 fenced-code-block rendering: <pre><code> for a fenced code
+   block (fence lines/language tag stripped by app.js), dark-theme safe via
+   the existing --panel-bg/--border/--text tokens. */
+.md-code {
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.8rem;
+  margin: 0.5rem 0;
+  overflow-x: auto;
+}
+
+.md-code code {
+  display: block;
+  font-family: "Consolas", monospace;
+  color: var(--text);
+  white-space: pre;
+}
+
 .calc-result {
   display: inline-block;
   margin: 0.25rem 0;

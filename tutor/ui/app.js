@@ -430,6 +430,87 @@
   const _LIST_ITEM_RE = /^\s*([-*]|\d+\.)\s+(.*)$/;
   const _HEADING_RE = /^(#{1,6})\s+(.*)$/;
 
+  // 2026-09-21 fenced-code-block rendering (owner-reported live bug): the
+  // model wrote a ```cpp fenced Arduino sketch and the safe markdown
+  // renderer had no fenced-code support at all -- the fence lines showed as
+  // literal "```cpp"/"```" text, indentation/line breaks were mangled by
+  // the inline tokenizer/paragraph-line-joiner, and the host's attribution
+  // markers landed inside the code. A fence line is 3+ of the SAME
+  // character (backtick or tilde), optionally indented, with anything else
+  // (a language tag) allowed only on the OPENING line; the CLOSING line
+  // must be nothing but that-many-or-more of the same character
+  // (surrounding whitespace aside) -- an unclosed fence runs to the end of
+  // the text. Mirrors tutor/app/citations.py's `_FENCE_LINE_RE`/
+  // `_fence_match`/`_code_block_line_ranges` -- keep the two in sync.
+  // Inline `` `code` `` (a single backtick, never 3+) inside ordinary prose
+  // is untouched -- this only matches a FENCE line, never an inline code
+  // span.
+  const _FENCE_LINE_RE = /^[ \t]*(`{3,}|~{3,})/;
+
+  function _fenceMatch(line) {
+    const m = _FENCE_LINE_RE.exec(line);
+    if (!m) return null;
+    return { char: m[1][0], count: m[1].length };
+  }
+
+  // Line-index ranges of every fenced code block in `lines`: `start`/`end`
+  // are the fence block's own line-index range (end exclusive, spanning the
+  // opening fence line through the closing fence line, or through the end
+  // of `lines` when never closed); `contentEnd` is the exclusive line-index
+  // bound of the block's CONTENT (excluding both fence lines) -- content
+  // lines run from `start + 1` to `contentEnd`. When the text ends with a
+  // trailing newline, `String.prototype.split("\n")` produces one extra
+  // empty "line" after the final newline that the model never actually
+  // wrote; an unclosed fence running all the way to the end of `lines`
+  // never counts that phantom line as code content.
+  function _codeBlockLineRanges(lines) {
+    const ranges = [];
+    const n = lines.length;
+    let i = 0;
+    while (i < n) {
+      const fence = _fenceMatch(lines[i]);
+      if (fence) {
+        let j = i + 1;
+        let closed = false;
+        while (j < n) {
+          const close = _fenceMatch(lines[j]);
+          if (
+            close &&
+            close.char === fence.char &&
+            close.count >= fence.count &&
+            lines[j].trim() === fence.char.repeat(close.count)
+          ) {
+            closed = true;
+            j++;
+            break;
+          }
+          j++;
+        }
+        let contentEnd = closed ? j - 1 : j;
+        if (!closed && contentEnd === n && n > i + 1 && lines[n - 1] === "") {
+          contentEnd = n - 1;
+        }
+        ranges.push({ start: i, end: j, closed: closed, contentEnd: contentEnd });
+        i = j;
+        continue;
+      }
+      i++;
+    }
+    return ranges;
+  }
+
+  // Appends a fenced code block as <pre><code>textContent</code></pre> --
+  // exact monospace whitespace, no inline markdown processing (bold/
+  // italic/inline-code/links), no language tag rendered as text, no
+  // attribution marker or citation chip. textContent only, same as every
+  // other node this file builds.
+  function appendCodeBlock(container, codeText) {
+    const pre = el("pre", { className: "md-code" });
+    const code = el("code", { text: codeText });
+    pre.appendChild(code);
+    container.appendChild(pre);
+  }
+
   function _splitTableRow(line) {
     let trimmed = line.trim();
     if (trimmed.startsWith("|")) trimmed = trimmed.slice(1);
@@ -477,8 +558,20 @@
   function appendMarkdownText(container, text) {
     if (!text) return;
     const lines = text.split("\n");
+    const codeRangesByStart = {};
+    _codeBlockLineRanges(lines).forEach(function (r) {
+      codeRangesByStart[r.start] = r;
+    });
     let i = 0;
     while (i < lines.length) {
+      const codeRange = codeRangesByStart[i];
+      if (codeRange) {
+        const codeLines = lines.slice(i + 1, codeRange.contentEnd);
+        appendCodeBlock(container, codeLines.join("\n"));
+        i = codeRange.end;
+        continue;
+      }
+
       const headingMatch = _HEADING_RE.exec(lines[i]);
       if (headingMatch) {
         const tag = headingMatch[1].length <= 3 ? "h3" : "h4";
@@ -529,6 +622,7 @@
         j < lines.length &&
         !_HEADING_RE.test(lines[j]) &&
         !_LIST_ITEM_RE.test(lines[j]) &&
+        !codeRangesByStart[j] &&
         !(
           _TABLE_ROW_RE.test(lines[j]) &&
           j + 1 < lines.length &&
@@ -675,9 +769,40 @@
     const lines = lo.lines;
     const starts = lo.starts;
     const n = lines.length;
+    function lineOffset(idx) {
+      return idx < n ? starts[idx] : text.length;
+    }
+    const codeRangesByStart = {};
+    _codeBlockLineRanges(lines).forEach(function (r) {
+      codeRangesByStart[r.start] = r;
+    });
     let i = 0;
     while (i < n) {
       const line = lines[i];
+
+      // Fenced code block: never a paragraph/list/table/heading -- see
+      // _codeBlockLineRanges. `codeStart`/`codeEnd` index only the CONTENT
+      // (fence lines and any language tag excluded), so attribution
+      // markers/citation chips for whatever follows the block still land
+      // at the right offset -- the block below it is mapped from the same
+      // `starts` array, untouched by this one.
+      const codeRange = codeRangesByStart[i];
+      if (codeRange) {
+        const contentStartLine = i + 1;
+        let codeStart;
+        let codeEnd;
+        if (codeRange.contentEnd <= contentStartLine) {
+          codeStart = lineOffset(contentStartLine);
+          codeEnd = codeStart;
+        } else {
+          codeStart = lineOffset(contentStartLine);
+          const lastLineIdx = codeRange.contentEnd - 1;
+          codeEnd = starts[lastLineIdx] + lines[lastLineIdx].length;
+        }
+        blocks.push({ type: "code", codeStart: codeStart, codeEnd: codeEnd });
+        i = codeRange.end;
+        continue;
+      }
 
       const headingMatch = _HEADING_RE.exec(line);
       if (headingMatch) {
@@ -744,6 +869,7 @@
         j < n &&
         !_HEADING_RE.test(lines[j]) &&
         !_LIST_ITEM_RE.test(lines[j]) &&
+        !codeRangesByStart[j] &&
         !(
           _TABLE_ROW_RE.test(lines[j]) &&
           j + 1 < n &&
@@ -830,6 +956,15 @@
   // in its LAST cell; a list item's marker(s) land at the end of the item.
   function renderBlocksToDom(container, text, blocks, citationMatches, markers, resolveLabel, makeMarkerNode) {
     blocks.forEach(function (block) {
+      if (block.type === "code") {
+        // No inline markdown, no citation chip, no attribution marker
+        // inside a fenced code block -- citationMatches/markers whose
+        // offset falls inside [codeStart, codeEnd) are simply never
+        // consumed by any block (same "dropped, not misplaced" contract as
+        // an unmappable marker elsewhere in this file).
+        appendCodeBlock(container, text.slice(block.codeStart, block.codeEnd));
+        return;
+      }
       if (block.type === "heading") {
         const heading = el(block.tag, {});
         renderInlineSegment(heading, text, block.innerStart, block.innerEnd, citationMatches, [], resolveLabel, makeMarkerNode);

@@ -97,7 +97,7 @@ def extract_labels(text: str) -> list[str]:
 
 
 def _sentences(text: str) -> list[str]:
-    return [s for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()]
+    return [s for s in _SENTENCE_SPLIT_RE.split(_strip_code_blocks(text)) if s.strip()]
 
 
 def _sentence_for_label(text: str, label: str) -> str:
@@ -566,6 +566,100 @@ _TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
 _TABLE_SEP_RE = re.compile(r"^\s*\|?(\s*:?-+:?\s*\|)+\s*:?-*:?\s*\|?\s*$")
 _LIST_ITEM_LINE_RE = re.compile(r"^\s*(?:[-*]|\d+[.)])\s+")
 
+# 2026-09-21 fenced-code-block attribution bug (owner-reported live bug): the
+# model wrote a ```cpp fenced Arduino sketch and the line-splitting sentence
+# unit logic below split its lines into "sentences" -- flagging a line like
+# "delay(1000);" as an unbacked_number claim. A fenced code block (``` or
+# ~~~, 3+ of the same character, optional language tag on the opening fence,
+# closed by a line that is nothing but 3+ of the same fence character, or
+# left open to the end of the text if never closed) is host attribution's
+# blind spot: it produces NO sentence/attribution unit at all -- not a
+# paragraph, not a list, not a table -- the exact same "skip these lines
+# entirely" treatment `_source_block_line_ranges` already gives a
+# model-authored "Sources:" block. Inline `` `code` `` (a single backtick,
+# never 3+) inside ordinary prose is untouched -- this only matches a FENCE
+# line, never an inline code span.
+_FENCE_LINE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+
+
+def _fence_match(line: str) -> tuple[str, int] | None:
+    m = _FENCE_LINE_RE.match(line)
+    if m is None:
+        return None
+    marker = m.group(1)
+    return marker[0], len(marker)
+
+
+def _code_block_line_ranges(lines: list[str]) -> list[tuple[int, int]]:
+    """Line-index ranges ``[start, end)`` of every fenced code block: the
+    opening fence line through its closing fence line (same fence
+    character, at least as many repeats, and nothing else on that line
+    besides surrounding whitespace -- a closing fence never carries a
+    language tag), or through the end of the text when the fence is never
+    closed."""
+    ranges: list[tuple[int, int]] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        fence = _fence_match(lines[i])
+        if fence is not None:
+            char, count = fence
+            j = i + 1
+            while j < n:
+                close = _fence_match(lines[j])
+                if (
+                    close is not None
+                    and close[0] == char
+                    and close[1] >= count
+                    and lines[j].strip(" \t") == char * close[1]
+                ):
+                    j += 1
+                    break
+                j += 1
+            ranges.append((i, j))
+            i = j
+            continue
+        i += 1
+    return ranges
+
+
+def _code_block_char_ranges(text: str) -> list[tuple[int, int]]:
+    """Character-offset ``(start, end)`` spans into ``text`` of every fenced
+    code block detected by ``_code_block_line_ranges``."""
+    lines = text.split("\n")
+    line_starts: list[int] = []
+    pos = 0
+    for line in lines:
+        line_starts.append(pos)
+        pos += len(line) + 1
+
+    spans: list[tuple[int, int]] = []
+    for start_idx, end_idx in _code_block_line_ranges(lines):
+        block_start = line_starts[start_idx]
+        last_line_idx = end_idx - 1
+        block_end = line_starts[last_line_idx] + len(lines[last_line_idx])
+        spans.append((block_start, block_end))
+    return spans
+
+
+def _strip_code_blocks(text: str) -> str:
+    """``text`` with every fenced code block (fences and content both)
+    removed -- used by the whole-text helpers (``_sentences``, and via it
+    ``_sentence_for_label``/``_dump_signal``) that do not need offset
+    bookkeeping. ``_sentence_spans`` (which does need offsets, for
+    ``attribute_sentences``) instead skips code-block LINES directly; see
+    there."""
+    spans = _code_block_char_ranges(text)
+    if not spans:
+        return text
+    parts = []
+    cursor = 0
+    for start, end in spans:
+        parts.append(text[cursor:start])
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)
+
 
 def _trimmed_span(text: str, s: int, e: int) -> tuple[int, int] | None:
     chunk = text[s:e]
@@ -595,8 +689,9 @@ def _sentence_spans(text: str) -> list[tuple[int, int]]:
 
     # 2026-09-21 model-authored source-list block: a heading line + the
     # label-led lines under it never become sentence/attribution units at
-    # all (see find_model_source_block_ranges).
-    skip_line_ranges = _source_block_line_ranges(lines)
+    # all (see find_model_source_block_ranges). 2026-09-21 fenced code
+    # block: same treatment -- see _code_block_line_ranges.
+    skip_line_ranges = _source_block_line_ranges(lines) + _code_block_line_ranges(lines)
 
     def _in_skip_range(idx: int) -> tuple[int, int] | None:
         for r_start, r_end in skip_line_ranges:

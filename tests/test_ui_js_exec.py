@@ -904,3 +904,137 @@ def test_chain_arithmetic_the_student_asked_for_keeps_plain_checked(ctx):
     rendered = call(ctx, "_ck.textContent")
     assert "✓ checked" in rendered
     assert "conversion checked" not in rendered
+
+
+# ---------------------------------------------------------------------------
+# (i) 2026-09-21 fenced-code-block rendering (owner-reported live bug): a
+# ```cpp fenced Arduino sketch rendered with the fence lines shown as
+# literal text, mangled indentation/line breaks, and a host attribution
+# marker landing inside the code. A fenced code block must render as
+# <pre><code> with exact whitespace, fence lines/language tag removed, and
+# no inline markdown/citation chip/attribution marker processed inside it.
+# ---------------------------------------------------------------------------
+
+_ARDUINO_CODE = "void loop() {\n  digitalWrite(LED, HIGH);\n  delay(1000);\n}"
+
+
+def test_map_blocks_code_block_between_prose_has_correct_offsets_fence_removed(ctx):
+    text = (
+        "Here is a sketch that blinks an LED.\n"
+        "```cpp\n" + _ARDUINO_CODE + "\n"
+        "```\n"
+        "That is the whole program."
+    )
+    blocks = call(ctx, f"module.exports.mapAnswerToBlocks({js_str(text)})")
+    kinds = [b["type"] for b in blocks]
+    assert kinds.count("code") == 1
+    code_block = next(b for b in blocks if b["type"] == "code")
+    code_text = text[code_block["codeStart"] : code_block["codeEnd"]]
+    assert code_text == _ARDUINO_CODE
+    assert "```" not in code_text
+    assert "cpp" not in code_text
+    # Non-code blocks (the two prose sentences) are untouched, at their
+    # correct offsets into the original text.
+    para = next(b for b in blocks if b["type"] == "paragraph")
+    assert any(
+        text[ln["start"] : ln["end"]] == "Here is a sketch that blinks an LED."
+        for ln in para["lines"]
+    )
+
+
+def test_map_blocks_code_block_at_end_of_text(ctx):
+    text = "Here is a sketch.\n```cpp\n" + _ARDUINO_CODE + "\n```"
+    blocks = call(ctx, f"module.exports.mapAnswerToBlocks({js_str(text)})")
+    code_block = next(b for b in blocks if b["type"] == "code")
+    assert text[code_block["codeStart"] : code_block["codeEnd"]] == _ARDUINO_CODE
+
+
+def test_map_blocks_unclosed_fence_runs_to_end_of_text(ctx):
+    text = "Here is a sketch.\n```cpp\n" + _ARDUINO_CODE
+    blocks = call(ctx, f"module.exports.mapAnswerToBlocks({js_str(text)})")
+    # Exactly two blocks: the intro paragraph, then the unclosed code block
+    # running to the end of the text -- nothing after it.
+    assert [b["type"] for b in blocks] == ["paragraph", "code"]
+    code_block = blocks[1]
+    assert text[code_block["codeStart"] : code_block["codeEnd"]] == _ARDUINO_CODE
+
+
+def test_render_blocks_to_dom_code_block_is_pre_code_no_markdown_or_citations(ctx):
+    text = "Intro.\n```\n**not bold** [S1] `not inline code`\n```\nOutro."
+    blocks = call(ctx, f"module.exports.mapAnswerToBlocks({js_str(text)})")
+    ctx.eval(f"var _blocks_code = {js_str(blocks)};")
+    ctx.eval(
+        f"""
+        var _container_code = document.createElement("div");
+        module.exports.renderBlocksToDom(
+          _container_code, {js_str(text)}, _blocks_code, [], [],
+          function (label) {{ return _mkSpan(); }},
+          function (m) {{ return _mkMarker("attribution-marker attribution-backed"); }}
+        );
+        """
+    )
+    tag = call(ctx, "_container_code.children[1].tagName")
+    inner_tag = call(ctx, "_container_code.children[1].children[0].tagName")
+    code_text = call(ctx, "_container_code.children[1].children[0].textContent")
+    assert tag == "pre"
+    assert inner_tag == "code"
+    assert code_text == "**not bold** [S1] `not inline code`"
+    found = call(ctx, "_walkCollect(_container_code)")
+    assert found["chips"] == []
+    assert found["markers"] == []
+    # No <strong>/<em>/inline <code> element child produced inside the code
+    # block -- only the plain text node the `code.textContent = codeText`
+    # assignment itself creates.
+    child_tags = call(
+        ctx,
+        "_container_code.children[1].children[0].children"
+        ".map(function(c){return c.tagName;}).filter(function(t){return t !== null;})",
+    )
+    assert child_tags == []
+
+
+def test_end_to_end_number_inside_code_block_not_flagged_unbacked(ctx):
+    """The owner-reported live bug itself, driven through the real Python
+    attribution pipeline: `delay(1000);` inside a fenced code block must
+    never get an unbacked-number (⚠) marker, and the code renders as a
+    plain <pre><code> block with the fence/language tag stripped."""
+    answer = (
+        "Here is a sketch that blinks an LED.\n"
+        "```cpp\n" + _ARDUINO_CODE + "\n"
+        "```\n"
+        "That is the whole program."
+    )
+    result = attribute_sentences(answer, [])
+    citations = resolve_citations(answer, [])
+
+    attributions_payload = {
+        "attributions": [
+            {
+                "sentence_span": list(a.sentence_span),
+                "passage_id": a.passage_id,
+                "model_cited": a.model_cited,
+            }
+            for a in result.attributions
+        ],
+        "unbacked": [{"span": list(u.span), "reason": u.reason} for u in result.unbacked_spans],
+        "computed": [],
+    }
+    citations_payload = {"citations": [{"label": c.label} for c in citations]}
+
+    ctx.eval("var _cc = document.createElement('div');")
+    ctx.eval(
+        "module.exports.renderAnswerWithAttribution(_cc, "
+        f"{js_str(answer)}, {js_str(attributions_payload)}, {js_str(citations_payload)});"
+    )
+    rendered = call(ctx, "_cc.textContent")
+    assert "```" not in rendered
+    assert "cpp" not in rendered
+    assert "delay(1000)" in rendered
+    found = call(ctx, "_walkCollect(_cc)")
+    assert "attribution-marker attribution-unbacked-number" not in found["markers"]
+    pre_tags = call(
+        ctx,
+        "(function(){var out=[]; (function walk(n){ if(n.tagName==='pre') out.push(n.tagName);"
+        " (n.children||[]).forEach(walk);})(_cc); return out;})()",
+    )
+    assert pre_tags == ["pre"]

@@ -708,3 +708,78 @@ def test_earlier_tutor_text_is_never_used_as_evidence():
     text = _VITUS_SENTENCE_1[:-1] + " [S1]."
     citations = resolve_citations(text, passages)
     assert citations[0].supported is False
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-21 fenced-code-block attribution bug (owner-reported live bug): the
+# model wrote a ```cpp fenced Arduino sketch and `_sentence_spans` split its
+# lines into "sentences", flagging `delay(1000);` as an unbacked_number claim.
+# A fenced code block (``` or ~~~, optional language tag, closed by a
+# matching fence line or the end of the text) must produce NO attribution
+# span at all -- not a paragraph, not a list, not a table.
+# ---------------------------------------------------------------------------
+
+
+def test_code_block_between_two_prose_sentences_produces_no_span():
+    text = (
+        "Here is a sketch that blinks an LED.\n"
+        "```cpp\n"
+        "void loop() {\n"
+        "  digitalWrite(LED, HIGH);\n"
+        "  delay(1000);\n"
+        "}\n"
+        "```\n"
+        "That is the whole program."
+    )
+    spans = _sentence_spans(text)
+    units = [text[s:e] for s, e in spans]
+    assert units == ["Here is a sketch that blinks an LED.", "That is the whole program."]
+    assert not any("delay" in u for u in units)
+    assert not any("```" in u for u in units)
+
+
+def test_code_block_at_end_of_text_produces_no_span():
+    text = "Here is a sketch.\n```cpp\nvoid loop() {\n  delay(1000);\n}\n```"
+    spans = _sentence_spans(text)
+    units = [text[s:e] for s, e in spans]
+    assert units == ["Here is a sketch."]
+
+
+def test_unclosed_code_fence_skips_to_end_of_text():
+    text = "Here is a sketch.\n```cpp\nvoid loop() {\n  delay(1000);\n}\n"
+    spans = _sentence_spans(text)
+    units = [text[s:e] for s, e in spans]
+    assert units == ["Here is a sketch."]
+
+
+def test_tilde_fence_with_language_tag_also_produces_no_span():
+    text = "Before.\n~~~python\nx = 1000\n~~~\nAfter."
+    spans = _sentence_spans(text)
+    units = [text[s:e] for s, e in spans]
+    assert units == ["Before.", "After."]
+    assert not any("1000" in u for u in units)
+
+
+def test_inline_code_in_prose_is_unaffected_by_fence_handling():
+    text = "Call `delay(1000)` inside loop() to wait one second."
+    spans = _sentence_spans(text)
+    units = [text[s:e] for s, e in spans]
+    assert units == ["Call `delay(1000)` inside loop() to wait one second."]
+
+
+def test_code_block_offsets_outside_block_remain_correct():
+    text = (
+        "First sentence here.\n"
+        "```\n"
+        "code line one\n"
+        "code line two\n"
+        "```\n"
+        "Second sentence here."
+    )
+    spans = _sentence_spans(text)
+    for start, end in spans:
+        assert text[start:end] in ("First sentence here.", "Second sentence here.")
+    # The second sentence's span must index the ORIGINAL text correctly,
+    # i.e. land after the fenced block, not be shifted by its removal.
+    second_start = text.index("Second sentence here.")
+    assert spans[-1] == (second_start, second_start + len("Second sentence here."))
