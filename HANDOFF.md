@@ -1,17 +1,18 @@
 # Handoff: offline school tutor (kiwix-ai-tutor)
 
-Written 2026-09-21, end of session (46 commits since `ec6d46d`; `git log --oneline
-ec6d46d..HEAD`). You have no prior context. Read this, then §2. The previous handoff
+Written 2026-09-21, end of session, updated late evening (commits since `ec6d46d`:
+`git log --oneline ec6d46d..HEAD`; the evening's work is `fa5b9c0..d4750b9`). You have no
+prior context. Read this, then the evening section, then §2. The previous handoff
 (this morning) is archived at `docs/HANDOFF_2026-09-21_morning.md`; before that
 `docs/HANDOFF_2026-09-20_afternoon.md`; before that `docs/HANDOFF_2026-09-19_original.md`.
 
 **You are the orchestrator. Sonnet sub-agents write the code. Tests come first.**
 
-## Do this first: real-browser verification, none of today's UI landed live
+## Do this first: real-browser verification of the daytime UI changes
 
-The owner restarted the app on `0a3ced6` and was about to test in a **real browser**.
-Nobody — not the owner, not any agent — has verified today's UI changes in a real
-browser: the status line lit continuously from Send to first token with per-stage
+**Partly done:** the owner tested in a real browser late on 2026-09-21 and the evening's
+"Did you mean X?" flow is verified end to end (see the evening section). Not yet
+explicitly confirmed by anyone: the status line lit continuously from Send to first token with per-stage
 timings (`7a5de27`, `8d769e8`), the seconds counter, the new "conversion checked" wording
 (`fe67847`), hidden fake `[S#]`/`[Sources: ...]` labels (`8f26f82`, `334b7ab`, `f0f8755`),
 and the host-decline reply path (`2827e69`, `route: "declined"`). Only JS *logic* runs
@@ -246,6 +247,12 @@ included.
 | llama-server :8080 | Ling 3.0 Tiny running (Granite stopped), one slot (`parallel=1`) |
 | Tutor app :8420 | The owner's — **never stop it**. For measurement, start a second instance on another port (pattern: `config/dev.soak8421.toml`-style, see `docs/attribution_measure.md`) |
 | Dense index | `runtime/simplewiki_dense/` — still stale, unchanged |
+
+Evening-session scratch scripts in `data/` (gitignored): `data/ardweeno_probe.py`
+(retrieval only, no LLM), `data/ardweeno_forced.py` (lesson sessions ×3 in one process),
+`data/ardweeno_bare.py` (bare `/api/session` sessions — mirrors a browser refresh),
+`data/ardweeno_framings.py` (clarify-prompt framing comparison, 16 misspellings),
+`data/ardweeno_raw*.py` (raw chat-completion probes).
 
 Scratch measurement scripts worth keeping in `data/` (gitignored, not committed):
 `data/ling_cache_probe.py`, `data/ling_check.py`, `data/ling_forced_raw.py`,
