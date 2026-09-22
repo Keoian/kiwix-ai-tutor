@@ -9,13 +9,13 @@ re-indexed. See docs/bundle_and_passages.md for the schema and
 
 from __future__ import annotations
 
-import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from tutor.retrieval._sqlite_retry import connect_store
 from tutor.retrieval._sqlite_retry import execute_with_retry as _execute_with_retry
 
 _HEADING_PATH_SEP = "\x1f"
@@ -48,17 +48,8 @@ class SnapshotStore:
 
     def __init__(self, db_path: Path) -> None:
         self._lock = threading.Lock()
-        self.connection = sqlite3.connect(str(Path(db_path)), check_same_thread=False)
+        self.connection = connect_store(db_path)
         with self._lock:
-            # WAL needs a memory-mapped -shm file; on some ephemeral/CI
-            # filesystems (e.g. certain tmpfs configurations) that mmap can
-            # fail with "disk I/O error" even though plain reads/writes are
-            # fine. Fall back to the classic rollback journal there rather
-            # than let every subsequent write on this connection fail.
-            try:
-                _execute_with_retry(self.connection, "PRAGMA journal_mode=WAL")
-            except sqlite3.OperationalError:
-                _execute_with_retry(self.connection, "PRAGMA journal_mode=DELETE")
             _execute_with_retry(
                 self.connection,
                 """

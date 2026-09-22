@@ -15,12 +15,12 @@ matching the pattern in ``tutor.retrieval.snapshots.SnapshotStore``.
 from __future__ import annotations
 
 import json
-import sqlite3
 import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from tutor.retrieval._sqlite_retry import connect_store
 from tutor.retrieval._sqlite_retry import execute_with_retry as _execute_with_retry
 
 
@@ -55,12 +55,8 @@ class Profile:
 class ProfileStore:
     def __init__(self, db_path: Path) -> None:
         self._lock = threading.Lock()
-        self.connection = sqlite3.connect(str(Path(db_path)), check_same_thread=False)
+        self.connection = connect_store(db_path)
         with self._lock:
-            try:
-                _execute_with_retry(self.connection, "PRAGMA journal_mode=WAL")
-            except sqlite3.OperationalError:
-                _execute_with_retry(self.connection, "PRAGMA journal_mode=DELETE")
             _execute_with_retry(
                 self.connection,
                 """
