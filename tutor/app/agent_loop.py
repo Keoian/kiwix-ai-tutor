@@ -1521,8 +1521,10 @@ def _clarify_describe_text(word: str) -> str:
 
 
 # A pending-clarify reply of at least this many words is treated as a
-# description of the thing (vs. a re-typed word like "arduino").
-_CLARIFY_DESCRIPTION_MIN_WORDS = 4
+# description of the thing (vs. a re-typed word like "arduino" or
+# "raspberry pi"). Owner's live lesson 2026-09-21: "its a computer" (3
+# words) is a description and must re-offer, not fall through.
+_CLARIFY_DESCRIPTION_MIN_WORDS = 3
 
 
 def _clarify_still_text(word: str, candidate: str) -> str:

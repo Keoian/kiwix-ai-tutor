@@ -85,7 +85,10 @@ dead-ended. Removed; the host owns this now.
    answer confidently invented "Ardweeno is a custom firmware image for the Raspberry
    Pi 4 B". The assessor certifies "strong" when the unknown head term is absent from
    every passage — that co-occurrence check should require the head noun.
-3. The pre-search on "what is ardweeno" corrected the model's own `ardweno`→`arduino`
+3. **Code blocks get sentence attribution marks** (owner's live lesson: `delay(1000);⚠`
+   flagged as an unbacked number inside a ```cpp block). Attribution should skip fenced
+   code entirely.
+4. The pre-search on "what is ardweeno" corrected the model's own `ardweno`→`arduino`
    (run 2 in the owner's browser) and still answered "not found" — unexplained.
 
 ## Owner decisions today (2026-09-21)

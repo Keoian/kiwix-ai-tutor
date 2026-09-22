@@ -465,7 +465,7 @@ def test_description_pointing_at_same_candidate_reoffers_it_and_keeps_pending():
 
     result = run_turn(
         session,
-        _UserInput(kind="text", text="it is a little computer you plug lights into"),
+        _UserInput(kind="text", text="its a computer"),  # 3 words: owner's live case
         llm=llm,
         research_engine=research,
         calc=FakeCalc(),
@@ -482,7 +482,7 @@ def test_description_pointing_at_same_candidate_reoffers_it_and_keeps_pending():
     assert research.calls == []
     first_call_note = llm.calls[0][-1]["content"]
     assert "they answered" in first_call_note
-    assert '"it is a little computer you plug lights into"' in first_call_note
+    assert '"its a computer"' in first_call_note
 
 
 def test_short_retyped_word_with_no_new_candidate_becomes_a_fresh_turn():
