@@ -100,6 +100,76 @@ real collaborators (`tutor.app.llm_client.LlamaClient`,
 `tutor.retrieval.research.ResearchEngine`, `tutor.tools.calc_tool`) are
 wired in by the production app entry point, not by this module.
 
+## Turn pipeline as of 2026-09-21
+
+With today's settings all at their new defaults (`app.host_topic_gate`,
+`app.model_writes_search`, `app.model_may_skip_search`,
+`app.reuse_prior_passages`, `app.restate_question_last`,
+`app.no_specifics_without_source`, `app.child_safe_body_topics`), one
+free-text turn runs through these stages in order:
+
+1. **Host topic gate** (`tutor.app.topic_gate.classify_message`, gated by
+   `app.host_topic_gate`) — pure, no-I/O classification of the raw
+   student message into `"decline" | "chat" | "normal"`, before any
+   search or LLM call. A `"decline"` verdict short-circuits the rest of
+   this pipeline entirely: the host appends a fixed reply to the log and
+   returns, zero LLM calls, zero research calls. A `"chat"` verdict skips
+   straight to step 7 with a synthetic no-search tool result. Only
+   `"normal"` continues to step 2.
+2. **Raw pre-search** — the deterministic word-match pre-retrieve against
+   the student's raw text always runs here (for cache/ordering reasons),
+   but its result is discarded rather than used whenever
+   `app.model_writes_search` is on and the forced call below produces
+   something usable.
+3. **Forced research call** (`app.model_writes_search`) — the model is
+   asked, in one tool call, for an optional `question` (the turn restated
+   as a standalone question, referents resolved), `queries` (short
+   title-like search strings), and — when `app.model_may_skip_search` is
+   on — a `needs_search` boolean. The decision table in
+   `_run_forced_rewrite_round`/`run_turn` resolves this into skip
+   (`needs_search: false`), search-by-question (no queries but a usable
+   question), search-by-queries (the normal case), or fall back to the
+   turn's own raw pre-search result (no queries, no question).
+4. **Merge / relabel** — the forced round's results are RRF-merged with
+   any earlier evidence and relabelled `[S#]` without duplicates
+   (`5db7277`).
+5. **Reuse pointers** (`app.reuse_prior_passages`) — evidence already
+   held from an earlier turn in the same lesson is referenced by a
+   pointer line instead of re-pasted in full, cutting prompt tokens
+   (~16% by turn 6 in measurement).
+6. **Evidence tail by level + restate line** — the tool-result text the
+   model sees differs by evidence level (`strong` / `weak` / `empty` /
+   `skipped`); `app.no_specifics_without_source` adds a no-invented-
+   specifics line to every level including `strong`.
+   `app.restate_question_last` appends the model's own resolved
+   `question` (or nothing, if none was supplied) as a `(meaning: ...)`
+   clause at the very end of the turn, after the evidence, so the model
+   answers the actual current question rather than drifting onto its own
+   search topic.
+7. **Answer** — the model's real reply, generated once evidence/tail (or
+   the topic-gate's synthetic chat/decline result) is in place.
+8. **Host attribution / specifics gate / computed check** — sentence-
+   level attribution (`attribute_sentences`) marks each sentence found/
+   not-found/unbacked/computed independently of the model's own labels;
+   the specifics gate (`is_supported`) requires every number/name a
+   sentence states to appear verbatim in this turn's evidence once the
+   sentence states a specific at all; `computed_check` re-verifies stated
+   arithmetic and never fails the turn outright even on bad input
+   (Unicode minus signs, `bfb9954`).
+9. **Done event with timings** — the SSE `done` event carries
+   `route` (`"declined"` / `"action"` / `"preretrieve"` /
+   `"preretrieve+followup"`), `evidence` levels before/after
+   (including the `"skipped"` value), and the `timings` dict used for
+   all latency measurement (the only reliable per-stage timing source —
+   `TestClient`-buffered SSE per-event timestamps are not).
+
+The settings switching each stage: `app.host_topic_gate` (1),
+`app.model_writes_search` + `app.model_may_skip_search` (3),
+`app.reuse_prior_passages` (5), `app.no_specifics_without_source` +
+`app.child_safe_body_topics` + `app.restate_question_last` (6),
+`app.model_writes_citations` (whether the answer round asks for `[S#]`
+labels at all, no longer on by default).
+
 The system prompt used to build the first message of every turn lives at
 `tutor/app/system_prompt.txt` (packaged via `pyproject.toml`
 `[tool.setuptools.package-data]`): it instructs the model to teach rather

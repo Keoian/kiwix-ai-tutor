@@ -91,6 +91,51 @@ package: the reference numbers above already exist, and re-running
 prefill-heavy benchmarks can take tens of minutes at this context size),
 which this work package's scope does not require.
 
+## Ling 3.0 Tiny (2026-09-21)
+
+Made the default dev model this session (owner: "Let's set default to
+Ling") — `config/dev.toml` is now this profile; the prior default,
+Granite 4.0 H-Tiny, moved to `config/dev.granite.toml` as the fallback.
+Config: `config/dev.ling.toml` — inclusionAI Ling 3.0 Tiny (7.9B total /
+1.3B active MoE, hybrid linear attention, MIT licence), bartowski
+Q4_K_M GGUF (4.92 GB), `ctx_size` 32768, `parallel = 1`,
+`cache_type_k`/`cache_type_v` q8_0, `n_gpu_layers` 99, `flash_attn` true.
+
+**Thinking off**: added via `extra_args = ["--reasoning-budget", "0"]`,
+not the JSON `--chat-template-kwargs` form. A tutor turn must not spend
+hundreds of hidden reasoning tokens before answering. **PowerShell
+quoting pitfall**: the JSON kwargs form (e.g.
+`--chat-template-kwargs '{"thinking": false}'`) loses its quotes when
+Windows PowerShell 5.1 passes it through to the native `llama-server.exe`
+(via `scripts/serve_dev.ps1`), and the server then refuses to start. The
+flag form (`--reasoning-budget 0`) sidesteps this entirely and is what
+`config/dev.ling.toml` uses.
+
+**Measured this session, this dev machine only** (not the delivery Dell
+laptop, GTX 1060 Max-Q 6 GB — unverified there):
+
+- ~4.63 GiB model share of VRAM at 32K context.
+- ~25 tok/s writing (generation).
+- ~40-200 tok/s reading (prompt processing; varies with prompt depth).
+- Mixed K/V cache types were refused by this build when tried; not
+  independently re-verified with numbers in a doc, so treat this as an
+  observation, not a measured table row.
+- `cached_tokens` was confirmed to grow monotonically call-over-call
+  within a lesson once the tools schema was unified to one byte-identical
+  `research` schema per call (`84f24a6`) — before that fix, the forced
+  round and the answer round sent different schemas and the whole lesson
+  had to be re-read from scratch every call.
+- Live smoke (`data/ling_skip_smoke.py`) found Ling's `needs_search`
+  decision inconsistent rep-to-rep and never populating the optional
+  `question` field at all in the reps recorded — see
+  `docs/rewrite_on_weak_evidence.md` for the full negative-result
+  writeup; this is why the host topic gate (`tutor.app.topic_gate`) now
+  makes the decline/chat decision in host code instead of relying on the
+  model.
+- Normal turns run roughly 30-40s end to end on this machine
+  (prefill-bound: ~9s for the forced call, ~12-25s reading evidence) —
+  not verified on the Dell.
+
 ## Inferred / not directly observed
 
 - Exact Vulkan device name string was not captured in this run's log (see
