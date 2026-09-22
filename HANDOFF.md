@@ -10,17 +10,31 @@ prior context. Read this, then the evening section, then §2. The previous hando
 
 ## Do this first: real-browser verification of the daytime UI changes
 
-**Partly done:** the owner tested in a real browser late on 2026-09-21 and the evening's
-"Did you mean X?" flow is verified end to end (see the evening section). Not yet
-explicitly confirmed by anyone: the status line lit continuously from Send to first token with per-stage
-timings (`7a5de27`, `8d769e8`), the seconds counter, the new "conversion checked" wording
-(`fe67847`), hidden fake `[S#]`/`[Sources: ...]` labels (`8f26f82`, `334b7ab`, `f0f8755`),
-and the host-decline reply path (`2827e69`, `route: "declined"`). Only JS *logic* runs
-under pytest (`tests/test_ui_js_exec.py`); the orchestrator's browser tools cannot reach
-the owner's `127.0.0.1`. The orchestrator verified `0a3ced6` (the state the owner is
-testing) with a full `python -m pytest -q` — **rc=0, live tests included** — and
-`ruff check .` clean. Wait for the owner's report and fix what they find; do not assume
-green tests mean the browser experience is right.
+**Owner-confirmed (2026-09-22):** the "Did you mean X?" flow, both branches. Still not
+explicitly confirmed by anyone: the status line lit continuously from Send to first token
+with per-stage timings (`7a5de27`, `8d769e8`), the seconds counter, the new "conversion
+checked" wording (`fe67847`), hidden fake `[S#]`/`[Sources: ...]` labels (`8f26f82`,
+`334b7ab`, `f0f8755`), and the host-decline reply path (`2827e69`, `route: "declined"`).
+Only JS *logic* runs under pytest (`tests/test_ui_js_exec.py`); the orchestrator's browser
+tools cannot reach the owner's `127.0.0.1`. Do not assume green tests mean the browser
+experience is right.
+
+## Session 2026-09-22 (morning): fenced code + no internet lookups
+
+- **Owner confirmed** the "Did you mean X?" flow live; finding 5 below closed by the owner.
+- `7a3259d` **Fenced code blocks are opaque to attribution and rendered as code.**
+  `citations.py`: ``` / ~~~ fences (any language tag, closed or unclosed) produce no
+  attribution spans and are stripped before any sentence split. `tutor/ui/app.js`: a
+  fenced block renders as `<pre><code>` (textContent only, fence lines and tag removed,
+  exact whitespace), with no markers, chips or inline markdown inside; offsets after the
+  block still line up. CSS in `app.css`. Tests in `test_citations.py`,
+  `test_attribution.py`, `test_ui_js_exec.py` (i). **Not yet checked in a real browser.**
+- `6ad9fec` **The tutor never sends the student to the internet.** New rule in
+  `system_prompt.txt` (assembled prompt ~1998 of 2000 tokens — no headroom left);
+  `_NAMES_NUMBERS_SECTION` and the empty-evidence `_not_found_tool_text` now suggest "a
+  related topic in this library to ask about next" or a teacher/parent. Guarded by
+  `tests/test_system_prompt_offline.py`. Attribution still marks a "website" sentence
+  by word overlap — if the model ignores the rule, that sentence can still show ●.
 
 ## Evening session (2026-09-21): host-driven "Did you mean X?" for unknown words
 
@@ -78,26 +92,27 @@ produced the right *shape* with useless content ("did you mean 'ardeweno'?") and
 model-side "did you mean Arduino?" questions the host had no state for, so "yeah"
 dead-ended. Removed; the host owns this now.
 
-**Findings for the next session (not fixed):**
-1. **A page refresh calls `POST /api/session`, which creates a bare session with no
+**Findings from the evening session — status as of 2026-09-22:**
+1. **OPEN. A page refresh calls `POST /api/session`, which creates a bare session with no
    lesson** — turns are never persisted (`data/lessons.sqlite` had 15 lessons, 0 turns),
    no seed exchange, no profile summary. "New lesson" only inserts a lesson row and
    never switches the chat to it (owner: "seemingly doesn't do anything"). Owner also
    wants lessons **named** (dozens of "general" rows, no rename). UI job.
-2. **Worst-case output observed live:** with the clarify gate failing, the normal path on
-   "what is ardweeno" (turn 3 of the bare probe) had the model write queries
-   `Ardweeno Raspberry Pi`, the assessor rated the Raspberry Pi hits **strong**, and the
-   answer confidently invented "Ardweeno is a custom firmware image for the Raspberry
-   Pi 4 B". The assessor certifies "strong" when the unknown head term is absent from
-   every passage — that co-occurrence check should require the head noun.
-3. **Code blocks get sentence attribution marks** (owner's live lesson: `delay(1000);⚠`
-   flagged as an unbacked number inside a ```cpp block). Attribution should skip fenced
-   code entirely.
-4. A "look it up on the official Arduino website" suggestion was marked ● (backed) because
-   "Arduino" is in the evidence — but the student has no internet. Same attribution pass
-   as item 3.
-5. The pre-search on "what is ardweeno" corrected the model's own `ardweno`→`arduino`
-   (run 2 in the owner's browser) and still answered "not found" — unexplained.
+2. **OPEN. Worst-case output observed live:** with the clarify gate failing, the normal
+   path on "what is ardweeno" had the model write queries `Ardweeno Raspberry Pi`, the
+   assessor rated the Raspberry Pi hits **strong**, and the answer confidently invented
+   "Ardweeno is a custom firmware image for the Raspberry Pi 4 B". The assessor certifies
+   "strong" when the unknown head term is absent from every passage — that co-occurrence
+   check should require the head noun.
+3. **FIXED 2026-09-22** (see the 2026-09-22 section): fenced code blocks got sentence
+   attribution marks (`delay(1000);` flagged as an unbacked number inside a ```cpp
+   block) and the UI had no fenced-code rendering at all.
+4. **FIXED 2026-09-22** (prompt wording): the tutor suggested "look it up on the official
+   Arduino website" — the student has no internet. Every "look up next" instruction now
+   frames the suggestion as a topic in this library, with an explicit no-internet rule.
+5. **RESOLVED (owner, 2026-09-22):** the pre-search correcting `ardweno`→`arduino` and
+   still answering "not found" — the owner reports this no longer reproduces after the
+   clarify work; not investigated further.
 
 **Bonsai 2 27B on this machine (2026-09-21, late):** the owner's `C:\gitonsai2` launcher
 failed at 32K context (`ErrorOutOfDeviceMemory` on the KV cache — 5.54 GB weights on the
