@@ -255,6 +255,18 @@ class AppConfig:
     invented-label hiding all keep working unchanged. **Default is
     False** -- ``True`` reproduces today's bytes exactly (citation-label
     instruction present in the system prompt and evidence tails)."""
+    clarify_unknown_words: bool = True
+    """Owner request 2026-09-21: students are children who spell
+    phonetically ("ardweeno" for Arduino) -- retrieval's own edit-distance
+    spelling fallback cannot reach these. When the raw pre-search on a
+    normal text turn reports ``response.unknown_terms`` and the assessed
+    evidence is not ``strong``, the host (not the model) runs a short,
+    prompt-cache-friendly clarify LLM call asking what the student most
+    likely meant, gates the answer against the library
+    (``tutor.app.clarify``), and if it gates, asks the student a plain
+    "Did you mean X?" question instead of running the forced search/answer
+    rounds for that turn. **Default is True** -- ``False`` reproduces
+    today's bytes exactly (the clarify step never runs)."""
 
 
 @dataclass(frozen=True)
@@ -463,6 +475,7 @@ def load_config(path: Path) -> Config:
         child_safe_body_topics=_app_bool("child_safe_body_topics", True),
         host_topic_gate=_app_bool("host_topic_gate", True),
         model_writes_citations=_app_bool("model_writes_citations", False),
+        clarify_unknown_words=_app_bool("clarify_unknown_words", True),
     )
 
     # [embedding] is optional, like [app]; when present every key is

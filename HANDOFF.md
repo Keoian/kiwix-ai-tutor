@@ -21,6 +21,73 @@ testing) with a full `python -m pytest -q` — **rc=0, live tests included** —
 `ruff check .` clean. Wait for the owner's report and fix what they find; do not assume
 green tests mean the browser experience is right.
 
+## Evening session (2026-09-21): host-driven "Did you mean X?" for unknown words
+
+**Trigger case (owner, live):** "what is a ardweeno" (= Arduino) got "I couldn't find
+anything". Root cause was NOT the retrieval-v16 filter changes: `ardweeno`→`arduino` is
+Damerau distance 3 (spelling fallback ceiling is 2) and Arduino never enters the
+title-suggest candidate pool (every prefix down to `ardw` suggests nothing; `ard` returns
+20 titles without it). And Ling, inside the tutor prompt with thinking off, does not
+recognise the word (it proposed "ardeweno"/"ardwolf"/"Arctic tern" depending on framing).
+
+**What landed (uncommitted at the time of writing — see git log for the commit):**
+- `ResearchResponse.unknown_terms` (`tutor/retrieval/research.py`): zero-match content
+  terms that neither the spelling nor the compound fallback could fix. Verified on the
+  real archives: `ardweeno`, `fotosinthesis`, `vaxeens`, `conputer` flagged; `arduino` not.
+- `tutor/app/clarify.py` + `agent_loop.py` (`app.clarify_unknown_words`, default True):
+  after the raw pre-search, if the first unknown term has non-strong evidence, the host
+  asks the model ONE constrained question in a **fixed, system-less, single-message
+  context** (`A kid typed: "<msg>". The word '<w>' is misspelled. Which real thing did
+  they most likely mean by it? Reply exactly as: NAME | five-word description.`), then a
+  bare-word framing as a second try. A candidate is only offered if the library has an
+  article with that exact title (checked via `research_engine.research(name)` — no zim
+  import). Reply is host-written: `I don't know the word "ardweeno". Did you mean
+  Arduino, <description>? Say yes, or type the right word — or say no and tell me what
+  it is.` Route `clarify`, ~1–2 s, no search, no answer round.
+- Pending-state handling on the next turn: clean yes/no matched by a tiny host list
+  (`clarify.classify_reply`; legitimate because the host itself asked a yes/no question —
+  not a follow-up detector). "yes" → the normal turn runs on the message with the word
+  replaced ("what is Arduino"). "no" → "OK. Tell me what a "ardweeno" is or does, in your
+  own words." Anything else (a description, "no its the thing for robots", a re-typed
+  word) → re-ask the model with the owner's framing *You asked the kid "Did you mean
+  Arduino…?" and they answered "…"*: a new gated candidate → ask again (max 2 offers);
+  the same candidate from a ≥4-word description → re-offer it once ("From that, the
+  closest thing in the library is still Arduino. Say yes…"); a short reply → fresh normal
+  turn (so typing "arduino" just works). A given-up word is remembered per lesson so the
+  fallback turn does not immediately re-ask.
+- `tutor/app/main.py`: `tutor.*` loggers now emit INFO when run directly, so the terminal
+  shows `presearch unknown_terms=[...]` and `clarify word=... raw=... -> ...` per turn.
+
+**Why the fixed context (measured, `data/ardweeno_framings.py`):** the owner saw it work
+once and fail twice in a browser. Mirrored exactly (`data/ardweeno_bare.py`: bare
+`/api/session` sessions ×3 in one process) — the clarify call, when it rode the lesson
+log, returned `Arduino` in a lesson session (seed exchange present) and `Ardenna | A
+seabird` in a bare session; 16 kid misspellings × 3 framings: sentence framing with NO
+system prompt gated 11/16 real titles, the same framing under a one-line system prompt
+lost `ardweeno`. After the change: bare sessions 3/3, lesson sessions 3/3, and the
+no→describe→re-offer→"yeah" branch resolves to a real Arduino answer.
+
+**Prompt wording attempt that was tried and reverted:** telling the model in the
+weak/empty tool text and a system-prompt bullet to ask "Did you mean X?" itself. Live it
+produced the right *shape* with useless content ("did you mean 'ardeweno'?") and, worse,
+model-side "did you mean Arduino?" questions the host had no state for, so "yeah"
+dead-ended. Removed; the host owns this now.
+
+**Findings for the next session (not fixed):**
+1. **A page refresh calls `POST /api/session`, which creates a bare session with no
+   lesson** — turns are never persisted (`data/lessons.sqlite` had 15 lessons, 0 turns),
+   no seed exchange, no profile summary. "New lesson" only inserts a lesson row and
+   never switches the chat to it (owner: "seemingly doesn't do anything"). Owner also
+   wants lessons **named** (dozens of "general" rows, no rename). UI job.
+2. **Worst-case output observed live:** with the clarify gate failing, the normal path on
+   "what is ardweeno" (turn 3 of the bare probe) had the model write queries
+   `Ardweeno Raspberry Pi`, the assessor rated the Raspberry Pi hits **strong**, and the
+   answer confidently invented "Ardweeno is a custom firmware image for the Raspberry
+   Pi 4 B". The assessor certifies "strong" when the unknown head term is absent from
+   every passage — that co-occurrence check should require the head noun.
+3. The pre-search on "what is ardweeno" corrected the model's own `ardweno`→`arduino`
+   (run 2 in the owner's browser) and still answered "not found" — unexplained.
+
 ## Owner decisions today (2026-09-21)
 
 - **One student at a time, one offline machine; the server IS the interactive machine.**

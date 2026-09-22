@@ -314,6 +314,29 @@ def _own_term_count(query: str) -> int:
     return len(frozenset(tokenize(strip_instruction_words(query))))
 
 
+def _merge_unknown_terms(per_archive: list[list[str]]) -> list[str]:
+    """Intersect each consulted archive's unresolved-zero-match terms (see
+    ``_process_archive``'s ``unknown_terms_out``): a term counts as unknown
+    for the whole request only if every archive that was consulted also
+    failed to resolve it -- one archive knowing the word suffices to drop
+    it. Order-preserving (first occurrence across archives) and
+    deduplicated, matching ``zero_terms``'s own lower-case terms.
+    """
+    if not per_archive:
+        return []
+    common = set(per_archive[0])
+    for terms in per_archive[1:]:
+        common &= set(terms)
+    seen: set[str] = set()
+    merged: list[str] = []
+    for terms in per_archive:
+        for t in terms:
+            if t in common and t not in seen:
+                seen.add(t)
+                merged.append(t)
+    return merged
+
+
 def _coverage_terms(query: str, topic_hint: str | None = None) -> frozenset[str]:
     """Content terms used for the abstention/coverage gate: the query's own
     terms only, except for the elliptical case (see
@@ -811,6 +834,15 @@ class ResearchResponse:
     # query). Never changes status/passages above; None only if assessment
     # was skipped (e.g. a cached/legacy response built without it).
     assessment: Any = None
+    # Owner request 2026-09-21: the query's content terms that had ~zero
+    # corpus-wide matches (same signal as the spelling fallback's
+    # ``zero_terms``) AND that neither the spelling nor compound-split
+    # fallback managed to correct. Lets the app catch a phonetic
+    # misspelling the edit-distance fallback can't reach ("ardweeno" for
+    # Arduino, edit distance 3) and ask "Did you mean X?" instead of
+    # answering "not found". Additive; ``[]`` for a cached/legacy response
+    # built without it.
+    unknown_terms: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -824,6 +856,7 @@ class ResearchResponse:
             "dense_note": self.dense_note,
             "corrected_terms": self.corrected_terms,
             "expanded_terms": self.expanded_terms,
+            "unknown_terms": self.unknown_terms,
             "assessment": self.assessment.to_dict() if self.assessment is not None else None,
         }
 
@@ -1506,6 +1539,7 @@ class ResearchEngine:
         memo: dict[tuple[Any, ...], dict[str, Any]] | None = None,
         corrected_terms_out: dict[str, str] | None = None,
         expanded_terms_out: dict[str, list[str]] | None = None,
+        unknown_terms_out: list[list[str]] | None = None,
     ) -> tuple[list[dict[str, Any]], bool, str | None, list[dict[str, Any]]]:
         worker = self._get_worker(entry)
         timed_out = False
@@ -1819,6 +1853,7 @@ class ResearchEngine:
             compound_weak_signal = (
                 bool(zero_terms) or bool(near_zero_terms) or (not fulltext_hits and not title_hits)
             )
+            compound_corrections: dict[str, str] = {}
             if _SPELL_FALLBACK_ENABLED and compound_weak_signal and remaining() > 0:
                 compound_corrections, compound_matches = self._correct_compounds(
                     worker,
@@ -1891,6 +1926,21 @@ class ResearchEngine:
                                 fulltext_hits = _dedupe_by_path([*fulltext_hits, *ft_sub["value"]])
                             if ti_sub["status"] == "ok" and ti_sub["value"]:
                                 title_hits = _dedupe_by_path([*title_hits, *ti_sub["value"]])
+            # Owner request 2026-09-21: a content term this archive could
+            # not resolve at all -- ~zero corpus-wide matches (``zero_terms``
+            # above) AND neither the spelling nor compound-split fallback
+            # produced a correction for it -- is surfaced separately from
+            # ``corrected_terms_out`` so the app can ask "Did you mean X?"
+            # for a phonetic misspelling ("ardweeno" for Arduino, edit
+            # distance 3) the title-suggest edit-distance fallback can't
+            # reach, instead of answering "not found".
+            if unknown_terms_out is not None:
+                local_unknown = [
+                    t
+                    for t in zero_terms
+                    if t not in spelling_corrections and t not in compound_corrections
+                ]
+                unknown_terms_out.append(local_unknown)
             # Rarest (fewest corpus-wide matches) first; a term with zero
             # matches anywhere in the archive (a misspelling) carries no
             # rarity signal and is dropped, same rationale as
@@ -2438,6 +2488,12 @@ class ResearchEngine:
         # consulted this request, which variant(s) actually widened a weak
         # search for a given content term -- see ``_expand_morph_variants``.
         expanded_terms_out: dict[str, list[str]] = {}
+        # Owner request 2026-09-21: one list per archive consulted, of that
+        # archive's unresolved-zero-match content terms (see
+        # ``_process_archive``'s ``unknown_terms_out``); merged below into
+        # the intersection across archives (a term any single archive
+        # resolved is not truly unknown).
+        unknown_terms_out: list[list[str]] = []
 
         def _consult(entries: list[ArchiveEntry]) -> None:
             nonlocal any_timeout, dense_used
@@ -2463,6 +2519,7 @@ class ResearchEngine:
                     memo=op_memo,
                     corrected_terms_out=corrected_terms_out,
                     expanded_terms_out=expanded_terms_out,
+                    unknown_terms_out=unknown_terms_out,
                 )
                 any_timeout = any_timeout or timed_out
                 if dense_note is not None:
@@ -2640,6 +2697,7 @@ class ResearchEngine:
             dense_note="; ".join(dense_notes) if dense_notes else None,
             corrected_terms=dict(corrected_terms_out),
             expanded_terms=dict(expanded_terms_out),
+            unknown_terms=_merge_unknown_terms(unknown_terms_out),
         )
         response.assessment = assess_evidence(
             query, response, corrected_terms=dict(corrected_terms_out)

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -41,6 +42,7 @@ from tutor.app.citations import (
     extract_labels,
     render_evidence,
 )
+from tutor.app.clarify import classify_reply, parse_candidate
 from tutor.app.llm_client import StreamEvent
 from tutor.app.prompt import PromptOverflow, render_evidence_with_reuse
 from tutor.app.repetition_guard import find_repetition_loop
@@ -1437,6 +1439,366 @@ def _run_forced_rewrite_round(
     return level_after, rewritten_queries, research_calls_delta
 
 
+_CLARIFY_MAX_TOKENS = 24
+
+
+@dataclass
+class _ClarifiedInput:
+    """Structural stand-in for the caller's ``user_input`` (only
+    ``kind``/``text``/``action`` are ever read downstream) used to
+    substitute the corrected/replacement text once a pending clarify
+    question is resolved, without depending on the caller's own
+    ``user_input`` class supporting reconstruction."""
+
+    kind: str
+    text: str | None = None
+    action: str | None = None
+
+
+# The clarify question runs in a FIXED, system-less, single-message context
+# (see ``_clarify_llm_call``): measured on Ling 3.0 Tiny (temp 0, 16 kid
+# misspellings, data/ardweeno_framings.py, 2026-09-21) the sentence framing
+# below gated 11/16 real library titles with no system prompt, and the SAME
+# framing under a one-line system prompt dropped "ardweeno" -> "Ardenna"
+# (a seabird). Riding the lesson log was worse still: the answer flipped
+# with unrelated prefix content (seed exchange present -> Arduino; bare
+# session -> Ardenna), which is exactly the owner's "worked once, failed
+# the next time" report. ``_clarify_host_note_bare`` is the second try
+# (9/16; catches a few the first misses, e.g. "micro bit").
+def _clarify_host_note(word: str, message: str) -> str:
+    return (
+        f'A kid typed: "{message}". The word \'{word}\' is misspelled. Which '
+        "real thing did they most likely mean by it? Reply on one line "
+        "exactly as: NAME | five-word description. Nothing else."
+    )
+
+
+def _clarify_host_note_bare(word: str, message: str) -> str:
+    del message
+    return (
+        f"A kid typed '{word}'. Which real thing did they most likely mean? "
+        "Reply on one line exactly as: NAME | five-word description. Nothing else."
+    )
+
+
+_CLARIFY_NOTE_BUILDERS = (_clarify_host_note, _clarify_host_note_bare)
+
+
+def _clarify_followup_note(
+    word: str, original_message: str, last_candidate: str, last_description: str, their_reply: str
+) -> str:
+    desc = f", {last_description}" if last_description else ""
+    return (
+        f'A kid typed: "{original_message}". The word \'{word}\' is misspelled. '
+        f'You asked the kid "Did you mean {last_candidate}{desc}?" and they '
+        f'answered "{their_reply}". Which real thing did they most likely mean '
+        f"by '{word}'? Reply on one line exactly as: NAME | five-word "
+        "description. Nothing else."
+    )
+
+
+def _clarify_ask_text(word: str, name: str, description: str) -> str:
+    tail = f", {description}" if description else ""
+    return (
+        f'I don\'t know the word "{word}". Did you mean {name}{tail}? Say '
+        "yes, or type the right word — or say no and tell me what it is."
+    )
+
+
+def _clarify_give_up(session, word: str) -> None:
+    """Remember that the clarify question for ``word`` was given up on in
+    this lesson, so the fallback turn (and later turns) do not immediately
+    re-ask "Did you mean ...?" for the same unknown word."""
+    skip = getattr(session, "clarify_skip_words", None)
+    if skip is None:
+        skip = set()
+        session.clarify_skip_words = skip
+    skip.add(word.lower())
+
+
+def _clarify_describe_text(word: str) -> str:
+    return f'OK. Tell me what a "{word}" is or does, in your own words.'
+
+
+# A pending-clarify reply of at least this many words is treated as a
+# description of the thing (vs. a re-typed word like "arduino").
+_CLARIFY_DESCRIPTION_MIN_WORDS = 4
+
+
+def _clarify_still_text(word: str, candidate: str) -> str:
+    return (
+        f'From that, the closest thing in the library is still {candidate}. '
+        f'Say yes to look it up, or type "{word}" a different way.'
+    )
+
+
+def _clarify_llm_call(llm, log, cancel, host_note: str) -> str:
+    """One short LLM call in a FIXED context: no system prompt, no lesson
+    log, just ``host_note`` as the only user message (``log`` is accepted
+    and ignored so callers need not change). Deliberately NOT riding the
+    lesson's cached prefix -- see the comment above ``_clarify_host_note``
+    for the measured reason. The cost is one lesson-prefix re-prefill on
+    the (rare) unknown-word turn; the gain is the same answer in every
+    session. Nothing here is appended to the lesson log."""
+    del log
+    wire_messages = [{"role": "user", "content": host_note}]
+    text_parts: list[str] = []
+    for evt in llm.stream_chat(
+        wire_messages, cancel=cancel, max_tokens=_CLARIFY_MAX_TOKENS, temperature=0
+    ):
+        if evt.kind == "token":
+            text_parts.append(evt.text or "")
+        elif evt.kind == "error":
+            break
+    return "".join(text_parts).strip()
+
+
+def _clarify_gate(research_engine, name: str) -> bool:
+    """True when ``name`` exists in the library, checked ONLY via the
+    existing ``research_engine.research(...)`` API (no new retrieval
+    method, no zim import): some returned passage's title must match
+    ``name`` exactly or be a disambiguated title starting with
+    ``"{name} ("``."""
+    try:
+        response = research_engine.research(name)
+    except Exception:  # noqa: BLE001 - a gate failure just means "not found"
+        return False
+    passages = getattr(response, "passages", None)
+    if passages is None and isinstance(response, dict):
+        passages = response.get("passages")
+    lname = name.lower()
+    for passage in passages or []:
+        title = (
+            passage.get("title")
+            if isinstance(passage, dict)
+            else getattr(passage, "title", None)
+        ) or ""
+        title = title.lower()
+        if title == lname or title.startswith(f"{lname} ("):
+            return True
+    return False
+
+
+def _log_clarify_exchange(log, user_text: str, reply_text: str) -> None:
+    log.append_user(user_text)
+    log.append_assistant(reply_text, cited_labels=[])
+
+
+def _emit_clarify_reply(emit, reply_text: str) -> None:
+    emit({"kind": "status", "stage": "clarify", "detail": "…"})
+    emit(StreamEvent(kind="token", text=reply_text))
+    emit(StreamEvent(kind="done", finish_reason="stop", usage={}))
+
+
+def _clarify_turn_result(
+    *, reply_text: str, word: str, candidate: str, research_calls: int, timings: dict, events: list
+) -> TurnResult:
+    return TurnResult(
+        status="ok",
+        answer_text=reply_text,
+        route="clarify",
+        research_calls=research_calls,
+        calc_calls=0,
+        events=events,
+        timings=timings,
+        evidence={
+            "level_before": "skipped",
+            "level_after": "skipped",
+            "rewritten_queries": [],
+            "corrected_terms": {},
+            "clarify": {"unknown": word, "candidate": candidate},
+        },
+    )
+
+
+def _try_clarify_trigger(
+    *,
+    word: str,
+    user_input,
+    llm,
+    log,
+    research_engine,
+    session,
+    cancel,
+    emit,
+    research_calls: int,
+    timings: dict,
+    events: list,
+) -> TurnResult | None:
+    """The first-round clarify trigger (see ``run_turn``'s "Trigger"):
+    called right after the raw pre-search finds an unknown term on a
+    normal, non-strong-evidence text turn. Returns a ``TurnResult`` if the
+    clarify question fires (and records ``session.pending_clarify``), or
+    ``None`` if the LLM's candidate didn't parse or didn't gate -- callers
+    then fall through to today's normal turn unaffected."""
+    name = description = None
+    for build_note in _CLARIFY_NOTE_BUILDERS:
+        raw = _clarify_llm_call(llm, log, cancel, build_note(word, user_input.text))
+        parsed = parse_candidate(raw)
+        if parsed is None:
+            _logger.info("clarify word=%r raw=%r -> no parse", word, raw)
+            continue
+        cand, desc = parsed
+        if not _clarify_gate(research_engine, cand):
+            _logger.info("clarify word=%r raw=%r -> %r not a library title", word, raw, cand)
+            continue
+        _logger.info("clarify word=%r raw=%r -> asking about %r", word, raw, cand)
+        name, description = cand, desc
+        break
+    if name is None:
+        return None
+    reply_text = _clarify_ask_text(word, name, description)
+    _log_clarify_exchange(log, user_input.text, reply_text)
+    _emit_clarify_reply(emit, reply_text)
+    session.pending_clarify = {
+        "word": word,
+        "candidate": name,
+        "description": description,
+        "message": user_input.text,
+        "round": 1,
+    }
+    return _clarify_turn_result(
+        reply_text=reply_text,
+        word=word,
+        candidate=name,
+        research_calls=research_calls,
+        timings=timings,
+        events=events,
+    )
+
+
+def _replace_whole_word(message: str, word: str, replacement: str) -> str:
+    pattern = re.compile(re.escape(word), re.IGNORECASE)
+    return pattern.sub(replacement, message, count=1)
+
+
+def _resolve_pending_clarify(
+    *, session, pending: dict, user_input, llm, log, research_engine, cancel, emit
+):
+    """Handle a turn that arrives while ``session.pending_clarify`` is
+    set. Returns a ``TurnResult`` to return immediately (another clarify
+    round), or a plain ``str`` -- the text the normal turn should now run
+    on (``session.pending_clarify`` is always cleared by the time a str is
+    returned)."""
+    reply_text_raw = user_input.text or ""
+    word = pending["word"]
+    candidate = pending["candidate"]
+    description = pending.get("description", "")
+    round_n = pending.get("round", 1)
+
+    verdict = classify_reply(reply_text_raw)
+
+    if verdict == "yes":
+        session.pending_clarify = None
+        corrected = _replace_whole_word(pending["message"], word, candidate)
+        session._clarify_resolved_name = candidate  # noqa: SLF001 - internal handoff
+        return corrected
+
+    if verdict == "no":
+        # ``round`` counts candidate OFFERS; asking for a description is
+        # not one, so it does not advance the round (it did at first, and
+        # the description then hit the cap before the re-clarify ran).
+        # A "no" to the describe prompt itself, or at the cap, gives up.
+        if round_n < 2 and not pending.get("asked_describe"):
+            session.pending_clarify = {**pending, "asked_describe": True}
+            describe_text = _clarify_describe_text(word)
+            _log_clarify_exchange(log, reply_text_raw, describe_text)
+            _emit_clarify_reply(emit, describe_text)
+            return _clarify_turn_result(
+                reply_text=describe_text,
+                word=word,
+                candidate=candidate,
+                research_calls=0,
+                timings={
+                    "forced_call": 0.0,
+                    "searches": 0.0,
+                    "second_round": 0.0,
+                    "answer_prefill": 0.0,
+                    "answer_generation": 0.0,
+                    "presearch": 0.0,
+                    "voluntary_tool_rounds": 0.0,
+                },
+                events=[],
+            )
+        session.pending_clarify = None
+        _clarify_give_up(session, word)
+        return pending["message"]
+
+    # Neither a clean yes nor a clean no (owner amendment, 2026-09-21):
+    # re-run the clarify LLM step on the ORIGINAL message with a note
+    # telling it what was asked and how the student answered.
+    if round_n < 2:
+        host_note = _clarify_followup_note(
+            word, pending["message"], candidate, description, reply_text_raw
+        )
+        raw = _clarify_llm_call(llm, log, cancel, host_note)
+        parsed = parse_candidate(raw)
+        if parsed is not None:
+            new_name, new_description = parsed
+            if new_name.lower() != candidate.lower() and _clarify_gate(
+                research_engine, new_name
+            ):
+                session.pending_clarify = {
+                    "word": word,
+                    "candidate": new_name,
+                    "description": new_description,
+                    "message": pending["message"],
+                    "round": round_n + 1,
+                }
+                ask_text = _clarify_ask_text(word, new_name, new_description)
+                _log_clarify_exchange(log, reply_text_raw, ask_text)
+                _emit_clarify_reply(emit, ask_text)
+                return _clarify_turn_result(
+                    reply_text=ask_text,
+                    word=word,
+                    candidate=new_name,
+                    research_calls=0,
+                    timings={
+                        "forced_call": 0.0,
+                        "searches": 0.0,
+                        "second_round": 0.0,
+                        "answer_prefill": 0.0,
+                        "answer_generation": 0.0,
+                        "presearch": 0.0,
+                        "voluntary_tool_rounds": 0.0,
+                    },
+                    events=[],
+                )
+        # The description still points at the candidate the student just
+        # said no to (live: "no" -> "it is a little computer you plug
+        # lights into" -> Arduino again). Running a full search on the
+        # description costs ~35s and ends in "not found"; instead re-offer
+        # the candidate once, keeping pending so a "yes" now resolves it.
+        if len(reply_text_raw.split()) >= _CLARIFY_DESCRIPTION_MIN_WORDS:
+            session.pending_clarify = {**pending, "round": round_n + 1}
+            still_text = _clarify_still_text(word, candidate)
+            _log_clarify_exchange(log, reply_text_raw, still_text)
+            _emit_clarify_reply(emit, still_text)
+            return _clarify_turn_result(
+                reply_text=still_text,
+                word=word,
+                candidate=candidate,
+                research_calls=0,
+                timings={
+                    "forced_call": 0.0,
+                    "searches": 0.0,
+                    "second_round": 0.0,
+                    "answer_prefill": 0.0,
+                    "answer_generation": 0.0,
+                    "presearch": 0.0,
+                    "voluntary_tool_rounds": 0.0,
+                },
+                events=[],
+            )
+    # Same/no new gated candidate (or the round cap was already hit):
+    # clear pending and treat the reply itself as a fresh normal turn --
+    # this is what lets a student who just re-types "arduino" resolve via
+    # ordinary retrieval.
+    session.pending_clarify = None
+    _clarify_give_up(session, word)
+    return reply_text_raw
+
+
 def run_turn(
     session,
     user_input,
@@ -1461,6 +1823,99 @@ def run_turn(
     child_safe_body_topics: bool = True,
     host_topic_gate: bool = True,
     model_writes_citations: bool = False,
+    clarify_unknown_words: bool = True,
+) -> TurnResult:
+    """Public entry point: wraps ``_run_turn_inner`` with the "pending
+    clarify reply" handling (see docs/clarify above _try_clarify_trigger),
+    which must be checked BEFORE the host topic gate / any pre-search, so
+    it has to live outside the inner function's own routing chain. The
+    first-round clarify TRIGGER (after the raw pre-search finds an
+    unknown term) lives inside ``_run_turn_inner`` itself, since it needs
+    that turn's pre-search response.
+    """
+    inner_kwargs = dict(
+        llm=llm,
+        research_engine=research_engine,
+        calc=calc,
+        budget=budget,
+        emit=emit,
+        cancel=cancel,
+        system_text_override=system_text_override,
+        temperature=temperature,
+        rewrite_on_weak_evidence=rewrite_on_weak_evidence,
+        rewrite_on_followup=rewrite_on_followup,
+        reuse_prior_passages=reuse_prior_passages,
+        concise_followup_note=concise_followup_note,
+        restate_question_last=restate_question_last,
+        restate_question_instruction=restate_question_instruction,
+        model_writes_search=model_writes_search,
+        model_may_skip_search=model_may_skip_search,
+        no_specifics_without_source=no_specifics_without_source,
+        child_safe_body_topics=child_safe_body_topics,
+        host_topic_gate=host_topic_gate,
+        model_writes_citations=model_writes_citations,
+        clarify_unknown_words=clarify_unknown_words,
+    )
+
+    pending = getattr(session, "pending_clarify", None)
+    log = getattr(session, "log", None)
+    use_log = log is not None and hasattr(log, "append_user")
+
+    resolved_name: str | None = None
+    if clarify_unknown_words and pending is not None and user_input.kind == "text" and use_log:
+        outcome = _resolve_pending_clarify(
+            session=session,
+            pending=pending,
+            user_input=user_input,
+            llm=llm,
+            log=log,
+            research_engine=research_engine,
+            cancel=cancel,
+            emit=emit,
+        )
+        if isinstance(outcome, TurnResult):
+            return outcome
+        user_input = _ClarifiedInput(
+            kind=user_input.kind, text=outcome, action=getattr(user_input, "action", None)
+        )
+        resolved_name = getattr(session, "_clarify_resolved_name", None)
+        if resolved_name is not None:
+            try:
+                del session._clarify_resolved_name  # noqa: SLF001
+            except AttributeError:
+                pass
+
+    result = _run_turn_inner(session, user_input, **inner_kwargs)
+    if resolved_name is not None and result.evidence is not None:
+        result.evidence = {**result.evidence, "clarify": {"resolved": resolved_name}}
+    return result
+
+
+def _run_turn_inner(
+    session,
+    user_input,
+    *,
+    llm,
+    research_engine,
+    calc,
+    budget,
+    emit,
+    cancel: threading.Event | None = None,
+    system_text_override: str | None = None,
+    temperature: float | None = None,
+    rewrite_on_weak_evidence: bool = True,
+    rewrite_on_followup: bool = True,
+    reuse_prior_passages: bool = True,
+    concise_followup_note: bool = False,
+    restate_question_last: bool = True,
+    restate_question_instruction: bool = False,
+    model_writes_search: bool = True,
+    model_may_skip_search: bool = True,
+    no_specifics_without_source: bool = True,
+    child_safe_body_topics: bool = True,
+    host_topic_gate: bool = True,
+    model_writes_citations: bool = False,
+    clarify_unknown_words: bool = True,
 ) -> TurnResult:
     research_calls = 0
     timings = {
@@ -1604,6 +2059,39 @@ def run_turn(
         assessment = getattr(response, "assessment", None)
         level_before = assessment.level if assessment is not None else "strong"
         corrected_terms = dict(getattr(response, "corrected_terms", None) or {})
+
+        unknown_terms = list(getattr(response, "unknown_terms", None) or [])
+        if unknown_terms:
+            _logger.info(
+                "presearch unknown_terms=%r level=%s clarify=%s",
+                unknown_terms, level_before, clarify_unknown_words,
+            )
+        if (
+            clarify_unknown_words
+            and unknown_terms
+            and level_before != "strong"
+            and use_log
+            and unknown_terms[0].lower()
+            not in (getattr(session, "clarify_skip_words", None) or set())
+        ):
+            clarify_result = _try_clarify_trigger(
+                word=unknown_terms[0],
+                user_input=user_input,
+                llm=llm,
+                log=log,
+                research_engine=research_engine,
+                session=session,
+                cancel=cancel,
+                emit=emit,
+                research_calls=research_calls,
+                timings=timings,
+                events=events,
+            )
+            if clarify_result is not None:
+                return clarify_result
+            # Gate failed / nothing usable -- fall through to today's
+            # normal path exactly as if the feature were off. Nothing was
+            # appended to the log above, so this is a true no-op.
 
         # Follow-up rewrite (docs/rewrite_on_weak_evidence.md, "Follow-up
         # rewrite"): fires unconditionally on any turn after the first,

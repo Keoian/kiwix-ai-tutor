@@ -107,8 +107,16 @@ def _default_serve(app: FastAPI, *, host: str, port: int) -> None:
     """Run ``app`` under uvicorn on ``host``/``port``. Only exercised for
     real by the run scripts, never by the unit test suite (`serve` is an
     injectable seam for tests)."""
+    import logging
+
     import uvicorn
 
+    # The tutor's own INFO lines (host topic gate, clarify diagnostics:
+    # "presearch unknown_terms=..." / "clarify word=... raw=... -> ...")
+    # are the only way to see WHY a turn took the path it did without a
+    # debugger. Root stays at WARNING so third-party chatter is unchanged.
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    logging.getLogger("tutor").setLevel(logging.INFO)
     uvicorn.run(app, host=host, port=port)
 
 

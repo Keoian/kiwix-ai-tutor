@@ -312,6 +312,7 @@ def _make_turn_runner(
     child_safe_body_topics: bool = True,
     host_topic_gate: bool = True,
     model_writes_citations: bool = False,
+    clarify_unknown_words: bool = True,
 ):
     from tutor.app.agent_loop import run_turn
 
@@ -386,6 +387,7 @@ def _make_turn_runner(
                 child_safe_body_topics=child_safe_body_topics,
                 host_topic_gate=host_topic_gate,
                 model_writes_citations=model_writes_citations,
+                clarify_unknown_words=clarify_unknown_words,
             )
         except Exception:  # noqa: BLE001 - never leak a traceback to the student
             emit("error", {"message": _STUDENT_SAFE_ERROR})
@@ -738,6 +740,7 @@ def build_deps(cfg: Any, *, llm: Any = None, research_engine: Any = None) -> App
         child_safe_body_topics=getattr(cfg.app, "child_safe_body_topics", True),
         host_topic_gate=getattr(cfg.app, "host_topic_gate", True),
         model_writes_citations=getattr(cfg.app, "model_writes_citations", False),
+        clarify_unknown_words=getattr(cfg.app, "clarify_unknown_words", True),
     )
     status_provider = _make_status_provider(
         llm=llm,

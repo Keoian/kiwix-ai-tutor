@@ -31,6 +31,11 @@ class Session:
         self.history: list[dict] = []
         self.retained_passages: dict[str, dict] = {}
         self._next_label_num = 1
+        self.pending_clarify: dict | None = None
+        """Set by ``tutor.app.agent_loop`` when a "Did you mean X?" clarify
+        question is pending the student's reply (owner request 2026-09-21):
+        ``{"word", "candidate", "description", "message", "round"}``.
+        ``None`` when no clarify question is outstanding."""
 
     def allocate_label(self) -> str:
         """Allocate the next stable [S#] label for this lesson."""
