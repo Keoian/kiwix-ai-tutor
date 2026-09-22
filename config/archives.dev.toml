@@ -151,3 +151,470 @@ tier = 3
 kind = "textbook"
 subjects = ["religion"]
 storage = "hdd"
+
+# --- 2026-09-22 additions (docs/zim_library_recommendations.md, scripts/zim_wanted.txt) ---
+
+[[archive]]
+id = "wikibooks_nopic"
+path = 'D:\Kiwix\wikibooks_en_all_nopic_2026-04.zim'
+tier = 3
+kind = "textbook"
+subjects = []
+storage = "hdd"
+
+[[archive]]
+id = "wiktionary"
+path = 'D:\Kiwix\wiktionary_en_all_nopic_2026-08.zim'
+tier = 2
+kind = "encyclopedia"
+subjects = []
+storage = "hdd"
+
+[[archive]]
+id = "datascience_se"
+path = 'D:\Kiwix\datascience.stackexchange.com_en_all_2026-08.zim'
+tier = 3
+kind = "qa"
+subjects = ["datascience"]
+storage = "hdd"
+
+[[archive]]
+id = "stats_se"
+path = 'D:\Kiwix\stats.stackexchange.com_en_all_2026-08.zim'
+tier = 3
+kind = "qa"
+subjects = ["statistics"]
+storage = "hdd"
+
+[[archive]]
+id = "cs_se"
+path = 'D:\Kiwix\cs.stackexchange.com_en_all_2026-07.zim'
+tier = 3
+kind = "qa"
+subjects = ["cs"]
+storage = "hdd"
+
+[[archive]]
+id = "medicalsciences_se"
+path = 'D:\Kiwix\medicalsciences.stackexchange.com_en_all_2026-02.zim'
+tier = 3
+kind = "qa"
+subjects = ["medicine"]
+storage = "hdd"
+
+[[archive]]
+id = "wikimed"
+path = 'D:\Kiwix\wikipedia_en_medicine_nopic_2026-04.zim'
+tier = 3
+kind = "encyclopedia"
+subjects = ["medicine"]
+storage = "hdd"
+
+[[archive]]
+id = "medlineplus"
+path = 'D:\Kiwix\medlineplus.gov_en_all_2025-01.zim'
+tier = 3
+kind = "encyclopedia"
+subjects = ["medicine"]
+storage = "hdd"
+
+[[archive]]
+id = "economics_se"
+path = 'D:\Kiwix\economics.stackexchange.com_en_all_2026-08.zim'
+tier = 3
+kind = "qa"
+subjects = ["economics"]
+storage = "hdd"
+
+[[archive]]
+id = "philosophy_se"
+path = 'D:\Kiwix\philosophy.stackexchange.com_en_all_2026-08.zim'
+tier = 3
+kind = "qa"
+subjects = ["philosophy"]
+storage = "hdd"
+
+[[archive]]
+id = "psychology_se"
+path = 'D:\Kiwix\psychology.stackexchange.com_en_all_2026-07.zim'
+tier = 3
+kind = "qa"
+subjects = ["psychology"]
+storage = "hdd"
+
+[[archive]]
+id = "ell_se"
+path = 'D:\Kiwix\ell.stackexchange.com_en_all_2026-08.zim'
+tier = 3
+kind = "qa"
+subjects = ["english"]
+storage = "hdd"
+
+[[archive]]
+id = "libretexts_math"
+path = 'D:\Kiwix\libretexts.org_en_math_2026-01.zim'
+tier = 3
+kind = "textbook"
+subjects = ["math"]
+storage = "hdd"
+
+[[archive]]
+id = "libretexts_phys"
+path = 'D:\Kiwix\libretexts.org_en_phys_2026-01.zim'
+tier = 3
+kind = "textbook"
+subjects = ["physics"]
+storage = "hdd"
+
+[[archive]]
+id = "libretexts_chem"
+path = 'D:\Kiwix\libretexts.org_en_chem_2025-01.zim'
+tier = 3
+kind = "textbook"
+subjects = ["chemistry"]
+storage = "hdd"
+
+[[archive]]
+id = "libretexts_bio"
+path = 'D:\Kiwix\libretexts.org_en_bio_2025-01.zim'
+tier = 3
+kind = "textbook"
+subjects = ["biology"]
+storage = "hdd"
+
+[[archive]]
+id = "libretexts_stats"
+path = 'D:\Kiwix\libretexts.org_en_stats_2026-01.zim'
+tier = 3
+kind = "textbook"
+subjects = ["statistics"]
+storage = "hdd"
+
+[[archive]]
+id = "libretexts_human"
+path = 'D:\Kiwix\libretexts.org_en_human_2026-07.zim'
+tier = 3
+kind = "textbook"
+subjects = ["history", "philosophy", "english", "literature"]
+storage = "hdd"
+
+[[archive]]
+id = "libretexts_socialsci"
+path = 'D:\Kiwix\libretexts.org_en_socialsci_2025-01.zim'
+tier = 3
+kind = "textbook"
+subjects = ["economics", "psychology", "politics"]
+storage = "hdd"
+
+[[archive]]
+id = "libretexts_geo"
+path = 'D:\Kiwix\libretexts.org_en_geo_2026-01.zim'
+tier = 3
+kind = "textbook"
+subjects = ["earthscience"]
+storage = "hdd"
+
+[[archive]]
+id = "libretexts_eng"
+path = 'D:\Kiwix\libretexts.org_en_eng_2025-01.zim'
+tier = 3
+kind = "textbook"
+subjects = ["engineering"]
+storage = "hdd"
+
+[[archive]]
+id = "libretexts_med"
+path = 'D:\Kiwix\libretexts.org_en_med_2025-01.zim'
+tier = 3
+kind = "textbook"
+subjects = ["medicine"]
+storage = "hdd"
+
+[[archive]]
+id = "cstheory_se"
+path = 'D:\Kiwix\cstheory.stackexchange.com_en_all_2026-08.zim'
+tier = 3
+kind = "qa"
+subjects = ["cs"]
+storage = "hdd"
+
+[[archive]]
+id = "bioinformatics_se"
+path = 'D:\Kiwix\bioinformatics.stackexchange.com_en_all_2026-07.zim'
+tier = 3
+kind = "qa"
+subjects = ["biology"]
+storage = "hdd"
+
+[[archive]]
+id = "astronomy_se"
+path = 'D:\Kiwix\astronomy.stackexchange.com_en_all_2026-07.zim'
+tier = 3
+kind = "qa"
+subjects = ["physics"]
+storage = "hdd"
+
+[[archive]]
+id = "earthscience_se"
+path = 'D:\Kiwix\earthscience.stackexchange.com_en_all_2026-07.zim'
+tier = 3
+kind = "qa"
+subjects = ["earthscience"]
+storage = "hdd"
+
+[[archive]]
+id = "space_se"
+path = 'D:\Kiwix\space.stackexchange.com_en_all_2026-08.zim'
+tier = 3
+kind = "qa"
+subjects = ["physics"]
+storage = "hdd"
+
+[[archive]]
+id = "law_se"
+path = 'D:\Kiwix\law.stackexchange.com_en_all_2026-08.zim'
+tier = 3
+kind = "qa"
+subjects = ["law"]
+storage = "hdd"
+
+[[archive]]
+id = "politics_se"
+path = 'D:\Kiwix\politics.stackexchange.com_en_all_2026-08.zim'
+tier = 3
+kind = "qa"
+subjects = ["politics"]
+storage = "hdd"
+
+[[archive]]
+id = "skeptics_se"
+path = 'D:\Kiwix\skeptics.stackexchange.com_en_all_2026-08.zim'
+tier = 3
+kind = "qa"
+subjects = ["philosophy"]
+storage = "hdd"
+
+[[archive]]
+id = "crypto_se"
+path = 'D:\Kiwix\crypto.stackexchange.com_en_all_2026-07.zim'
+tier = 3
+kind = "qa"
+subjects = ["cs"]
+storage = "hdd"
+
+[[archive]]
+id = "codereview_se"
+path = 'D:\Kiwix\codereview.stackexchange.com_en_all_2026-08.zim'
+tier = 3
+kind = "qa"
+subjects = ["cs"]
+storage = "hdd"
+
+[[archive]]
+id = "mathoverflow"
+path = 'D:\Kiwix\mathoverflow.net_en_all_2026-08.zim'
+tier = 3
+kind = "qa"
+subjects = ["math"]
+storage = "hdd"
+
+[[archive]]
+id = "languagelearning_se"
+path = 'D:\Kiwix\languagelearning.stackexchange.com_en_all_2026-08.zim'
+tier = 3
+kind = "qa"
+subjects = ["english"]
+storage = "hdd"
+
+[[archive]]
+id = "scicomp_se"
+path = 'D:\Kiwix\scicomp.stackexchange.com_en_all_2026-08.zim'
+tier = 3
+kind = "qa"
+subjects = ["cs"]
+storage = "hdd"
+
+[[archive]]
+id = "mattermodeling_se"
+path = 'D:\Kiwix\mattermodeling.stackexchange.com_en_all_2026-08.zim'
+tier = 3
+kind = "qa"
+subjects = ["chemistry"]
+storage = "hdd"
+
+[[archive]]
+id = "hsm_se"
+path = 'D:\Kiwix\hsm.stackexchange.com_en_all_2026-08.zim'
+tier = 3
+kind = "qa"
+subjects = ["history"]
+storage = "hdd"
+
+[[archive]]
+id = "simplewiki_nopic"
+path = 'D:\Kiwix\wikipedia_en-simple_all_nopic_2026-06.zim'
+tier = 2
+kind = "encyclopedia"
+subjects = []
+storage = "hdd"
+
+[[archive]]
+id = "wikisource"
+path = 'D:\Kiwix\wikisource_en_all_nopic_2026-08.zim'
+tier = 3
+kind = "viewer_only"
+subjects = []
+storage = "hdd"
+searchable = false
+
+[[archive]]
+id = "proofwiki"
+path = 'D:\Kiwix\proofwiki.org_en_all_maxi_2026-07f.zim'
+tier = 3
+kind = "encyclopedia"
+subjects = ["math"]
+storage = "hdd"
+
+[[archive]]
+id = "mdwiki"
+path = 'D:\Kiwix\mdwiki_en_all_maxi_2025-11.zim'
+tier = 3
+kind = "encyclopedia"
+subjects = ["medicine"]
+storage = "hdd"
+
+[[archive]]
+id = "libretexts_biz"
+path = 'D:\Kiwix\libretexts.org_en_biz_2026-01.zim'
+tier = 3
+kind = "textbook"
+subjects = ["economics"]
+storage = "hdd"
+
+[[archive]]
+id = "libretexts_workforce"
+path = 'D:\Kiwix\libretexts.org_en_workforce_2026-01.zim'
+tier = 3
+kind = "textbook"
+subjects = []
+storage = "hdd"
+
+[[archive]]
+id = "libretexts_k12"
+path = 'D:\Kiwix\libretexts.org_en_k12_2026-01.zim'
+tier = 3
+kind = "textbook"
+subjects = []
+storage = "hdd"
+
+[[archive]]
+id = "milne_textbooks"
+path = 'D:\Kiwix\milneopentextbooks.org_en_all_2026-08.zim'
+tier = 3
+kind = "textbook"
+subjects = []
+storage = "hdd"
+
+[[archive]]
+id = "freecodecamp_rosetta"
+path = 'D:\Kiwix\freecodecamp_en_rosetta-code_2026-08.zim'
+tier = 3
+kind = "textbook"
+subjects = ["cs"]
+storage = "hdd"
+
+[[archive]]
+id = "freecodecamp_jsalgo"
+path = 'D:\Kiwix\freecodecamp_en_javascript-algorithms-and-data-structures_2026-08.zim'
+tier = 3
+kind = "textbook"
+subjects = ["cs"]
+storage = "hdd"
+
+[[archive]]
+id = "freecodecamp_interview"
+path = 'D:\Kiwix\freecodecamp_en_coding-interview-prep_2026-08.zim'
+tier = 3
+kind = "textbook"
+subjects = ["cs"]
+storage = "hdd"
+
+[[archive]]
+id = "freecodecamp_all"
+path = 'D:\Kiwix\freecodecamp_en_all_2026-08.zim'
+tier = 3
+kind = "textbook"
+subjects = ["cs"]
+storage = "hdd"
+
+[[archive]]
+id = "devdocs_python"
+path = 'D:\Kiwix\devdocs_en_python_2026-08.zim'
+tier = 3
+kind = "encyclopedia"
+subjects = ["cs"]
+storage = "hdd"
+
+[[archive]]
+id = "devdocs_numpy"
+path = 'D:\Kiwix\devdocs_en_numpy_2026-07.zim'
+tier = 3
+kind = "encyclopedia"
+subjects = ["cs"]
+storage = "hdd"
+
+[[archive]]
+id = "devdocs_pandas"
+path = 'D:\Kiwix\devdocs_en_pandas_2026-07.zim'
+tier = 3
+kind = "encyclopedia"
+subjects = ["cs"]
+storage = "hdd"
+
+[[archive]]
+id = "devdocs_scikit_learn"
+path = 'D:\Kiwix\devdocs_en_scikit-learn_2026-04.zim'
+tier = 3
+kind = "encyclopedia"
+subjects = ["cs"]
+storage = "hdd"
+
+[[archive]]
+id = "devdocs_pytorch"
+path = 'D:\Kiwix\devdocs_en_pytorch_2026-07.zim'
+tier = 3
+kind = "encyclopedia"
+subjects = ["cs"]
+storage = "hdd"
+
+[[archive]]
+id = "devdocs_tensorflow"
+path = 'D:\Kiwix\devdocs_en_tensorflow_2026-08.zim'
+tier = 3
+kind = "encyclopedia"
+subjects = ["cs"]
+storage = "hdd"
+
+[[archive]]
+id = "devdocs_matplotlib"
+path = 'D:\Kiwix\devdocs_en_matplotlib_2026-07.zim'
+tier = 3
+kind = "encyclopedia"
+subjects = ["cs"]
+storage = "hdd"
+
+[[archive]]
+id = "devdocs_r"
+path = 'D:\Kiwix\devdocs_en_r_2026-04.zim'
+tier = 3
+kind = "encyclopedia"
+subjects = ["statistics"]
+storage = "hdd"
+
+[[archive]]
+id = "devdocs_statsmodels"
+path = 'D:\Kiwix\devdocs_en_statsmodels_2026-05.zim'
+tier = 3
+kind = "encyclopedia"
+subjects = ["statistics"]
+storage = "hdd"

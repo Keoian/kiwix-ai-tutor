@@ -12,6 +12,9 @@ from pathlib import Path
 import pytest
 
 from tutor.retrieval.registry import (
+    _VALID_KINDS,
+    _VALID_STORAGE,
+    _VALID_TIERS,
     ArchiveEntry,
     Registry,
     RegistryError,
@@ -20,6 +23,41 @@ from tutor.retrieval.registry import (
 from tutor.retrieval.zim.archive import ArchiveState, ArchiveStatus
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Subject tags the retrieval layer's tier-3 ``for_subject`` routing is
+# designed to match against a host-supplied ``topic_hint`` (see
+# ``tutor/retrieval/research.py``'s ``_route``). ``Registry`` itself does not
+# validate ``subjects`` values (they're host-supplied free text at query
+# time), so this is a config-side guard against typos: every subject tag used
+# in ``config/archives.dev.toml`` must be drawn from this known vocabulary,
+# so a teacher's/topic-hint string has a real chance of matching it.
+KNOWN_SUBJECTS = frozenset(
+    {
+        # Present before the 2026-09-22 zim_library_recommendations.md additions.
+        "math",
+        "physics",
+        "chemistry",
+        "biology",
+        "history",
+        "english",
+        "linguistics",
+        "literature",
+        "puzzling",
+        "religion",
+        # Added 2026-09-22 alongside the new archives.
+        "datascience",
+        "statistics",
+        "cs",
+        "medicine",
+        "economics",
+        "philosophy",
+        "psychology",
+        "earthscience",
+        "engineering",
+        "law",
+        "politics",
+    }
+)
 
 
 def _write_toml(tmp_path: Path, body: str) -> Path:
@@ -336,3 +374,55 @@ def test_real_dev_archives_toml_loads() -> None:
     math_se = registry.get("math_se")
     assert math_se.kind == "qa"
     assert "math" in math_se.subjects
+
+
+def test_real_dev_archives_toml_ids_are_unique() -> None:
+    # ``load_registry`` already raises ``RegistryError`` on a duplicate id
+    # (see ``test_duplicate_id_raises``), so a successful load of the real
+    # config already proves this; asserted explicitly too for a direct,
+    # named regression signal on the real file.
+    toml_path = REPO_ROOT / "config" / "archives.dev.toml"
+    registry = load_registry(toml_path)
+    ids = [e.id for e in registry.archives]
+    assert len(ids) == len(set(ids))
+
+
+def test_real_dev_archives_toml_paths_are_unique() -> None:
+    toml_path = REPO_ROOT / "config" / "archives.dev.toml"
+    registry = load_registry(toml_path)
+    paths = [str(e.path) for e in registry.archives]
+    assert len(paths) == len(set(paths))
+
+
+def test_real_dev_archives_toml_entries_have_valid_fields() -> None:
+    """Every entry's required fields are present and hold valid values.
+
+    Does NOT check that ``path`` exists on disk -- tests must never depend
+    on gitignored ``data/`` or on host-specific drives like ``D:\\Kiwix``;
+    that is what ``Registry.validate_all`` is for, exercised elsewhere
+    against fixtures, not against the real dev config.
+    """
+    toml_path = REPO_ROOT / "config" / "archives.dev.toml"
+    registry = load_registry(toml_path)
+    assert len(registry.archives) > 0
+    for entry in registry.archives:
+        assert isinstance(entry.id, str) and entry.id
+        assert entry.tier in _VALID_TIERS
+        assert entry.kind in _VALID_KINDS
+        assert entry.storage in _VALID_STORAGE
+        assert isinstance(entry.subjects, tuple)
+        assert all(isinstance(s, str) and s for s in entry.subjects)
+        assert entry.weight > 0
+        assert isinstance(entry.searchable, bool)
+        assert entry.path.is_absolute()
+
+
+def test_real_dev_archives_toml_subjects_are_known() -> None:
+    toml_path = REPO_ROOT / "config" / "archives.dev.toml"
+    registry = load_registry(toml_path)
+    unknown: dict[str, tuple[str, ...]] = {}
+    for entry in registry.archives:
+        bad = tuple(s for s in entry.subjects if s not in KNOWN_SUBJECTS)
+        if bad:
+            unknown[entry.id] = bad
+    assert not unknown, f"archive entries with unrecognized subjects: {unknown}"
