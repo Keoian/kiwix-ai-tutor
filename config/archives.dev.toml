@@ -32,7 +32,7 @@ storage = "hdd"
 
 [[archive]]
 id = "math_se"
-path = 'D:\Kiwix\math.stackexchange.com_en_all_2023-08.zim'
+path = 'D:\Kiwix\math.stackexchange.com_en_all_2026-08.zim'
 tier = 3
 kind = "qa"
 subjects = ["math"]
@@ -48,7 +48,7 @@ storage = "ssd"
 
 [[archive]]
 id = "wikiversity"
-path = 'D:\Kiwix\wikiversity_en_all_maxi_2021-03.zim'
+path = 'D:\Kiwix\wikiversity_en_all_maxi_2026-05.zim'
 tier = 3
 kind = "textbook"
 subjects = []
@@ -56,7 +56,7 @@ storage = "hdd"
 
 [[archive]]
 id = "matheducators_se"
-path = 'D:\Kiwix\matheducators.stackexchange.com_en_all_2023-10.zim'
+path = 'D:\Kiwix\matheducators.stackexchange.com_en_all_2026-08.zim'
 tier = 3
 kind = "qa"
 subjects = ["math"]
@@ -64,7 +64,7 @@ storage = "hdd"
 
 [[archive]]
 id = "physics_se"
-path = 'D:\Kiwix\physics.stackexchange.com_en_all_2023-11.zim'
+path = 'D:\Kiwix\physics.stackexchange.com_en_all_2026-08.zim'
 tier = 3
 kind = "qa"
 subjects = ["physics"]
@@ -72,7 +72,7 @@ storage = "hdd"
 
 [[archive]]
 id = "chemistry_se"
-path = 'D:\Kiwix\chemistry.stackexchange.com_en_all_2023-11.zim'
+path = 'D:\Kiwix\chemistry.stackexchange.com_en_all_2026-07.zim'
 tier = 3
 kind = "qa"
 subjects = ["chemistry"]
@@ -80,7 +80,7 @@ storage = "hdd"
 
 [[archive]]
 id = "biology_se"
-path = 'D:\Kiwix\biology.stackexchange.com_en_all_2023-05.zim'
+path = 'D:\Kiwix\biology.stackexchange.com_en_all_2026-07.zim'
 tier = 3
 kind = "qa"
 subjects = ["biology"]
@@ -88,7 +88,7 @@ storage = "hdd"
 
 [[archive]]
 id = "history_se"
-path = 'D:\Kiwix\history.stackexchange.com_en_all_2023-11.zim'
+path = 'D:\Kiwix\history.stackexchange.com_en_all_2026-08.zim'
 tier = 3
 kind = "qa"
 subjects = ["history"]
@@ -96,7 +96,7 @@ storage = "hdd"
 
 [[archive]]
 id = "english_se"
-path = 'D:\Kiwix\english.stackexchange.com_en_all_2023-10.zim'
+path = 'D:\Kiwix\english.stackexchange.com_en_all_2026-08.zim'
 tier = 3
 kind = "qa"
 subjects = ["english"]
@@ -104,7 +104,7 @@ storage = "hdd"
 
 [[archive]]
 id = "linguistics_se"
-path = 'D:\Kiwix\linguistics.stackexchange.com_en_all_2023-11.zim'
+path = 'D:\Kiwix\linguistics.stackexchange.com_en_all_2026-08.zim'
 tier = 3
 kind = "qa"
 subjects = ["linguistics"]
@@ -112,7 +112,7 @@ storage = "hdd"
 
 [[archive]]
 id = "literature_se"
-path = 'D:\Kiwix\literature.stackexchange.com_en_all_2023-10.zim'
+path = 'D:\Kiwix\literature.stackexchange.com_en_all_2026-08.zim'
 tier = 3
 kind = "qa"
 subjects = ["literature"]
@@ -120,7 +120,7 @@ storage = "hdd"
 
 [[archive]]
 id = "puzzling_se"
-path = 'D:\Kiwix\puzzling.stackexchange.com_en_all_2023-11.zim'
+path = 'D:\Kiwix\puzzling.stackexchange.com_en_all_2026-08.zim'
 tier = 3
 kind = "qa"
 subjects = ["puzzling"]
@@ -143,3 +143,11 @@ kind = "viewer_only"
 subjects = []
 storage = "hdd"
 searchable = false
+
+[[archive]]
+id = "lds_scriptures"
+path = 'D:\Kiwix\lds_scriptures_en_all_2026-09.zim'
+tier = 3
+kind = "textbook"
+subjects = ["religion"]
+storage = "hdd"
