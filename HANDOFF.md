@@ -67,6 +67,10 @@ system prompt gated 11/16 real titles, the same framing under a one-line system 
 lost `ardweeno`. After the change: bare sessions 3/3, lesson sessions 3/3, and the
 no→describe→re-offer→"yeah" branch resolves to a real Arduino answer.
 
+**Owner-verified in a real browser (2026-09-21 evening, after `8fa1653`):** "what is
+ardweeno" → Did you mean Arduino → "No" → describe → "its a computer" → re-offer →
+"yes" → fully sourced Arduino answer. Both branches confirmed live by the owner.
+
 **Prompt wording attempt that was tried and reverted:** telling the model in the
 weak/empty tool text and a system-prompt bullet to ask "Did you mean X?" itself. Live it
 produced the right *shape* with useless content ("did you mean 'ardeweno'?") and, worse,
@@ -88,7 +92,10 @@ dead-ended. Removed; the host owns this now.
 3. **Code blocks get sentence attribution marks** (owner's live lesson: `delay(1000);⚠`
    flagged as an unbacked number inside a ```cpp block). Attribution should skip fenced
    code entirely.
-4. The pre-search on "what is ardweeno" corrected the model's own `ardweno`→`arduino`
+4. A "look it up on the official Arduino website" suggestion was marked ● (backed) because
+   "Arduino" is in the evidence — but the student has no internet. Same attribution pass
+   as item 3.
+5. The pre-search on "what is ardweeno" corrected the model's own `ardweno`→`arduino`
    (run 2 in the owner's browser) and still answered "not found" — unexplained.
 
 ## Owner decisions today (2026-09-21)
