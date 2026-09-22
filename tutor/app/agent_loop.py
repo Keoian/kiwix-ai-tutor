@@ -399,8 +399,8 @@ _NAMES_NUMBERS_SECTION = (
     "must come from the library sources shown in this lesson, or from "
     "what the student themselves said. If the sources do not contain it, "
     "do not supply it from memory: explain the idea in general terms, say "
-    "plainly what you could not find, and end with one thing the student "
-    "could look up next.\n"
+    "plainly what you could not find, and end with one related topic in "
+    "this library the student could ask you about next.\n"
     "- Chatting, encouragement, maths you work out yourself, and "
     "re-explaining material already sourced in this lesson are always "
     "fine.\n"
@@ -409,8 +409,8 @@ _NAMES_NUMBERS_SECTION = (
     "- Example (no source, coldest survived temperature): BAD invents "
     "a name and a number (\"-70C ... Vitus Andronicus\"). GOOD -- "
     "\"I couldn't find a trustworthy record of the lowest temperature "
-    "in the library, so I won't guess a number. Want to look up "
-    "hypothermia or Antarctica?\"\n"
+    "in the library, so I won't guess a number. Want to ask me about "
+    "hypothermia or Antarctica instead?\"\n"
     "- Example (sourced): a passage says the peregrine falcon dives at "
     "about 390 km/h -> GOOD uses the name and the number, because both "
     "are in the source."
@@ -669,9 +669,9 @@ def _not_found_tool_text(
     reminding the model to use only what the sources actually say, and
     an ``empty`` result (no sources at all) is replaced entirely with
     stronger wording that forbids proper names/exact numbers/dates/
-    records from memory and asks for one thing to look up next. ``False``
-    reproduces this function's old text unconditionally, regardless of
-    ``level_after``."""
+    records from memory and asks for one related topic in the library to
+    suggest next. ``False`` reproduces this function's old text
+    unconditionally, regardless of ``level_after``."""
     old_text = (
         "No good match was found in the library for this question, even "
         f"after rewriting the search ({level_after} evidence). Tell the "
@@ -694,7 +694,7 @@ def _not_found_tool_text(
         "The library search found nothing for this. Do not give proper "
         "names, exact numbers, dates or records from memory. Explain the "
         "general idea if you can, say what you couldn't find, and suggest "
-        "one thing to look up next."
+        "one related topic in this library to ask about next."
     )
 
 

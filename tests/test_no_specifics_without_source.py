@@ -137,7 +137,7 @@ def test_not_found_text_empty_is_fully_replaced():
         "The library search found nothing for this. Do not give proper "
         "names, exact numbers, dates or records from memory. Explain the "
         "general idea if you can, say what you couldn't find, and suggest "
-        "one thing to look up next."
+        "one related topic in this library to ask about next."
     )
     assert "No good match was found" not in text
 
