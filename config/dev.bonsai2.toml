@@ -1,0 +1,60 @@
+# Dev config: Ternary Bonsai 2 27B, PTQ1_0 GGUF (5.54 GB), on the dev
+# machine's AMD Radeon Pro 5500M 8 GB (Vulkan build in C:\git\bonsai2).
+# Written 2026-09-21 to match C:\git\bonsai2\llama.cpp\bonsai2-5500m\
+# start-server.ps1 after its default context was cut 32K -> 16K: at 32K
+# the KV-cache allocation fails on this card with a browser open
+# (ErrorOutOfDeviceMemory). Launch either way -- both produce the same
+# server flags:
+#   .\scripts\serve_dev.ps1 -Config config\dev.bonsai2.toml
+#   C:\git\bonsai2\start-server.ps1 -NoVision -- --reasoning-budget 0
+# (the tutor never sends images, so the vision projector is left out.)
+#
+# NOT VERIFIED: fit/speed on the delivery laptop (GTX 1060 Max-Q, 6 GB):
+# the 5.54 GB weights alone do not leave room for a 16K KV cache there.
+# NOT MEASURED: tok/s or lesson wall time with the tutor on this model.
+
+[runtime]
+runtime_dir = 'C:\git\bonsai2'
+model_path = 'C:\git\bonsai2\models\Ternary-Bonsai-2-27B-PTQ1_0.gguf'
+server_binary = "llama.cpp/build/bin/llama-server.exe"
+
+[server]
+host = "127.0.0.1"
+port = 8080
+ctx_size = 16384
+# q8_0 keys + q4_0 values, per the Bonsai 2 launcher: q8_0/q8_0 fits at
+# the cost of decode speed; keys are the precision-sensitive half.
+cache_type_k = "q8_0"
+cache_type_v = "q4_0"
+n_gpu_layers = 99
+parallel = 1
+flash_attn = true
+jinja = true
+# Thinking off: a tutor turn must not spend hundreds of hidden tokens
+# first (same reason as config/dev.toml). Flag form only -- see dev.toml.
+extra_args = ["--reasoning-budget", "0"]
+slots = true
+
+[sampling]
+temperature = 0.7
+top_p = 0.95
+top_k = 20
+
+[app]
+host = "127.0.0.1"
+port = 8420
+data_dir = "data"
+registry_path = "config/archives.dev.toml"
+answer_max_tokens = 2000
+
+[embedding]
+host = "127.0.0.1"
+port = 8081
+model_path = 'C:\git\kiwix-ai-tutor\runtime\models\embedding.gguf'
+dim = 384
+n_gpu_layers = 0
+threads = 4
+ctx_size = 512
+sidecar_dir = "runtime/simplewiki_dense"
+archive_id = "simplewiki"
+enabled = false

@@ -98,6 +98,13 @@ dead-ended. Removed; the host owns this now.
 5. The pre-search on "what is ardweeno" corrected the model's own `ardweno`→`arduino`
    (run 2 in the owner's browser) and still answered "not found" — unexplained.
 
+**Bonsai 2 27B on this machine (2026-09-21, late):** the owner's `C:\gitonsai2` launcher
+failed at 32K context (`ErrorOutOfDeviceMemory` on the KV cache — 5.54 GB weights on the
+8 GB Radeon Pro 5500M with a browser open). Its default is now 16K (edited in
+`C:\gitonsai2\llama.cpponsai2-5500m\start-server.ps1`, uncommitted there), and
+`config/dev.bonsai2.toml` mirrors it (16K, K=q8_0 V=q4_0, `--reasoning-budget 0`); the
+tutor's prompt budget scales from `ctx_size`. Not yet run against the tutor.
+
 ## Owner decisions today (2026-09-21)
 
 - **One student at a time, one offline machine; the server IS the interactive machine.**
